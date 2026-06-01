@@ -58,3 +58,5 @@ assets.cache/
 xcuserdata/
 *.xcuserdatad/
 *.xccurrentversion
+
+/engine/master_prompt*.md
