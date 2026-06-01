@@ -1,0 +1,1 @@
+/usr/bin/c++ -g -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/mm_03_match3_board.dir/examples/mm_03_match3_board.cpp.o -o mm_03_match3_board  libmarkmos.a -framework Cocoa -framework Metal -framework MetalKit -framework QuartzCore -framework CoreVideo

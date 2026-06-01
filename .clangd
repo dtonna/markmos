@@ -1,0 +1,61 @@
+CompileFlags:
+  Compiler: clang
+  Add:
+    - "-Wall"
+    - "-Wextra"
+    - "-Wfloat-equal"
+    - "-I/Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine"
+    - "-I/Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/core"
+    - "-I/Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/math"
+    - "-I/Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/platform"
+    - "-I/Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/renderer"
+    - "-I/Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/renderer/metal"
+    - "-I/Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/renderer/vulkan"
+    - "-I/Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/input"
+    - "-I/Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/include"
+    - "-I/Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/thirdparty/rpmalloc/rpmalloc"
+    - "-I/Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/thirdparty/stb"
+    - "-I/Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/thirdparty/miniaudio"
+    - "-I/Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/thirdparty/imgui"
+    - "-I/Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/thirdparty/simdjson/singleheader"
+    - "-I/Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/thirdparty/metal-cpp"
+    - "-I/Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/thirdparty/metal-cpp/Metal"
+    - "-I/Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/thirdparty/metal-cpp-extensions"
+
+InlayHints:
+  Enabled: true
+  ParameterNames: true
+  DeducedTypes: true
+
+Diagnostics:
+  UnusedIncludes: Strict
+
+Index:
+  Background: Build
+
+---
+If:
+  PathMatch: [".*\\.cpp", ".*\\.cc", ".*\\.hpp"]
+CompileFlags:
+  Add:
+    - "-std=gnu++23"
+    - "-xc++"
+
+---
+If:
+  PathMatch: [".*\\.c"]
+CompileFlags:
+  Add:
+    - "-std=gnu23"
+    - "-xc"
+
+---
+If:
+  PathMatch: [".*\\.mm"]
+CompileFlags:
+  Add:
+    - "-std=gnu++23"
+    - "-xobjective-c++"
+    - "-fobjc-arc"
+    - "-F/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk/System/Library/Frameworks"
+    - "-F/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk/usr/lib"

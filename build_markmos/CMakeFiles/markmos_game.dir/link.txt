@@ -1,0 +1,1 @@
+/usr/bin/c++  -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/markmos_game.dir/entry/mm_game_entry.cpp.o -o markmos_game.app/Contents/MacOS/markmos_game  libmarkmos.a -framework Cocoa -framework Metal -framework MetalKit -framework QuartzCore -framework CoreVideo

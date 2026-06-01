@@ -1,0 +1,1 @@
+/usr/bin/c++ -fsanitize=address -g -g -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names -fsanitize=address CMakeFiles/mm_02_cube_100.dir/examples/mm_02_cube_100.cpp.o -o mm_02_cube_100  libmarkmos.a -framework Cocoa -framework Metal -framework MetalKit -framework QuartzCore -framework CoreVideo

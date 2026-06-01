@@ -1,0 +1,1 @@
+/usr/bin/c++ -fsanitize=address -g -g -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names -fsanitize=address CMakeFiles/mm_01_sprite_10k.dir/examples/mm_01_sprite_10k.cpp.o -o mm_01_sprite_10k  libmarkmos.a -framework Cocoa -framework Metal -framework MetalKit -framework QuartzCore -framework CoreVideo

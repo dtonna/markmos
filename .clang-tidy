@@ -1,0 +1,65 @@
+Checks: >
+  -*,
+  # --------------------------- # 1) Critical bug detection #
+  bugprone-*, -bugprone-floating-point-comparison,
+  clang-analyzer-core.*, clang-analyzer-cplusplus.*, clang-analyzer-deadcode.*,
+  clang-analyzer-security.*, clang-analyzer-unix.*,
+  clang-analyzer-nullability.*, cert-err33-c, misc-redundant-expression,
+  misc-misleading-identifier,
+
+  # --------------------------- # 2) Performance #
+  performance-inefficient-algorithm,
+  performance-inefficient-string-concatenation,
+  performance-inefficient-vector-operation,
+  performance-noexcept-move-constructor, performance-for-range-copy,
+  performance-unnecessary-copy-initialization,
+  performance-unnecessary-value-param, performance-type-promotion-in-math-fn,
+
+  # --------------------------- # 3) Modern C++ #
+  modernize-use-nullptr, modernize-use-override,
+  modernize-use-auto, modernize-loop-convert,
+  modernize-avoid-bind, -modernize-use-using,
+  modernize-deprecated-ios-base-aliases,
+
+  # --------------------------- # 4) Readability #
+  readability-braces-around-statements,
+  readability-identifier-naming, readability-duplicate-include,
+  readability-simplify-boolean-expr, readability-redundant-control-flow,
+  readability-redundant-preprocessor, readability-const-return-type,
+  readability-misplaced-array-index,
+  readability-inconsistent-declaration-parameter-name,
+
+  # --------------------------- # 5) Misc #
+  misc-misplaced-const, misc-unused-using-decls, clang-diagnostic-*
+
+CheckOptions:
+  # Game dev assertions
+  bugprone-assert-side-effect.AssertMacros: >
+    SDL_assert,SDL_assert_release,SDL_assert_paranoid,
+    SDL_assert_always,SDL_COMPILE_TIME_ASSERT
+
+  bugprone-misplaced-widening-cast.CheckImplicitCasts: true
+
+  bugprone-not-null-terminated-result.WantToUseSafeFunctions: false
+
+  # Identifier naming
+  readability-identifier-naming.VariableCase: lower_case
+  readability-identifier-naming.LocalVariableCase: lower_case
+  readability-identifier-naming.ConstantLocalVariableCase: lower_case
+  readability-identifier-naming.ParameterCase: lower_case
+  readability-identifier-naming.ConstantParameterCase: lower_case
+  readability-identifier-naming.ConstantCase: lower_case
+  readability-identifier-naming.EnumCase: lower_case
+  readability-identifier-naming.EnumConstantCase: UPPER_CASE
+  readability-identifier-naming.ConstexprVariableCase: UPPER_CASE
+  readability-identifier-naming.MemberCase: lower_case
+  readability-identifier-naming.ConstantMemberCase: lower_case
+  readability-identifier-naming.ClassConstantCase: UPPER_CASE
+
+  readability-identifier-naming.ParameterIgnoredRegexp: "^[a-z][a-z0-9_]*_?$"
+
+  performance-for-range-copy.WarnOnAllAutoCopies: true
+
+HeaderFilterRegex: ".*"
+FormatStyle: file
+WarningsAsErrors: ""
