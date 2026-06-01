@@ -1,1 +1,0 @@
-/usr/bin/c++ -fsanitize=address -g -g -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names -fsanitize=address CMakeFiles/backend_concept_tests.dir/tests/backend_concept_tests.cpp.o -o backend_concept_tests  libmarkmos.a -framework Cocoa -framework Metal -framework MetalKit -framework QuartzCore -framework CoreVideo
