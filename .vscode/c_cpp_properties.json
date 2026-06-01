@@ -1,0 +1,75 @@
+{
+    "configurations": [
+        {
+            "name": "Android",
+            "includePath": [
+                "${workspaceFolder}/engine",
+                "${workspaceFolder}/engine/app",
+                "${workspaceFolder}/engine/audio",
+                "${workspaceFolder}/engine/core",
+                "${workspaceFolder}/engine/math",
+                "${workspaceFolder}/engine/game",
+                "${workspaceFolder}/engine/input",
+                "${workspaceFolder}/engine/platform",
+                "${workspaceFolder}/engine/render",
+                "${workspaceFolder}/engine/rhi",
+                "${workspaceFolder}/engine/shaders",
+                "${workspaceFolder}/engine/include",
+                "${workspaceFolder}/thirdparty/rpmalloc/rpmalloc",
+                "${workspaceFolder}/thirdparty/stb",
+                "${workspaceFolder}/thirdparty/simdjson/singleheader",
+                "${workspaceFolder}/thirdparty/imgui",
+                "${workspaceFolder}/thirdparty/miniaudio",
+                "${workspaceFolder}/thirdparty/vk-bootstrap",
+                "${workspaceFolder}/thirdparty/VMA/include",
+                "${workspaceFolder}/games",
+                "${workspaceFolder}/platforms",
+                "${workspaceFolder}/**",
+                "/Users/noppadolanuroje/Library/Android/sdk/ndk/29.0.14206865/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include",
+                "/Users/noppadolanuroje/Library/Android/sdk/ndk/29.0.14206865/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/include/c++/v1"
+            ],
+            "defines": [
+                "__ANDROID__"
+            ],
+            "compilerPath": "/Users/noppadolanuroje/Library/Android/sdk/ndk/29.0.14206865/toolchains/llvm/prebuilt/darwin-x86_64/bin/clang",
+            "cStandard": "c23",
+            "cppStandard": "c++23",
+            "intelliSenseMode": "linux-clang-x64"
+        },
+        {
+            "name": "Mac",
+            "includePath": [
+                "${workspaceFolder}/engine",
+                "${workspaceFolder}/engine/app",
+                "${workspaceFolder}/engine/audio",
+                "${workspaceFolder}/engine/core",
+                "${workspaceFolder}/engine/math",
+                "${workspaceFolder}/engine/game",
+                "${workspaceFolder}/engine/input",
+                "${workspaceFolder}/engine/platform",
+                "${workspaceFolder}/engine/render",
+                "${workspaceFolder}/engine/rhi",
+                "${workspaceFolder}/engine/shaders",
+                "${workspaceFolder}/thirdparty/rpmalloc/rpmalloc",
+                "${workspaceFolder}/thirdparty/stb",
+                "${workspaceFolder}/thirdparty/simdjson/singleheader",
+                "${workspaceFolder}/thirdparty/imgui",
+                "${workspaceFolder}/thirdparty/miniaudio",
+                "${workspaceFolder}/thirdparty/metal-cpp",
+                "${workspaceFolder}/games",
+                "${workspaceFolder}/platforms",
+                "${workspaceFolder}/**"
+            ],
+            "defines": [],
+            "macFrameworkPath": [
+                "/System/Library/Frameworks",
+                "/Library/Frameworks"
+            ],
+            "compilerPath": "/usr/bin/clang",
+            "cStandard": "c23",
+            "cppStandard": "c++23",
+            "intelliSenseMode": "macos-clang-x64"
+        }
+    ],
+    "version": 4
+}

@@ -1,0 +1,21 @@
+dependencies: \
+  /Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/examples/mm_01_sprite_10k.cpp \
+  /Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/examples/../rhi/mm_rhi_concept.hpp \
+  /Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/examples/../rhi/../core/mm_handle.hpp \
+  /Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/examples/../rhi/../core/mm_expected.hpp \
+  /Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/examples/../render/mm_sprite_batch.hpp \
+  /Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/examples/../render/../rhi/mm_rhi_concept.hpp \
+  /Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/examples/../render/../core/mm_handle.hpp \
+  /Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/examples/../render/../core/mm_arena.hpp \
+  /Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/examples/../render/mm_sort_key.hpp \
+  /Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/examples/../render/mm_sprite.hpp \
+  /Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/examples/../render/mm_shader_registry.hpp \
+  /Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/examples/../render/mm_shaders.hpp \
+  /Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/examples/../core/mm_arena.hpp \
+  /Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/examples/../game/mm_camera_trauma.hpp \
+  /Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/examples/../app/mm_app.hpp \
+  /Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/examples/../app/../input/mm_input_event.hpp \
+  /Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/examples/../app/../input/mm_input_state.hpp \
+  /Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/examples/../app/../input/mm_touch_gesture.hpp \
+  /Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/examples/../rhi/mm_metal_backend.hpp \
+  /Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/examples/../rhi/../core/mm_slotmap.hpp

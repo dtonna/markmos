@@ -1,0 +1,32 @@
+dependencies: \
+  /Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/examples/mm_04_block_puzzle.cpp \
+  /Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/examples/../game/mm_board_grid.hpp \
+  /Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/examples/../game/mm_game_state.hpp \
+  /Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/examples/../game/../input/mm_input_state.hpp \
+  /Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/examples/../game/../input/mm_input_event.hpp \
+  /Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/examples/../game/../input/mm_touch_gesture.hpp \
+  /Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/examples/../game/mm_tween_pool.hpp \
+  /Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/examples/../game/../core/mm_handle.hpp \
+  /Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/examples/../game/../math/mm_math.h \
+  /Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/core/mm_types.h \
+  /Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/examples/../game/mm_particle_pool.hpp \
+  /Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/examples/../game/mm_camera_trauma.hpp \
+  /Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/examples/../input/mm_input_state.hpp \
+  /Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/examples/../render/mm_sprite_batch.hpp \
+  /Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/examples/../render/../rhi/mm_rhi_concept.hpp \
+  /Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/examples/../render/../rhi/../core/mm_handle.hpp \
+  /Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/examples/../render/../rhi/../core/mm_expected.hpp \
+  /Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/examples/../render/../core/mm_handle.hpp \
+  /Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/examples/../render/../core/mm_arena.hpp \
+  /Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/examples/../render/mm_sort_key.hpp \
+  /Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/examples/../render/mm_sprite.hpp \
+  /Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/examples/../render/mm_shader_registry.hpp \
+  /Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/examples/../render/mm_shaders.hpp \
+  /Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/examples/../app/mm_app.hpp \
+  /Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/examples/../app/../input/mm_input_event.hpp \
+  /Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/examples/../app/../input/mm_input_state.hpp \
+  /Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/examples/../rhi/mm_metal_backend.hpp \
+  /Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/examples/../rhi/../core/mm_expected.hpp \
+  /Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/examples/../rhi/../core/mm_handle.hpp \
+  /Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/examples/../rhi/../core/mm_slotmap.hpp \
+  /Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/examples/../rhi/mm_rhi_concept.hpp

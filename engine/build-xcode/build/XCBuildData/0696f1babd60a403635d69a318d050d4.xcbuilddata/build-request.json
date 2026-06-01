@@ -1,0 +1,94 @@
+{
+  "buildCommand" : {
+    "command" : "prepareForIndexing",
+    "enableIndexBuildArena" : false,
+    "targets" : null
+  },
+  "configuredTargets" : [
+    {
+      "guid" : "0746cfe8858be1a2b88b4f69087c842375c82b019cd00aa670bc89254757f269"
+    },
+    {
+      "guid" : "0746cfe8858be1a2b88b4f69087c8423d3ad1d6b9711737c8903b6757c2ae0e5"
+    },
+    {
+      "guid" : "0746cfe8858be1a2b88b4f69087c8423d6249b615194cc91d5d777aa38c9143f"
+    },
+    {
+      "guid" : "0746cfe8858be1a2b88b4f69087c84237ea2d2e06006b1a9857ce864e2ce50c1"
+    },
+    {
+      "guid" : "0746cfe8858be1a2b88b4f69087c8423d8d757d64dccc6c02b12d964e42709c5"
+    },
+    {
+      "guid" : "0746cfe8858be1a2b88b4f69087c84230e1d9690ec74f17f3ec78e9bb8bcd6b4"
+    },
+    {
+      "guid" : "0746cfe8858be1a2b88b4f69087c8423f89b71fc3ef082942b0f12d3d3ae7f3b"
+    },
+    {
+      "guid" : "0746cfe8858be1a2b88b4f69087c8423efa6373faa753b4689d125056610c5b4"
+    },
+    {
+      "guid" : "0746cfe8858be1a2b88b4f69087c84239f4289105456b7600f88dab728cf5c77"
+    },
+    {
+      "guid" : "0746cfe8858be1a2b88b4f69087c84234ca142c770edca9e70d728623f75363e"
+    },
+    {
+      "guid" : "0746cfe8858be1a2b88b4f69087c84238a12c610fe5ea91d2888d669386d5bc2"
+    },
+    {
+      "guid" : "0746cfe8858be1a2b88b4f69087c84239b2dec434df7cbf2e029b631aaa554d0"
+    }
+  ],
+  "containerPath" : "/Users/noppadolanuroje/Documents/Projects/engines2/markmos/engine/build-xcode/markmos.xcodeproj",
+  "continueBuildingAfterErrors" : true,
+  "dependencyScope" : "workspace",
+  "enableIndexBuildArena" : false,
+  "hideShellScriptEnvironment" : false,
+  "parameters" : {
+    "action" : "build",
+    "activeArchitecture" : "arm64",
+    "activeRunDestination" : {
+      "disableOnlyActiveArch" : false,
+      "hostTargetedPlatform" : null,
+      "platform" : "macosx",
+      "sdk" : "macosx26.5",
+      "sdkVariant" : "macos",
+      "supportedArchitectures" : [
+        "arm64e",
+        "arm64",
+        "x86_64"
+      ],
+      "targetArchitecture" : "arm64"
+    },
+    "arenaInfo" : {
+      "buildIntermediatesPath" : "",
+      "buildProductsPath" : "",
+      "derivedDataPath" : "/Users/noppadolanuroje/Library/Developer/Xcode/DerivedData",
+      "indexDataStoreFolderPath" : "/Users/noppadolanuroje/Library/Developer/Xcode/DerivedData/markmos-efowpckyknauerdlweqdttqnkdcj/Index.noindex/DataStore",
+      "indexEnableDataStore" : true,
+      "indexPCHPath" : "/Users/noppadolanuroje/Library/Developer/Xcode/DerivedData/markmos-efowpckyknauerdlweqdttqnkdcj/Index.noindex/PrecompiledHeaders",
+      "pchPath" : ""
+    },
+    "configurationName" : "Debug",
+    "overrides" : {
+      "synthesized" : {
+        "table" : {
+          "ENABLE_PREVIEWS" : "NO",
+          "ENABLE_XOJIT_PREVIEWS" : "NO",
+          "ONLY_ACTIVE_ARCH" : "YES",
+          "TOOLCHAINS" : "com.apple.dt.toolchain.Metal.32023.883 $(inherited)"
+        }
+      }
+    }
+  },
+  "qos" : "default",
+  "schemeCommand" : "launch",
+  "showNonLoggedProgress" : true,
+  "useDryRun" : true,
+  "useImplicitDependencies" : true,
+  "useLegacyBuildLocations" : false,
+  "useParallelTargets" : true
+}

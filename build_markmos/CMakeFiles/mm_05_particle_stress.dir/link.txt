@@ -1,0 +1,1 @@
+/usr/bin/c++  -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/mm_05_particle_stress.dir/examples/mm_05_particle_stress.cpp.o -o mm_05_particle_stress  libmarkmos.a -framework Cocoa -framework Metal -framework MetalKit -framework QuartzCore -framework CoreVideo
