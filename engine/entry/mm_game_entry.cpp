@@ -461,10 +461,10 @@ static void build_game_over() noexcept {
         m.label(cx - 120.0f, cy - 10.0f, buf, 0xFFFFFFFF, 1.2f);
     }
 
-    uint16_t btn_restart = m.button(cx - 95.0f, cy + 40.0f, 190.0f, 44.0f, "Restart", 0xFF4488FF, 0xFFFFFFFF, on_restart_click);
+    uint16_t btn_restart      = m.button(cx - 95.0f, cy + 40.0f, 190.0f, 44.0f, "Restart", 0xFF4488FF, 0xFFFFFFFF, on_restart_click);
     m.pool[btn_restart].scale = 1.0f;
-    uint16_t btn_menu = m.button(cx - 120.0f, cy + 100.0f, 240.0f, 44.0f, "Main Menu", 0xFF554466, 0xFFFFFFFF, on_quit_click);
-    m.pool[btn_menu].scale = 1.0f;
+    uint16_t btn_menu         = m.button(cx - 120.0f, cy + 100.0f, 240.0f, 44.0f, "Main Menu", 0xFF554466, 0xFFFFFFFF, on_quit_click);
+    m.pool[btn_menu].scale    = 1.0f;
 }
 
 // ─── Title screen ─────────────────────────────────────────────────
@@ -480,14 +480,13 @@ static void build_ui_demo() noexcept {
     m.label(cx, cy, "Markmos UI Demo", 0xFFFFAAFF, 1.5f);
     cy += 50.0f;
     // Thai font test
-    m.label(cx, cy + 28.0f, "ภาษาไทย 123", 0xFF88FF88, 1.0f);
-    cy += 50.0f;
+    m.label(cx, cy + 28.0f, "ภาษาไทยสู้มื้อ", 0xFF88FF88, 1.0f);
+    cy                     += 50.0f;
 
     // Button
-    uint16_t btn_play = m.button(cx, cy, 240.0f, 50.0f, "Play Game", 0xFF4488FF, 0xFFFFFFFF, on_play_click);
-    m.pool[btn_play].scale = 1.0f;
-    cy += gap + 4.0f;
-
+    uint16_t btn_play       = m.button(cx, cy, 240.0f, 50.0f, "เล่นเกมกู", 0xFF4488FF, 0xFFFFFFFF, on_play_click);
+    m.pool[btn_play].scale  = 1.0f;
+    cy                     += gap + 4.0f;
     // Toggle (switch)
     m.toggle(cx, cy, 48.0f, 28.0f, "", 0xFF44FF44, 0xFF444444, 0, false, on_toggle_sound);
     m.label(cx + 56.0f, cy + 27.0f, "Sound ON/OFF", 0xFFCCCCCC, 1.0f);
@@ -505,15 +504,15 @@ static void build_ui_demo() noexcept {
 
     // TextField
     m.label(cx, cy + 14.0f, "Player Name", 0xFFAAAAAA, 1.0f);
-    cy += 34.0f;
-    uint16_t txt_name = m.textfield(cx, cy, 220.0f, 32.0f, "Player1", 0x33555555, 0xFFFFFFFF);
-    m.pool[txt_name].scale = 0.6f;
-    cy += gap + 26.0f;
+    cy                     += 34.0f;
+    uint16_t txt_name       = m.textfield(cx, cy, 220.0f, 32.0f, "Player1", 0x33555555, 0xFFFFFFFF);
+    m.pool[txt_name].scale  = 0.6f;
+    cy                     += gap + 26.0f;
 
     // Buttons row: layout demo
-    float    bx         = cx;
+    float bx                = cx;
     m.label(bx, cy - 14.0f, "Layout:", 0xFF888888, 1.0f);
-    uint16_t btn_panel  = m.panel(bx, cy, 440.0f, 50.0f, 0x22444444);
+    uint16_t btn_panel = m.panel(bx, cy, 440.0f, 50.0f, 0x22444444);
     m.set_layout(btn_panel, 1, 8, 8);
     m.button(0, 0, 100.0f, 34.0f, "One", 0xFF554466, 0xFFFFFFFF, nullptr, btn_panel);
     m.button(0, 0, 100.0f, 34.0f, "Two", 0xFF665577, 0xFFFFFFFF, nullptr, btn_panel);
