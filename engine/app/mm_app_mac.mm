@@ -18,6 +18,7 @@
 #import <QuartzCore/CAMetalLayer.h>
 #import <Metal/Metal.h>
 
+#include <cstdlib>
 
 // Engine globals (accessible to user code via extern)
 MetalBackend*    g_backend       = nullptr;
@@ -349,6 +350,10 @@ static CVReturn displayCallback(CVDisplayLinkRef displayLink,
     delete g_input_state;
 }
 @end
+
+void app_quit() noexcept {
+    exit(0);
+}
 
 int main(int argc, const char* argv[]) {
     @autoreleasepool {

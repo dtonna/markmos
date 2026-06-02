@@ -25,6 +25,10 @@ InputState*      g_input_state   = nullptr;
 // App callbacks (set by main() from user's markmos_main())
 static AppCallbacks g_callbacks{};
 
+void app_quit() noexcept {
+    // iOS does not support programmatic app termination
+}
+
 @class MetalView;
 
 @interface AppDelegate : UIResponder <UIApplicationDelegate>

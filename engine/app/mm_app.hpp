@@ -45,5 +45,8 @@ struct AppCallbacks {
     void (*cleanup)(void* user_data);
 };
 
+// Request a clean app exit (platform-specific; may be a no-op on mobile)
+extern void app_quit() noexcept;
+
 // User must define this — returns AppCallbacks for the platform to invoke
 extern "C" AppCallbacks markmos_main(int argc, char* argv[]);
