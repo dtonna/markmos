@@ -14,11 +14,14 @@
 #include "../input/mm_input_state.hpp"
 #include "../core/mm_vfs.hpp"
 
+#include "../core/mm_log.hpp"
+
 #import <Cocoa/Cocoa.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <Metal/Metal.h>
 
 #include <cstdlib>
+#include <unistd.h>
 
 // Engine globals (accessible to user code via extern)
 MetalBackend*    g_backend       = nullptr;
@@ -64,46 +67,48 @@ static KeyCode keycode_from_ns(uint16_t kc) noexcept {
 @interface AppDelegate : NSObject <NSApplicationDelegate>
 @property (strong) NSWindow* window;
 @end
+//
+//static CVReturn displayCallback(CVDisplayLinkRef, const CVTimeStamp*, const CVTimeStamp*,
+//                                 CVOptionFlags, CVOptionFlags*, void*);
 
-static CVReturn displayCallback(CVDisplayLinkRef, const CVTimeStamp*, const CVTimeStamp*,
-                                 CVOptionFlags, CVOptionFlags*, void*);
-
-@interface MetalView : NSView
-- (void)tick;
-- (void)setFrameSize:(NSSize)size;
+@interface MetalView : NSView {
+    CADisplayLink* _displayLink;
+    CFTimeInterval _lastFrameTime;
+}
+//- (void)tick;
+- (void)renderLoopStep:(CADisplayLink *)sender;
 @end
 
 @implementation MetalView
+
+- (CALayer *)makeBackingLayer {
+    CAMetalLayer* metalLayer = [CAMetalLayer layer];
+    metalLayer.device = MTLCreateSystemDefaultDevice();
+    metalLayer.pixelFormat = MTLPixelFormatBGRA8Unorm_sRGB;
+    metalLayer.maximumDrawableCount = 3;
+    return metalLayer;
+}
 
 - (instancetype)initWithFrame:(NSRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
         self.wantsLayer = YES;
         self.allowedTouchTypes = NSTouchTypeMaskDirect;
+        _lastFrameTime = CACurrentMediaTime();
+
+        // 1. Setup system input boundaries
         NSTrackingArea* tracking = [[NSTrackingArea alloc]
             initWithRect:self.bounds
-                options:NSTrackingMouseMoved | NSTrackingActiveInActiveApp | NSTrackingInVisibleRect
-                  owner:self
-               userInfo:nil];
+                 options:NSTrackingMouseMoved | NSTrackingActiveInActiveApp | NSTrackingInVisibleRect
+                   owner:self
+                userInfo:nil];
         [self addTrackingArea:tracking];
 
-        // On macOS 10.14+ NSView may create an NSViewBackingLayer internally.
-        // Ensure we have a CAMetalLayer by replacing it if needed.
-        if (![self.layer isKindOfClass:[CAMetalLayer class]]) {
-            CAMetalLayer* metalLayer = [CAMetalLayer layer];
-            metalLayer.device = MTLCreateSystemDefaultDevice();
-            metalLayer.pixelFormat = MTLPixelFormatBGRA8Unorm_sRGB;
-            metalLayer.maximumDrawableCount = 3;
-            self.layer = metalLayer;
-        }
-
+        // 2. Initialize graphics systems
         CAMetalLayer* layer = (CAMetalLayer*)self.layer;
-
-        // Init engine systems
         g_backend = new MetalBackend();
-        auto init_ret = g_backend->init((__bridge void*)layer);
-        if (!init_ret) {
-            return self;
+        if (!g_backend->init((__bridge void*)layer)) {
+            return nil;
         }
 
         g_input_queue = new InputEventQueue();
@@ -111,53 +116,92 @@ static CVReturn displayCallback(CVDisplayLinkRef, const CVTimeStamp*, const CVTi
         g_input_state->init();
         g_audio_system.init();
 
-        // Init VFS with bundle resource path and documents directory
+        // 3. Setup VFS and environment paths
         NSString* bundlePath = [[NSBundle mainBundle] resourcePath];
-        NSArray* docPaths = NSSearchPathForDirectoriesInDomains(
-            NSDocumentDirectory, NSUserDomainMask, YES);
-        g_vfs.init([bundlePath UTF8String],
-                   docPaths.count > 0 ? [docPaths[0] UTF8String] : nullptr);
-
-        // Set CWD to bundle Resources so miniaudio can find sfx/hit.wav etc.
+        NSArray* docPaths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+        g_vfs.init([bundlePath UTF8String], docPaths.count > 0 ? [docPaths[0] UTF8String] : nullptr);
         chdir([bundlePath UTF8String]);
-
-        // User init callback
+        
+//        char cwd[512];
+//        getcwd(cwd, sizeof(cwd));
+//        NSLog(@"[app] cwd = %s", cwd);
+//        NSLog(@"[app] bundlePath = %@", bundlePath);
+//        
+//        NSArray* contents = [[NSFileManager defaultManager]
+//            contentsOfDirectoryAtPath:bundlePath error:nil];
+//        NSLog(@"[app] bundle contents = %@", contents);
+        
         if (g_callbacks.init) {
             g_callbacks.init(g_callbacks.user_data);
         }
-
-        // Initialize renderer with actual window size
-        if (g_callbacks.resize) {
-            g_callbacks.resize(g_callbacks.user_data,
-                static_cast<uint32_t>(frame.size.width),
-                static_cast<uint32_t>(frame.size.height));
-        }
-
-        // Set initial Metal drawable size to pixel dimensions
-        CGFloat scale = self.window ? self.window.backingScaleFactor : 1.0f;
-        g_content_scale = static_cast<float>(scale);
-        g_backend->resize(static_cast<uint32_t>(frame.size.width * scale),
-                          static_cast<uint32_t>(frame.size.height * scale));
-
-        // Start display link
-        #pragma clang diagnostic push
-        #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-        CVDisplayLinkRef displayLink;
-        CVDisplayLinkCreateWithActiveCGDisplays(&displayLink);
-        CVDisplayLinkSetOutputCallback(displayLink, &displayCallback, (__bridge void*)self);
-        CVDisplayLinkStart(displayLink);
-        #pragma clang diagnostic pop
     }
     return self;
 }
 
-- (void)viewDidEndLiveResize {
-    [super viewDidEndLiveResize];
+// 2. Fixed Retina Scaling Bug: Track when window context becomes valid
+- (void)viewDidMoveToWindow {
+    [super viewDidMoveToWindow];
+    
+    if (self.window) {
+        [self updateViewportDimensions];
+        
+        /// FIX 2: Modern macOS 15+ NSDisplayLink creation
+        _displayLink = [self displayLinkWithTarget:self selector:@selector(renderLoopStep:)];
+        // 2. FIX: You MUST unpause the link explicitly on macOS to kick off the frame loop!
+                
+        //_displayLink. = NO;
+                
+        // 3. Optional but highly recommended: Keep ticking during live window resizing/menu navigation
+        [_displayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+                
+        // FIX 3: Automatically capture focus so keyboard events register immediately without clicking
+        [self.window makeFirstResponder:self];
+    } else {
+        // Safe tear down if view gets disconnected
+        [_displayLink invalidate];
+        _displayLink = nil;
+    }
+}
+
+- (void)renderLoopStep:(CADisplayLink *)sender {
+    @autoreleasepool {
+        CFTimeInterval currentTime = CACurrentMediaTime();
+        float dt = static_cast<float>(currentTime - _lastFrameTime);
+        _lastFrameTime = currentTime;
+        
+        if (dt > 0.1f) dt = 0.1f; // Cap frame hiccups
+        
+        // Process input
+        if (g_input_state && g_input_queue) {
+            g_input_state->process(*g_input_queue, dt);
+        }
+        
+        g_audio_system.update(dt);
+        
+        if (!g_backend) return;
+        if (!g_backend->begin_frame()) {
+            return;
+        }
+        if (g_callbacks.frame) {
+            g_callbacks.frame(g_callbacks.user_data, dt, *g_input_state);
+        }
+        g_backend->end_frame();
+    }
+}
+
+- (void)updateViewportDimensions {
     NSSize size = self.bounds.size;
-    CGFloat scale = self.window.backingScaleFactor;
+    CGFloat scale = self.window ? self.window.backingScaleFactor : 1.0f;
     g_content_scale = static_cast<float>(scale);
+    
     uint32_t w = static_cast<uint32_t>(size.width * scale);
     uint32_t h = static_cast<uint32_t>(size.height * scale);
+    
+    // Explicitly update matching backing store dimensions
+    CAMetalLayer* layer = (CAMetalLayer*)self.layer;
+    layer.drawableSize = CGSizeMake(w, h);
+    layer.contentsScale = scale;
+
     if (g_backend) {
         g_backend->resize(w, h);
     }
@@ -168,49 +212,98 @@ static CVReturn displayCallback(CVDisplayLinkRef, const CVTimeStamp*, const CVTi
     }
 }
 
+
+- (void)viewDidEndLiveResize {
+    [super viewDidEndLiveResize];
+    [self updateViewportDimensions];
+}
+
 - (void)setFrameSize:(NSSize)size {
     [super setFrameSize:size];
+    [self updateViewportDimensions];
 }
+
+- (BOOL)acceptsFirstResponder { return YES; }
 
 - (void)dealloc {
     [super dealloc];
 }
 
-static CVReturn displayCallback(CVDisplayLinkRef displayLink,
-                                 const CVTimeStamp* now,
-                                 const CVTimeStamp* outputTime,
-                                 CVOptionFlags flagsIn,
-                                 CVOptionFlags* flagsOut,
-                                 void* context) {
-    (void)displayLink; (void)now; (void)outputTime; (void)flagsIn; (void)flagsOut;
-    @autoreleasepool {
-        [(__bridge MetalView*)context tick];
+// 4. Safe Loop Invalidation: Clean up engine references
+- (void)removeFromSuperview {
+    // 6. Modern invalidation pass
+    if (_displayLink) {
+        [_displayLink invalidate];
+        _displayLink = nil;
     }
-    return kCVReturnSuccess;
+    
+    if (g_callbacks.cleanup) g_callbacks.cleanup(g_callbacks.user_data);
+        
+    g_audio_system.shutdown();
+    
+//    if (g_backend) {
+//        g_backend->shutdown();
+//        delete g_backend;
+//        
+//    }
+    delete g_backend;       g_backend = nullptr;
+    delete g_input_queue;   g_input_queue = nullptr;
+    delete g_input_state;   g_input_state = nullptr;
+    
+    [super removeFromSuperview];
 }
-
-- (void)tick {
-    float dt = 1.0f / 60.0f;
-
-    // Process input
-    if (g_input_state && g_input_queue) {
-        g_input_state->process(*g_input_queue, dt);
-    }
-
-    g_audio_system.update(dt);
-
-    if (!g_backend) return;
-
-    auto begin_ret = g_backend->begin_frame();
-    if (!begin_ret) {
-        return;
-    }
-
-    // User frame callback — game logic + draw calls (manages its own pass)
-    if (g_callbacks.frame) {
-        g_callbacks.frame(g_callbacks.user_data, dt, *g_input_state);
-    }
-}
+//
+//static CVReturn displayCallback(CVDisplayLinkRef displayLink,
+//                                const CVTimeStamp* now,
+//                                const CVTimeStamp* outputTime,
+//                                CVOptionFlags flagsIn,
+//                                CVOptionFlags* flagsOut,
+//                                void* context) {
+//    (void)displayLink; (void)now; (void)outputTime; (void)flagsIn; (void)flagsOut;
+//    
+//    // 5. Thread Safety Fix: Leap safely back to AppKit main thread loop
+//    dispatch_async(dispatch_get_main_queue(), ^{
+//        @autoreleasepool {
+//            [(__bridge MetalView*)context tick];
+//        }
+//    });
+//    return kCVReturnSuccess;
+//}
+//
+//- (void)tick {
+//    // 6. High-Precision Frame Timing (No longer hardcoded 1/60s)
+//    CFTimeInterval currentTime = CACurrentMediaTime();
+//    float dt = static_cast<float>(currentTime - _lastFrameTime);
+//    _lastFrameTime = currentTime;
+//    
+//    // Smooth over extreme outliers (e.g. system freezes or window drags)
+//    if (dt > 0.1f) dt = 0.1f;
+//    
+//    // Process internal input mutations
+//    if (g_input_state && g_input_queue) {
+//        g_input_state->process(*g_input_queue, dt);
+//    }
+//    
+//    MM_LOG("tick update audio");
+//    g_audio_system.update(dt);
+//    
+//    if (!g_backend) return;
+//    
+//    MM_LOG("tick begin frame");
+//    auto begin_ret = g_backend->begin_frame();
+//    if (!begin_ret) {
+//        return;
+//    }
+//    
+//    MM_LOG("tick callbacks frame");
+//    // 7. Fixed Truncation: Clean execution flow and terminal frame presentation passes
+//    if (g_callbacks.frame) {
+//        g_callbacks.frame(g_callbacks.user_data, dt, *g_input_state);
+//    }
+//    
+//    MM_LOG("tick end frame");
+//    g_backend->end_frame(); // Signal your RHI to swap buffers and present command encoders
+//}
 
 // Mouse → InputEventQueue (finger 0)
 // macOS origin is bottom-left; engine origin is top-left → flip Y
@@ -340,6 +433,10 @@ static CVReturn displayCallback(CVDisplayLinkRef displayLink,
 }
 
 - (void)applicationWillTerminate:(NSNotification*)notification {
+//    MetalView* view = (MetalView*)self.window.contentView;
+//    if ([view isKindOfClass:[MetalView class]]) {
+//        [view stopDisplayLink];
+//    }
     if (g_callbacks.cleanup) g_callbacks.cleanup(g_callbacks.user_data);
     g_audio_system.shutdown();
     if (g_backend) {

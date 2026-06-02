@@ -34,7 +34,7 @@ set(THIRDPARTY_DIR "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty")
 set(RPMALLOC_SRCS
     "${THIRDPARTY_DIR}/rpmalloc/rpmalloc/rpmalloc.c"
 )
-set(RPMALLOC_DEFS ENABLE_PRELOAD=0 RPMALLOC_CONFIGURED=1)
+set(RPMALLOC_DEFS ENABLE_PRELOAD=0 ENABLE_OVERRIDE=0 RPMALLOC_CONFIGURED=1)
 
 # miniaudio — compiled as part of engine (miniaudio.c = implementation)
 set(MINIAUDIO_SRCS
@@ -186,6 +186,7 @@ elseif(PLATFORM_ANDROID)
     list(APPEND ENGINE_SOURCES
         rhi/mm_rhi_concept.hpp
         rhi/mm_vulkan_backend.hpp
+        rhi/mm_vma_impl.cpp
         app/mm_app_android.cpp
         thirdparty/vk-bootstrap/VkBootstrap.h
         thirdparty/vk-bootstrap/VkBootstrap.cpp
@@ -262,11 +263,9 @@ elseif(PLATFORM_MACOS)
         "-framework CoreVideo"
     )
 elseif(PLATFORM_ANDROID)
-    target_compile_definitions(markmos PUBLIC TARGET_ANDROID USE_VULKAN_BACKEND)
+    target_compile_definitions(markmos PUBLIC TARGET_ANDROID USE_VULKAN_BACKEND VK_USE_PLATFORM_ANDROID_KHR)
     target_include_directories(markmos PRIVATE
         ${ANDROID_NDK}/sources/android/native_app_glue)
-    target_sources(markmos PRIVATE
-        ${ANDROID_NDK}/sources/android/native_app_glue/android_native_app_glue.c)
     target_link_libraries(markmos PUBLIC
         android
         nativewindow
@@ -348,7 +347,15 @@ option(BUILD_GAME "Build production game entry" ON)
 if(BUILD_GAME)
     file(GLOB_RECURSE GAME_RESOURCES "${CMAKE_CURRENT_SOURCE_DIR}/assets/*")
 
-    add_executable(markmos_game entry/mm_game_entry.cpp ${GAME_RESOURCES})
+    if(PLATFORM_ANDROID)
+        # Android: NativeActivity requires a shared library, not an executable
+        add_library(markmos_game SHARED
+            entry/mm_game_entry.cpp
+            ${ANDROID_NDK}/sources/android/native_app_glue/android_native_app_glue.c
+            ${GAME_RESOURCES})
+    else()
+        add_executable(markmos_game entry/mm_game_entry.cpp ${GAME_RESOURCES})
+    endif()
 
     if(GLSLAngValidator_EXECUTABLE AND PLATFORM_ANDROID)
         add_dependencies(markmos_game shader_embed)
@@ -361,6 +368,12 @@ if(BUILD_GAME)
     endif()
 
     target_link_libraries(markmos_game PRIVATE markmos)
+
+    if(PLATFORM_ANDROID)
+        # Fix 16 KB page size compatibility warning for Android 15
+        target_link_options(markmos_game PRIVATE "-Wl,-z,max-page-size=16384")
+    endif()
+
     if(PLATFORM_MACOS)
         set_source_files_properties(entry/mm_game_entry.cpp PROPERTIES COMPILE_FLAGS "-x objective-c++")
         set_target_properties(markmos_game PROPERTIES

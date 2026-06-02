@@ -21,7 +21,7 @@
 //   - Single array per frame, allocated in FrameArena
 //   - Post-sort by SortKey before execution
 
-static constexpr uint32_t MAX_COMMANDS = 65536;
+static constexpr uint32_t MAX_COMMANDS = 4096;
 
 enum class CmdType : uint8_t {
     Draw                = 0,
@@ -40,6 +40,7 @@ enum class CmdType : uint8_t {
     CopyTexture         = 13,
     BindFragmentTexture = 14,
     BindFragmentSampler = 15,
+    BindUniformBuffer   = 16,
 };
 
 struct CmdDraw {
@@ -112,6 +113,11 @@ struct CmdBindFragmentSampler {
     uint32_t      index;
 };
 
+struct CmdBindUniformBuffer {
+    BufferHandle buffer;
+    uint32_t     binding;
+};
+
 struct Command {
     CmdType type;
     SortKey sort_key;
@@ -130,6 +136,7 @@ struct Command {
         CmdCopyBuffer          copy_buffer;
         CmdBindFragmentTexture bind_frag_tex;
         CmdBindFragmentSampler bind_frag_samp;
+        CmdBindUniformBuffer   bind_ubo;
     } data;
 
     Command() noexcept : type(static_cast<CmdType>(0)), sort_key{}, data{} {}
@@ -212,11 +219,11 @@ struct RenderGraph {
     }
 
     void begin_pass(const PassDesc &pass) noexcept {
-        auto &cmd                = add(CmdType::BeginPass);
+        auto &cmd                = add(CmdType::BeginPass, SortKey::min());
         cmd.data.begin_pass.pass = pass;
     }
 
-    void end_pass() noexcept { add(CmdType::EndPass); }
+    void end_pass() noexcept { add(CmdType::EndPass, SortKey::max()); }
 
     void bind_fragment_texture(TextureHandle texture, uint32_t index, SortKey key = {}) noexcept {
         auto &cmd                      = add(CmdType::BindFragmentTexture, key);
@@ -228,6 +235,12 @@ struct RenderGraph {
         auto &cmd                       = add(CmdType::BindFragmentSampler, key);
         cmd.data.bind_frag_samp.sampler = sampler;
         cmd.data.bind_frag_samp.index   = index;
+    }
+
+    void bind_uniform_buffer(BufferHandle buffer, uint32_t binding, SortKey key = {}) noexcept {
+        auto &cmd                = add(CmdType::BindUniformBuffer, key);
+        cmd.data.bind_ubo.buffer  = buffer;
+        cmd.data.bind_ubo.binding = binding;
     }
 
     void set_scissor(int16_t x, int16_t y, uint16_t w, uint16_t h) noexcept {

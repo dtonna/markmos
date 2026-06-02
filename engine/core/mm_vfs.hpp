@@ -32,6 +32,9 @@ public:
     bool write_doc(const char* path, const void* data, uint64_t size) noexcept;
     bool write_doc_atomic(const char* path, const void* data, uint64_t size) noexcept;
     bool exists(const char* path) noexcept;
+    const char* get_bundle_path() noexcept {
+        return bundle_path_;
+    }
 
 #if defined(TARGET_ANDROID)
     static void set_asset_manager(void* mgr) noexcept;

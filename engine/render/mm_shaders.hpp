@@ -7,7 +7,7 @@
 namespace shader {
 
 // ─── Sprite Vertex ───────────────────────────────────────────────
-static constexpr const char* sprite_vertex_msl = R"msl(
+static constexpr char sprite_vertex_msl[] = R"msl(
 #include <metal_stdlib>
 using namespace metal;
 
@@ -43,7 +43,7 @@ vertex VSOutput sprite_vertex_main(
 static constexpr size_t sprite_vertex_msl_size = sizeof(sprite_vertex_msl);
 
 // ─── Sprite Fragment ─────────────────────────────────────────────
-static constexpr const char* sprite_fragment_msl = R"msl(
+static constexpr char sprite_fragment_msl[] = R"msl(
 #include <metal_stdlib>
 using namespace metal;
 
@@ -66,7 +66,7 @@ fragment float4 sprite_fragment_main(
 static constexpr size_t sprite_fragment_msl_size = sizeof(sprite_fragment_msl);
 
 // ─── SDF Vertex ──────────────────────────────────────────────────
-static constexpr const char* sdf_vertex_msl = R"msl(
+static constexpr char sdf_vertex_msl[] = R"msl(
 #include <metal_stdlib>
 using namespace metal;
 
@@ -104,7 +104,7 @@ vertex VSOutput sdf_vertex_main(
 static constexpr size_t sdf_vertex_msl_size = sizeof(sdf_vertex_msl);
 
 // ─── SDF Fragment ────────────────────────────────────────────────
-static constexpr const char* sdf_fragment_msl = R"msl(
+static constexpr char sdf_fragment_msl[] = R"msl(
 #include <metal_stdlib>
 using namespace metal;
 
@@ -133,7 +133,7 @@ fragment float4 sdf_fragment_main(
 static constexpr size_t sdf_fragment_msl_size = sizeof(sdf_fragment_msl);
 
 // ─── Particle Vertex ─────────────────────────────────────────────
-static constexpr const char* particle_vertex_msl = R"msl(
+static constexpr char particle_vertex_msl[] = R"msl(
 #include <metal_stdlib>
 using namespace metal;
 
@@ -203,7 +203,7 @@ vertex VSOutput particle_vertex_main(
 static constexpr size_t particle_vertex_msl_size = sizeof(particle_vertex_msl);
 
 // ─── Particle Fragment ───────────────────────────────────────────
-static constexpr const char* particle_fragment_msl = R"msl(
+static constexpr char particle_fragment_msl[] = R"msl(
 #include <metal_stdlib>
 using namespace metal;
 
@@ -226,7 +226,7 @@ fragment float4 particle_fragment_main(
 static constexpr size_t particle_fragment_msl_size = sizeof(particle_fragment_msl);
 
 // ─── Cube Vertex ─────────────────────────────────────────────────
-static constexpr const char* cube_vertex_msl = R"msl(
+static constexpr char cube_vertex_msl[] = R"msl(
 #include <metal_stdlib>
 using namespace metal;
 
@@ -256,7 +256,7 @@ vertex VSOutput cube_vertex_main(
 static constexpr size_t cube_vertex_msl_size = sizeof(cube_vertex_msl);
 
 // ─── Cube Fragment ───────────────────────────────────────────────
-static constexpr const char* cube_fragment_msl = R"msl(
+static constexpr char cube_fragment_msl[] = R"msl(
 #include <metal_stdlib>
 using namespace metal;
 

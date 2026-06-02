@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstddef>
 #include "../core/mm_expected.hpp"
+#include "../core/mm_log.hpp"
 #include <vector>
 
 // Vulkan Backend — vk-bootstrap + VMA, zero manual vkCreateInstance
@@ -50,6 +51,8 @@ struct VulkanPipeline {
     VkDescriptorSet       desc_set;
     VkImageView           current_view;
     VkSampler             current_sampler;
+    VkBuffer              current_ubo;
+    uint32_t              ubo_slot;
     bool                  descriptor_dirty;
 };
 
@@ -87,6 +90,7 @@ struct VulkanBackend {
     VkSwapchainKHR    swapchain;
     VkExtent2D        swap_extent;
     VkFormat          swap_format;
+    std::vector<VkImage>     swap_images;
     std::vector<VkImageView> swap_views;
     uint32_t          swap_index;
 
@@ -109,16 +113,25 @@ struct VulkanBackend {
     uint32_t frame_index;
 
     Expected<void, RHIError> init(void* window_handle) noexcept {
+        if (instance != VK_NULL_HANDLE) {
+            MM_LOG("VulkanBackend::init() - Already initialized (Instance: %p), skipping vkb setup.", (void*)instance);
+            return {};
+        }
+        MM_LOG("VulkanBackend::init() - Creating Instance");
         // Step 1: vkb::InstanceBuilder — no manual vkCreateInstance
         vkb::InstanceBuilder inst_builder;
         auto inst_ret = inst_builder
             .set_app_name("Markmos")
             .set_engine_name("Markmos Engine")
-            .require_api_version(1, 3, 0)
+            .require_api_version(1, 1, 0)
             .enable_extension(VK_KHR_SURFACE_EXTENSION_NAME)
             .enable_extension(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME)
             .build();
-        if (!inst_ret) return make_unexpected(RHIError::BackendError);
+        if (!inst_ret) {
+            MM_ERROR("Failed to create Vulkan instance: %s", inst_ret.error().message().c_str());
+            return make_unexpected(RHIError::BackendError);
+        }
+        MM_LOG("Vulkan instance created");
 
         vkb_instance = inst_ret.value();
         instance = vkb_instance.instance;
@@ -126,56 +139,70 @@ struct VulkanBackend {
         // Step 2: Surface creation (platform-specific)
         surface = VK_NULL_HANDLE;
 #if defined(VK_USE_PLATFORM_ANDROID_KHR)
+        MM_LOG("Creating Android Surface (window_handle: %p)", window_handle);
         if (window_handle) {
             VkAndroidSurfaceCreateInfoKHR sci{};
             sci.sType = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR;
             sci.window = static_cast<ANativeWindow*>(window_handle);
-            if (vkCreateAndroidSurfaceKHR(instance, &sci, nullptr, &surface) != VK_SUCCESS)
+            if (vkCreateAndroidSurfaceKHR(instance, &sci, nullptr, &surface) != VK_SUCCESS) {
+                MM_ERROR("vkCreateAndroidSurfaceKHR failed");
                 return make_unexpected(RHIError::BackendError);
+            }
+            MM_LOG("Android Surface created: %p", surface);
         }
 #endif
 
         // Step 3: Select physical device
-        VkPhysicalDeviceVulkan13Features features13{};
-        features13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
-        features13.dynamicRendering = VK_TRUE;
-        features13.synchronization2 = VK_TRUE;
-
-        VkPhysicalDeviceVulkan12Features features12{};
-        features12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
-        features12.timelineSemaphore = VK_TRUE;
-        features12.bufferDeviceAddress = VK_TRUE;
-        features12.descriptorIndexing = VK_TRUE;
-        features12.pNext = &features13;
-
-        VkPhysicalDeviceFeatures2 features2{};
-        features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-        features2.pNext = &features12;
+        MM_LOG("Selecting Physical Device");
 
         vkb::PhysicalDeviceSelector phys_dev_selector(vkb_instance);
         auto phys_dev_ret = phys_dev_selector
-            .set_minimum_version(1, 3)
-            .defer_surface_initialization()
+            .set_minimum_version(1, 1)
+            .set_surface(surface) // Pass surface explicitly to ensure presentation support
+            .add_required_extension(VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME)
             .select();
         if (!phys_dev_ret) {
+            MM_ERROR("Failed to select physical device: %s", phys_dev_ret.error().message().c_str());
             vkb::destroy_instance(vkb_instance);
             return make_unexpected(RHIError::BackendError);
         }
         vkb::PhysicalDevice physical_device = phys_dev_ret.value();
         phys_device = physical_device.physical_device;
+        MM_LOG("Physical device selected: %s", physical_device.name.c_str());
 
         // Step 4: vkb::DeviceBuilder — no manual vkCreateDevice
+        MM_LOG("Creating Logical Device");
+
+        // Dynamic rendering features
+        VkPhysicalDeviceDynamicRenderingFeaturesKHR dynamic_rendering_features{};
+        dynamic_rendering_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR;
+        dynamic_rendering_features.dynamicRendering = VK_TRUE;
+
+        // Vulkan 1.2 features
+        VkPhysicalDeviceVulkan12Features features12{};
+        features12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+        features12.timelineSemaphore = VK_TRUE;
+        features12.bufferDeviceAddress = VK_TRUE;
+        features12.descriptorIndexing = VK_TRUE;
+        features12.pNext = &dynamic_rendering_features;
+
+        VkPhysicalDeviceFeatures2 features2{};
+        features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+        features2.pNext = &features12;
+
         vkb::DeviceBuilder device_builder(physical_device);
         auto dev_ret = device_builder
             .add_pNext(&features2)
             .build();
         if (!dev_ret) {
+            MM_ERROR("Failed to create logical device: %s", dev_ret.error().message().c_str());
             vkb::destroy_instance(vkb_instance);
             return make_unexpected(RHIError::BackendError);
         }
 
         vkb_device = dev_ret.value();
         device = vkb_device.device;
+        MM_LOG("Logical device created");
 
         // Get queues
         auto gq = vkb_device.get_queue(vkb::QueueType::graphics);
@@ -190,40 +217,64 @@ struct VulkanBackend {
         present_family = pi.value();
 
         // Step 4: Swapchain via vkb::SwapchainBuilder
+        MM_LOG("Creating Swapchain");
         vkb::SwapchainBuilder swap_builder(vkb_device, surface);
         auto swap_ret = swap_builder
             .set_desired_format({VK_FORMAT_B8G8R8A8_SRGB, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR})
             .set_desired_present_mode(VK_PRESENT_MODE_FIFO_KHR)
             .build();
-        if (!swap_ret) return make_unexpected(RHIError::BackendError);
+        if (!swap_ret) {
+            MM_ERROR("Failed to create swapchain: %s", swap_ret.error().message().c_str());
+            return make_unexpected(RHIError::BackendError);
+        }
         vkb_swapchain = swap_ret.value();
         swapchain = vkb_swapchain.swapchain;
         swap_extent = vkb_swapchain.extent;
         swap_format = vkb_swapchain.image_format;
+        MM_LOG("Swapchain created: %dx%d", swap_extent.width, swap_extent.height);
 
-        auto images = vkb_swapchain.get_images().value();
-        auto views  = vkb_swapchain.get_image_views().value();
-        swap_views = views;
+        swap_images = vkb_swapchain.get_images().value();
+        swap_views  = vkb_swapchain.get_image_views().value();
 
         // Step 5: VMA — all allocations through VMA, no vkAllocateMemory
+        MM_LOG("Creating VMA Allocator");
+        VmaVulkanFunctions vma_funcs{};
+        vma_funcs.vkGetInstanceProcAddr = vkGetInstanceProcAddr;
+        vma_funcs.vkGetDeviceProcAddr   = vkGetDeviceProcAddr;
+        vma_funcs.vkGetPhysicalDeviceProperties = vkGetPhysicalDeviceProperties;
+        vma_funcs.vkGetPhysicalDeviceMemoryProperties = vkGetPhysicalDeviceMemoryProperties;
+        vma_funcs.vkAllocateMemory = vkAllocateMemory;
+        vma_funcs.vkFreeMemory = vkFreeMemory;
+        vma_funcs.vkMapMemory = vkMapMemory;
+        vma_funcs.vkUnmapMemory = vkUnmapMemory;
+        vma_funcs.vkFlushMappedMemoryRanges = vkFlushMappedMemoryRanges;
+        vma_funcs.vkInvalidateMappedMemoryRanges = vkInvalidateMappedMemoryRanges;
+        vma_funcs.vkBindBufferMemory = vkBindBufferMemory;
+        vma_funcs.vkBindImageMemory = vkBindImageMemory;
+        vma_funcs.vkGetBufferMemoryRequirements = vkGetBufferMemoryRequirements;
+        vma_funcs.vkGetImageMemoryRequirements = vkGetImageMemoryRequirements;
+        vma_funcs.vkCreateBuffer = vkCreateBuffer;
+        vma_funcs.vkDestroyBuffer = vkDestroyBuffer;
+        vma_funcs.vkCreateImage = vkCreateImage;
+        vma_funcs.vkDestroyImage = vkDestroyImage;
+        vma_funcs.vkCmdCopyBuffer = vkCmdCopyBuffer;
+
         VmaAllocatorCreateInfo alloc_info{};
         alloc_info.device = device;
         alloc_info.physicalDevice = phys_device;
         alloc_info.instance = instance;
-        alloc_info.vulkanApiVersion = VK_API_VERSION_1_3;
-        if (vmaCreateAllocator(&alloc_info, &allocator) != VK_SUCCESS) {
+        alloc_info.pVulkanFunctions = &vma_funcs;
+        alloc_info.vulkanApiVersion = VK_API_VERSION_1_1;
+        VkResult vma_res = vmaCreateAllocator(&alloc_info, &allocator);
+        if (vma_res != VK_SUCCESS) {
+            MM_ERROR("Failed to create VMA allocator, result: %d", (int)vma_res);
             return make_unexpected(RHIError::BackendError);
         }
+        MM_LOG("VMA allocator created");
 
         // Step 6: Sync objects
-        VkSemaphoreTypeCreateInfo timeline_info{};
-        timeline_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
-        timeline_info.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
-        timeline_info.initialValue = 0;
-
         VkSemaphoreCreateInfo sem_info{};
         sem_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-        sem_info.pNext = &timeline_info;
 
         vkCreateSemaphore(device, &sem_info, nullptr, &acquire_sem);
         vkCreateSemaphore(device, &sem_info, nullptr, &release_sem);
@@ -253,6 +304,11 @@ struct VulkanBackend {
             vkGetDeviceProcAddr(device, "vkCmdBeginRenderingKHR"));
         vkCmdEndRenderingKHR = reinterpret_cast<PFN_vkCmdEndRenderingKHR>(
             vkGetDeviceProcAddr(device, "vkCmdEndRenderingKHR"));
+
+        if (!vkCmdBeginRenderingKHR || !vkCmdEndRenderingKHR) {
+            MM_ERROR("Failed to load vkCmdBeginRenderingKHR or vkCmdEndRenderingKHR");
+            return make_unexpected(RHIError::BackendError);
+        }
 
         // Descriptor pool — supports up to 16 descriptor sets with
         // combined image samplers + uniform buffers for all pipelines
@@ -294,6 +350,13 @@ struct VulkanBackend {
     }
 
     Expected<BufferHandle, RHIError> create_buffer(const BufferDesc& desc) noexcept {
+        MM_LOG("create_buffer entering: type=%d size=%u cpu_visible=%d", (int)desc.type, (uint32_t)desc.size, (int)desc.cpu_visible);
+        if (!allocator) {
+            MM_ERROR("create_buffer: allocator is NULL!");
+            return make_unexpected(RHIError::BackendError);
+        }
+
+        MM_LOG("create_buffer: allocator=%p, device=%p", (void*)allocator, (void*)device);
         VkBufferCreateInfo buf_info{};
         buf_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
         buf_info.size = desc.size;
@@ -311,24 +374,36 @@ struct VulkanBackend {
             buf_info.usage |= VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
         }
 
+        MM_LOG("create_buffer: setting up VmaAllocationCreateInfo");
         VmaAllocationCreateInfo alloc_info{};
+        // Use older enums for better emulator compatibility
         alloc_info.usage = desc.cpu_visible
-            ? VMA_MEMORY_USAGE_AUTO_PREFER_HOST
-            : VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+            ? VMA_MEMORY_USAGE_CPU_TO_GPU
+            : VMA_MEMORY_USAGE_GPU_ONLY;
         alloc_info.flags = desc.cpu_visible ? VMA_ALLOCATION_CREATE_MAPPED_BIT : 0;
 
-        VkBuffer buf;
-        VmaAllocation alloc;
-        if (vmaCreateBuffer(allocator, &buf_info, &alloc_info, &buf, &alloc, nullptr) != VK_SUCCESS) {
+        VkBuffer buf = VK_NULL_HANDLE;
+        VmaAllocation alloc = VK_NULL_HANDLE;
+
+        MM_LOG("create_buffer: calling vmaCreateBuffer (device=%p)", (void*)device);
+        VkResult res = vmaCreateBuffer(allocator, &buf_info, &alloc_info, &buf, &alloc, nullptr);
+        if (res != VK_SUCCESS) {
+            MM_ERROR("create_buffer: vmaCreateBuffer failed with result %d", (int)res);
             return make_unexpected(RHIError::OutOfMemory);
         }
+        MM_LOG("create_buffer: vmaCreateBuffer OK: buffer=%p, alloc=%p", (void*)buf, (void*)alloc);
 
-        VulkanBuffer vb{buf, alloc, desc.size, desc.type};
+        VulkanBuffer vb{buf, alloc, (uint32_t)desc.size, desc.type};
+
+        MM_LOG("create_buffer: emplace into slotmap");
         SlotHandle sh = buffers.emplace(vb);
+        MM_LOG("create_buffer: emplace OK: id=%u, gen=%u", sh.id, sh.gen);
+
         return BufferHandle{sh};
     }
 
     Expected<TextureHandle, RHIError> create_texture(const TextureDesc& desc) noexcept {
+        MM_LOG("create_texture entering: %ux%d fmt=%d", desc.width, desc.height, (int)desc.format);
         VkImageCreateInfo img_info{};
         img_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
         img_info.imageType = VK_IMAGE_TYPE_2D;
@@ -342,13 +417,18 @@ struct VulkanBackend {
         img_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
         VmaAllocationCreateInfo alloc_info{};
-        alloc_info.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+        // Use more compatible GPU usage
+        alloc_info.usage = VMA_MEMORY_USAGE_GPU_ONLY;
 
-        VkImage img;
-        VmaAllocation alloc;
-        if (vmaCreateImage(allocator, &img_info, &alloc_info, &img, &alloc, nullptr) != VK_SUCCESS) {
+        VkImage img = VK_NULL_HANDLE;
+        VmaAllocation alloc = VK_NULL_HANDLE;
+        MM_LOG("create_texture: calling vmaCreateImage");
+        VkResult res = vmaCreateImage(allocator, &img_info, &alloc_info, &img, &alloc, nullptr);
+        if (res != VK_SUCCESS) {
+            MM_ERROR("create_texture: vmaCreateImage failed with result %d", (int)res);
             return make_unexpected(RHIError::OutOfMemory);
         }
+        MM_LOG("create_texture: vmaCreateImage OK: image=%p", (void*)img);
 
         // Create image view
         VkImageViewCreateInfo view_info{};
@@ -359,7 +439,12 @@ struct VulkanBackend {
         view_info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, desc.mip_levels, 0, desc.array_layers};
 
         VkImageView view;
-        vkCreateImageView(device, &view_info, nullptr, &view);
+        if (vkCreateImageView(device, &view_info, nullptr, &view) != VK_SUCCESS) {
+            MM_ERROR("create_texture: vkCreateImageView failed");
+            vmaDestroyImage(allocator, img, alloc);
+            return make_unexpected(RHIError::BackendError);
+        }
+        MM_LOG("create_texture: vkCreateImageView OK: view=%p", (void*)view);
 
         VulkanTexture vt{img, alloc, view, desc.width, desc.height, desc.format};
         SlotHandle sh = textures.emplace(vt);
@@ -386,6 +471,7 @@ struct VulkanBackend {
     }
 
     Expected<PipelineHandle, RHIError> create_pipeline(const PipelineDesc& desc) noexcept {
+        MM_LOG("create_pipeline entering: vs_size=%zu fs_size=%zu", desc.vertex_shader.code_size, desc.fragment_shader.code_size);
         // --- Shader modules ---
         VkShaderModuleCreateInfo vsm{};
         vsm.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
@@ -394,6 +480,7 @@ struct VulkanBackend {
 
         VkShaderModule vs_module;
         if (vkCreateShaderModule(device, &vsm, nullptr, &vs_module) != VK_SUCCESS) {
+            MM_ERROR("create_pipeline: vertex shader module creation failed");
             return make_unexpected(RHIError::ShaderCompileFail);
         }
 
@@ -404,9 +491,11 @@ struct VulkanBackend {
 
         VkShaderModule fs_module;
         if (vkCreateShaderModule(device, &fsm, nullptr, &fs_module) != VK_SUCCESS) {
+            MM_ERROR("create_pipeline: fragment shader module creation failed");
             vkDestroyShaderModule(device, vs_module, nullptr);
             return make_unexpected(RHIError::ShaderCompileFail);
         }
+        MM_LOG("create_pipeline: shader modules created");
 
         // --- Shader stages ---
         VkPipelineShaderStageCreateInfo stages[2]{};
@@ -594,7 +683,7 @@ struct VulkanBackend {
         }
 
         VulkanPipeline vp{pipeline, pipeline_layout, desc_set_layout, desc_set,
-                          VK_NULL_HANDLE, VK_NULL_HANDLE, true};
+                          VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE, 0, true};
         SlotHandle sh = pipelines.emplace(vp);
         return PipelineHandle{sh};
     }
@@ -649,27 +738,36 @@ struct VulkanBackend {
                                                uint32_t x, uint32_t y,
                                                uint32_t w, uint32_t h_,
                                                uint32_t mip, uint32_t slice) noexcept {
+        MM_LOG("update_texture entering: handle=%u %ux%u", h.handle.id, w, h_);
         auto* tex = textures.get(h.handle);
-        if (!tex) return make_unexpected(RHIError::InvalidHandle);
+        if (!tex) {
+            MM_ERROR("update_texture: invalid texture handle");
+            return make_unexpected(RHIError::InvalidHandle);
+        }
 
         // Create staging buffer
-        VkDeviceSize image_size = static_cast<VkDeviceSize>(w) * h_ * 4;
+        uint32_t bpp = get_format_size(tex->format);
+        VkDeviceSize image_size = static_cast<VkDeviceSize>(w) * h_ * bpp;
         VkBufferCreateInfo buf_info{};
         buf_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
         buf_info.size = image_size;
         buf_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
 
         VmaAllocationCreateInfo alloc_info{};
-        alloc_info.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+        alloc_info.usage = VMA_MEMORY_USAGE_CPU_ONLY; // Simplest usage for staging
         alloc_info.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
 
         VkBuffer staging_buf;
         VmaAllocation staging_alloc;
         VmaAllocationInfo staging_info;
+        MM_LOG("update_texture: creating staging buffer size=%zu (bpp=%u)", (size_t)image_size, bpp);
         if (vmaCreateBuffer(allocator, &buf_info, &alloc_info,
                             &staging_buf, &staging_alloc, &staging_info) != VK_SUCCESS) {
+            MM_ERROR("update_texture: staging buffer creation failed");
             return make_unexpected(RHIError::OutOfMemory);
         }
+
+        MM_LOG("update_texture: copying pixels to staging");
         memcpy(staging_info.pMappedData, data, static_cast<size_t>(image_size));
 
         // One-shot command buffer for transfer
@@ -680,7 +778,12 @@ struct VulkanBackend {
         cmd_alloc.commandBufferCount = 1;
 
         VkCommandBuffer transfer_cmd;
-        vkAllocateCommandBuffers(device, &cmd_alloc, &transfer_cmd);
+        MM_LOG("update_texture: allocating command buffer");
+        if (vkAllocateCommandBuffers(device, &cmd_alloc, &transfer_cmd) != VK_SUCCESS) {
+            MM_ERROR("update_texture: cmd buffer allocation failed");
+            vmaDestroyBuffer(allocator, staging_buf, staging_alloc);
+            return make_unexpected(RHIError::BackendError);
+        }
 
         VkCommandBufferBeginInfo begin{};
         begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -718,6 +821,7 @@ struct VulkanBackend {
         region.imageSubresource.layerCount = 1;
         region.imageOffset = {static_cast<int32_t>(x), static_cast<int32_t>(y), 0};
         region.imageExtent = {w, h_, 1};
+        MM_LOG("update_texture: recording copy command");
         vkCmdCopyBufferToImage(transfer_cmd, staging_buf, tex->image,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
@@ -743,18 +847,32 @@ struct VulkanBackend {
         VkFence transfer_fence;
         vkCreateFence(device, &fence_info, nullptr, &transfer_fence);
 
-        vkQueueSubmit(graphics_queue, 1, &submit, transfer_fence);
+        MM_LOG("update_texture: submitting to queue");
+        VkResult submit_res = vkQueueSubmit(graphics_queue, 1, &submit, transfer_fence);
+        if (submit_res != VK_SUCCESS) {
+            MM_ERROR("update_texture: vkQueueSubmit failed with %d", (int)submit_res);
+            vkDestroyFence(device, transfer_fence, nullptr);
+            vkFreeCommandBuffers(device, cmd_pool, 1, &transfer_cmd);
+            vmaDestroyBuffer(allocator, staging_buf, staging_alloc);
+            return make_unexpected(RHIError::BackendError);
+        }
+
+        MM_LOG("update_texture: waiting for fence");
         vkWaitForFences(device, 1, &transfer_fence, VK_TRUE, UINT64_MAX);
 
+        MM_LOG("update_texture: cleanup");
         vkDestroyFence(device, transfer_fence, nullptr);
         vkFreeCommandBuffers(device, cmd_pool, 1, &transfer_cmd);
         vmaDestroyBuffer(allocator, staging_buf, staging_alloc);
+        MM_LOG("update_texture: done");
 
         return {};
     }
 
     Expected<void, RHIError> begin_frame() noexcept {
+        MM_LOG("VulkanBackend::begin_frame() - waiting for frame_fence");
         vkWaitForFences(device, 1, &frame_fence, VK_TRUE, UINT64_MAX);
+        MM_LOG("VulkanBackend::begin_frame() - frame_fence signaled");
         vkResetFences(device, 1, &frame_fence);
 
         VkResult result = vkAcquireNextImageKHR(device, swapchain, UINT64_MAX,
@@ -779,6 +897,7 @@ struct VulkanBackend {
         // Destroy old swapchain image views
         for (auto v : swap_views) vkDestroyImageView(device, v, nullptr);
         swap_views.clear();
+        swap_images.clear();
 
         // Rebuild swapchain (pass old swapchain for seamless recreation)
         vkb::SwapchainBuilder swap_builder(vkb_device, surface);
@@ -794,9 +913,8 @@ struct VulkanBackend {
             swap_extent = vkb_swapchain.extent;
             swap_format = vkb_swapchain.image_format;
 
-            auto images = vkb_swapchain.get_images().value();
-            auto views = vkb_swapchain.get_image_views().value();
-            swap_views = views;
+            swap_images = vkb_swapchain.get_images().value();
+            swap_views = vkb_swapchain.get_image_views().value();
         }
     }
 
@@ -805,16 +923,8 @@ struct VulkanBackend {
 
         VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
 
-        VkTimelineSemaphoreSubmitInfo timeline_info{};
-        timeline_info.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
-        timeline_info.waitSemaphoreValueCount = 1;
-        timeline_info.pWaitSemaphoreValues = &timeline_value;
-        timeline_info.signalSemaphoreValueCount = 1;
-        timeline_info.pSignalSemaphoreValues = &timeline_value;
-
         VkSubmitInfo submit{};
         submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        submit.pNext = &timeline_info;
         submit.waitSemaphoreCount = 1;
         submit.pWaitSemaphores = &acquire_sem;
         submit.pWaitDstStageMask = &wait_stage;
@@ -823,7 +933,12 @@ struct VulkanBackend {
         submit.commandBufferCount = 1;
         submit.pCommandBuffers = &cmd_buf;
 
-        vkQueueSubmit(graphics_queue, 1, &submit, frame_fence);
+        MM_LOG("VulkanBackend::end_frame() - submitting graphics queue");
+        VkResult submit_res = vkQueueSubmit(graphics_queue, 1, &submit, frame_fence);
+        if (submit_res != VK_SUCCESS) {
+            MM_ERROR("VulkanBackend::end_frame() - vkQueueSubmit failed: %d", (int)submit_res);
+            return make_unexpected(RHIError::BackendError);
+        }
 
         VkPresentInfoKHR present{};
         present.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
@@ -833,7 +948,13 @@ struct VulkanBackend {
         present.pSwapchains = &swapchain;
         present.pImageIndices = &swap_index;
 
-        vkQueuePresentKHR(present_queue, &present);
+        MM_LOG("VulkanBackend::end_frame() - presenting swapchain");
+        VkResult present_res = vkQueuePresentKHR(present_queue, &present);
+        if (present_res == VK_ERROR_OUT_OF_DATE_KHR || present_res == VK_SUBOPTIMAL_KHR) {
+            MM_LOG("VulkanBackend::end_frame() - swapchain out of date or suboptimal");
+        } else if (present_res != VK_SUCCESS) {
+            MM_ERROR("VulkanBackend::end_frame() - vkQueuePresentKHR failed: %d", (int)present_res);
+        }
 
         ++timeline_value;
         ++frame_index;
@@ -841,6 +962,12 @@ struct VulkanBackend {
     }
 
     Expected<void, RHIError> begin_pass(const PassDesc& pass) noexcept {
+        // Transition swapchain image to COLOR_ATTACHMENT_OPTIMAL
+        image_barrier(cmd_buf, swap_images[swap_index],
+                      VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                      0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                      VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+
         VkRenderingAttachmentInfo color_attach{};
         color_attach.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
         color_attach.imageView = swap_views[swap_index];
@@ -869,6 +996,13 @@ struct VulkanBackend {
 
     Expected<void, RHIError> end_pass() noexcept {
         vkCmdEndRenderingKHR(cmd_buf);
+
+        // Transition swapchain image back to PRESENT_SRC_KHR
+        image_barrier(cmd_buf, swap_images[swap_index],
+                      VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                      VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, 0,
+                      VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+
         return {};
     }
 
@@ -877,33 +1011,57 @@ struct VulkanBackend {
         if (!pl) return make_unexpected(RHIError::InvalidHandle);
         vkCmdBindPipeline(cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS, pl->pipeline);
         current_pipeline_handle = h;
+        return {};
+    }
 
-        // Flush pending descriptor update if dirty and both resources set
-        if (pl->desc_set && pl->descriptor_dirty &&
-            pl->current_view && pl->current_sampler) {
+    void flush_descriptors() noexcept {
+        auto* pl = pipelines.get(current_pipeline_handle.handle);
+        if (!pl || !pl->desc_set) return;
+
+        if (pl->descriptor_dirty) {
+            MM_LOG("VulkanBackend::flush_descriptors() - updating set for handle=%u ubo=%p view=%p",
+                   current_pipeline_handle.handle.id, (void*)pl->current_ubo, (void*)pl->current_view);
+            uint32_t write_count = 0;
+            VkWriteDescriptorSet writes[2] = {};
+
+            VkDescriptorBufferInfo ubo_info{};
+            if (pl->current_ubo) {
+                ubo_info.buffer = pl->current_ubo;
+                ubo_info.offset = 0;
+                ubo_info.range = VK_WHOLE_SIZE;
+
+                auto& w = writes[write_count++];
+                w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                w.dstSet = pl->desc_set;
+                w.dstBinding = 0; // UBO at logical slot 0
+                w.descriptorCount = 1;
+                w.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+                w.pBufferInfo = &ubo_info;
+            }
+
             VkDescriptorImageInfo img_info{};
-            img_info.sampler = pl->current_sampler;
-            img_info.imageView = pl->current_view;
-            img_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            if (pl->current_view && pl->current_sampler) {
+                img_info.sampler = pl->current_sampler;
+                img_info.imageView = pl->current_view;
+                img_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-            VkWriteDescriptorSet write{};
-            write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            write.dstSet = pl->desc_set;
-            write.dstBinding = 1;
-            write.dstArrayElement = 0;
-            write.descriptorCount = 1;
-            write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            write.pImageInfo = &img_info;
+                auto& w = writes[write_count++];
+                w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                w.dstSet = pl->desc_set;
+                w.dstBinding = 1; // Sampler at logical slot 1
+                w.descriptorCount = 1;
+                w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                w.pImageInfo = &img_info;
+            }
 
-            vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+            if (write_count > 0) {
+                vkUpdateDescriptorSets(device, write_count, writes, 0, nullptr);
+            }
             pl->descriptor_dirty = false;
         }
 
-        if (pl->desc_set) {
-            vkCmdBindDescriptorSets(cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                    pl->layout, 0, 1, &pl->desc_set, 0, nullptr);
-        }
-        return {};
+        vkCmdBindDescriptorSets(cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                pl->layout, 0, 1, &pl->desc_set, 0, nullptr);
     }
 
     Expected<void, RHIError> bind_vertex_buffers(BufferHandle* handles, uint32_t count,
@@ -923,23 +1081,41 @@ struct VulkanBackend {
         return {};
     }
 
-    Expected<void, RHIError> bind_index_buffer(BufferHandle h, IndexType type) noexcept {
+    Expected<void, RHIError> bind_index_buffer(BufferHandle h, IndexType type, uint64_t offset = 0) noexcept {
         auto* buf = buffers.get(h.handle);
         if (!buf) return make_unexpected(RHIError::InvalidHandle);
-        vkCmdBindIndexBuffer(cmd_buf, buf->buffer, 0,
+        vkCmdBindIndexBuffer(cmd_buf, buf->buffer, offset,
                              type == IndexType::Uint32 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16);
+        return {};
+    }
+
+    Expected<void, RHIError> bind_uniform_buffer(BufferHandle handle, uint32_t binding) noexcept {
+        auto* buf = buffers.get(handle.handle);
+        if (!buf) return make_unexpected(RHIError::InvalidHandle);
+        auto* pl = pipelines.get(current_pipeline_handle.handle);
+        if (pl) {
+            pl->current_ubo = buf->buffer;
+            pl->ubo_slot = binding; // Store slot
+            pl->descriptor_dirty = true;
+        }
         return {};
     }
 
     Expected<void, RHIError> draw(uint32_t vertex_count, uint32_t instance_count,
                                     uint32_t first_vertex, uint32_t first_instance) noexcept {
+        flush_descriptors();
         vkCmdDraw(cmd_buf, vertex_count, instance_count, first_vertex, first_instance);
+        static uint32_t draw_count = 0;
+        if (++draw_count % 100 == 1) MM_LOG("VulkanBackend::draw() count=%u verts=%u", draw_count, vertex_count);
         return {};
     }
 
     Expected<void, RHIError> draw_indexed(uint32_t index_count, uint32_t instance_count,
-                                            uint32_t first_index) noexcept {
-        vkCmdDrawIndexed(cmd_buf, index_count, instance_count, first_index, 0, 0);
+                                            uint32_t first_index, int32_t vertex_offset = 0) noexcept {
+        flush_descriptors();
+        vkCmdDrawIndexed(cmd_buf, index_count, instance_count, first_index, vertex_offset, 0);
+        static uint32_t idx_draw_count = 0;
+        if (++idx_draw_count % 100 == 1) MM_LOG("VulkanBackend::draw_indexed() count=%u indices=%u", idx_draw_count, index_count);
         return {};
     }
 
@@ -976,6 +1152,18 @@ struct VulkanBackend {
     }
 
 private:
+    static uint32_t get_format_size(PixelFormat fmt) noexcept {
+        switch (fmt) {
+            case PixelFormat::R8_UNORM:          return 1;
+            case PixelFormat::R8G8B8A8_UNORM:
+            case PixelFormat::R8G8B8A8_SRGB:
+            case PixelFormat::B8G8R8A8_UNORM:
+            case PixelFormat::B8G8R8A8_SRGB:
+            case PixelFormat::D32_FLOAT:         return 4;
+            default:                             return 4;
+        }
+    }
+
     static VkFormat to_vk_format(PixelFormat fmt) noexcept {
         switch (fmt) {
             case PixelFormat::R8_UNORM:          return VK_FORMAT_R8_UNORM;
@@ -1083,6 +1271,26 @@ private:
             case CompareOp::Always:         return VK_COMPARE_OP_ALWAYS;
             default:                        return VK_COMPARE_OP_ALWAYS;
         }
+    }
+
+    static void image_barrier(VkCommandBuffer cmd, VkImage image,
+                              VkImageLayout old_layout, VkImageLayout new_layout,
+                              VkAccessFlags src_access, VkAccessFlags dst_access,
+                              VkPipelineStageFlags src_stage, VkPipelineStageFlags dst_stage) noexcept {
+        VkImageMemoryBarrier barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrier.oldLayout = old_layout;
+        barrier.newLayout = new_layout;
+        barrier.srcAccessMask = src_access;
+        barrier.dstAccessMask = dst_access;
+        barrier.image = image;
+        barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        barrier.subresourceRange.baseMipLevel = 0;
+        barrier.subresourceRange.levelCount = 1;
+        barrier.subresourceRange.baseArrayLayer = 0;
+        barrier.subresourceRange.layerCount = 1;
+
+        vkCmdPipelineBarrier(cmd, src_stage, dst_stage, 0, 0, nullptr, 0, nullptr, 1, &barrier);
     }
 };
 

@@ -4,6 +4,7 @@
 #pragma once
 #include "../core/mm_arena.hpp"
 #include "../core/mm_expected.hpp"
+#include "../core/mm_log.hpp"
 #include "../core/mm_tracy.hpp"
 #include "../math/mm_mat4.h"
 #include "../rhi/mm_rhi_concept.hpp"
@@ -20,7 +21,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
-#include <mach/machine.h>
+#include <unistd.h>
+#if defined(__APPLE__)
+#    include <mach/machine.h>
+#endif
 
 // Renderer — non-template class per spec v4.6
 // @cache_reason Single cache line for hot frame state, SoA sprite data
@@ -40,7 +44,7 @@ using ActiveBackend = VulkanBackend;
 static_assert(RHI_Backend<ActiveBackend>, "ActiveBackend must satisfy RHI_Backend concept");
 
 struct Renderer {
-    ActiveBackend backend;
+    ActiveBackend *backend = nullptr;
 
     DoubleArena   frame_arena;
     RenderGraph   graph;
@@ -88,10 +92,10 @@ struct Renderer {
     uint32_t sprite_vertex_count = 0;
     uint32_t sprite_index_count  = 0;
 
-    // Command   *command_storage_0 = nullptr;
-    // Command   *command_storage_1 = nullptr;
-    alignas(64) Command command_storage_0[MAX_COMMANDS];
-    alignas(64) Command command_storage_1[MAX_COMMANDS];
+    Command   *command_storage_0 = nullptr;
+    Command   *command_storage_1 = nullptr;
+    //alignas(64) Command command_storage_0[MAX_COMMANDS];
+    //alignas(64) Command command_storage_1[MAX_COMMANDS];
 
     FrameArena temp_arena;
     alignas(64) uint8_t temp_storage[1024 * 1024];
@@ -111,29 +115,37 @@ struct Renderer {
     }
 
     void destroy_resources() noexcept {
-        destroy_safe(sprite_pipeline, [&](auto &h) { backend.destroy_pipeline(h); });
-        destroy_safe(sprite_additive_pipeline, [&](auto &h) { backend.destroy_pipeline(h); });
-        destroy_safe(sprite_multiply_pipeline, [&](auto &h) { backend.destroy_pipeline(h); });
-        destroy_safe(sprite_opaque_pipeline, [&](auto &h) { backend.destroy_pipeline(h); });
-        destroy_safe(sdf_pipeline, [&](auto &h) { backend.destroy_pipeline(h); });
-        destroy_safe(particle_pipeline, [&](auto &h) { backend.destroy_pipeline(h); });
-        destroy_safe(camera_ubo, [&](auto &h) { backend.destroy_buffer(h); });
-        destroy_safe(sprite_vb, [&](auto &h) { backend.destroy_buffer(h); });
-        destroy_safe(sprite_ib, [&](auto &h) { backend.destroy_buffer(h); });
-        destroy_safe(font_tex, [&](auto &h) { backend.destroy_texture(h); });
-        destroy_safe(font_sampler, [&](auto &h) { backend.destroy_sampler(h); });
-        destroy_safe(text_vb, [&](auto &h) { backend.destroy_buffer(h); });
-        destroy_safe(text_ib, [&](auto &h) { backend.destroy_buffer(h); });
-        destroy_safe(white_tex, [&](auto &h) { backend.destroy_texture(h); });
-        destroy_safe(default_sampler, [&](auto &h) { backend.destroy_sampler(h); });
+        if (!backend) return;
+        destroy_safe(sprite_pipeline, [&](auto &h) { backend->destroy_pipeline(h); });
+        destroy_safe(sprite_additive_pipeline, [&](auto &h) { backend->destroy_pipeline(h); });
+        destroy_safe(sprite_multiply_pipeline, [&](auto &h) { backend->destroy_pipeline(h); });
+        destroy_safe(sprite_opaque_pipeline, [&](auto &h) { backend->destroy_pipeline(h); });
+        destroy_safe(sdf_pipeline, [&](auto &h) { backend->destroy_pipeline(h); });
+        destroy_safe(particle_pipeline, [&](auto &h) { backend->destroy_pipeline(h); });
+        destroy_safe(camera_ubo, [&](auto &h) { backend->destroy_buffer(h); });
+        destroy_safe(sprite_vb, [&](auto &h) { backend->destroy_buffer(h); });
+        destroy_safe(sprite_ib, [&](auto &h) { backend->destroy_buffer(h); });
+        destroy_safe(font_tex, [&](auto &h) { backend->destroy_texture(h); });
+        destroy_safe(font_sampler, [&](auto &h) { backend->destroy_sampler(h); });
+        destroy_safe(text_vb, [&](auto &h) { backend->destroy_buffer(h); });
+        destroy_safe(text_ib, [&](auto &h) { backend->destroy_buffer(h); });
+        destroy_safe(white_tex, [&](auto &h) { backend->destroy_texture(h); });
+        destroy_safe(default_sampler, [&](auto &h) { backend->destroy_sampler(h); });
+
+        delete[] command_storage_0;
+        delete[] command_storage_1;
     }
 
-    Expected<void, RHIError> init(void *window_handle, uint32_t screen_w, uint32_t screen_h) noexcept {
+    Expected<void, RHIError> init(ActiveBackend *backend_ptr, void *window_handle, uint32_t screen_w, uint32_t screen_h) noexcept {
+        backend = backend_ptr;
         (void)window_handle;
         width      = screen_w;
         height     = screen_h;
         inv_width  = screen_w ? 1.0f / static_cast<float>(screen_w) : 1.0f;
         inv_height = screen_h ? 1.0f / static_cast<float>(screen_h) : 1.0f;
+
+        command_storage_0 = new Command[MAX_COMMANDS];
+        command_storage_1 = new Command[MAX_COMMANDS];
 
         frame_arena.init(command_storage_0, COMMAND_STORAGE_BYTES, command_storage_1, COMMAND_STORAGE_BYTES);
         temp_arena.init(temp_storage, sizeof(temp_storage));
@@ -142,8 +154,9 @@ struct Renderer {
         ubo_desc.type        = BufferType::Uniform;
         ubo_desc.size        = sizeof(float) * 16;
         ubo_desc.cpu_visible = true;
-        auto ubo             = backend.create_buffer(ubo_desc);
+        auto ubo             = backend->create_buffer(ubo_desc);
         if (!ubo) {
+            MM_ERROR("Renderer::init() - Failed to create UBO");
             return make_unexpected(ubo.error());
         }
         camera_ubo    = *ubo;
@@ -154,8 +167,9 @@ struct Renderer {
         vb_desc.size        = MAX_SPRITE_VERTS * sizeof(SpriteVertex);
         vb_desc.stride      = sizeof(SpriteVertex);
         vb_desc.cpu_visible = true;
-        auto vb             = backend.create_buffer(vb_desc);
+        auto vb             = backend->create_buffer(vb_desc);
         if (!vb) {
+            MM_ERROR("Renderer::init() - Failed to create Sprite VB");
             return make_unexpected(vb.error());
         }
         sprite_vb = *vb;
@@ -165,8 +179,9 @@ struct Renderer {
         ib_desc.size        = MAX_SPRITE_IDX * sizeof(uint16_t);
         ib_desc.stride      = sizeof(uint16_t);
         ib_desc.cpu_visible = true;
-        auto ib             = backend.create_buffer(ib_desc);
+        auto ib             = backend->create_buffer(ib_desc);
         if (!ib) {
+            MM_ERROR("Renderer::init() - Failed to create Sprite IB");
             return make_unexpected(ib.error());
         }
         sprite_ib = *ib;
@@ -178,13 +193,15 @@ struct Renderer {
         white_tex_desc.width      = 1;
         white_tex_desc.height     = 1;
         white_tex_desc.mip_levels = 1;
-        auto wt                   = backend.create_texture(white_tex_desc);
+        white_tex_desc.array_layers = 1;
+        auto wt                   = backend->create_texture(white_tex_desc);
         if (!wt) {
+            MM_ERROR("Renderer::init() - Failed to create white texture");
             return make_unexpected(wt.error());
         }
         white_tex            = *wt;
         uint32_t white_pixel = 0xFFFFFFFF;
-        backend.update_texture(white_tex, &white_pixel, 0, 0, 1, 1, 0, 0);
+        backend->update_texture(white_tex, &white_pixel, 0, 0, 1, 1, 0, 0);
 
         SamplerDesc samp_desc{};
         samp_desc.min_filter     = SamplerFilter::Linear;
@@ -192,8 +209,9 @@ struct Renderer {
         samp_desc.address_u      = SamplerAddress::ClampToEdge;
         samp_desc.address_v      = SamplerAddress::ClampToEdge;
         samp_desc.max_anisotropy = 1.0f;
-        auto samp                = backend.create_sampler(samp_desc);
+        auto samp                = backend->create_sampler(samp_desc);
         if (!samp) {
+            MM_ERROR("Renderer::init() - Failed to create default sampler");
             return make_unexpected(samp.error());
         }
         default_sampler = *samp;
@@ -212,13 +230,13 @@ struct Renderer {
             }
         }
         stbtt_bakedchar th_cd[MAX_GLYPHS_TH];
+        memset(th_cd, 0, sizeof(th_cd));
         int             th_start = 0x0E01;
         int             th_end   = 0x0E5B;
         if (fa.bake_range(g_sarabun_ttf, 48.0f, 0x0E01, MAX_GLYPHS_TH, ascii_next_y, th_cd) < 0) {
-            memset(th_cd, 0, sizeof(th_cd));
             // Fallback: try to bake each character individually
             for (int cp = th_start; cp <= th_end; ++cp) {
-                fa.bake_range(g_sarabun_ttf, 48.0f, cp, 1, ascii_next_y, &th_cd[cp - th_start]);
+                (void)fa.bake_range(g_sarabun_ttf, 48.0f, cp, 1, ascii_next_y, &th_cd[cp - th_start]);
             }
         }
 
@@ -228,12 +246,13 @@ struct Renderer {
         font_tex_desc.width      = FONT_ATLAS_W;
         font_tex_desc.height     = FONT_ATLAS_H;
         font_tex_desc.mip_levels = 1;
-        auto ft                  = backend.create_texture(font_tex_desc);
+        font_tex_desc.array_layers = 1;
+        auto ft                  = backend->create_texture(font_tex_desc);
         if (!ft) {
             return make_unexpected(ft.error());
         }
         font_tex = *ft;
-        backend.update_texture(font_tex, fa.pixels, 0, 0, FONT_ATLAS_W, FONT_ATLAS_H, 0, 0);
+        backend->update_texture(font_tex, fa.pixels, 0, 0, FONT_ATLAS_W, FONT_ATLAS_H, 0, 0);
 
         SamplerDesc font_samp_desc{};
         font_samp_desc.min_filter     = SamplerFilter::Linear;
@@ -241,7 +260,7 @@ struct Renderer {
         font_samp_desc.address_u      = SamplerAddress::ClampToEdge;
         font_samp_desc.address_v      = SamplerAddress::ClampToEdge;
         font_samp_desc.max_anisotropy = 1.0f;
-        auto fs                       = backend.create_sampler(font_samp_desc);
+        auto fs                       = backend->create_sampler(font_samp_desc);
         if (!fs) {
             return make_unexpected(fs.error());
         }
@@ -275,13 +294,37 @@ struct Renderer {
             g.bearing_y = static_cast<int8_t>(bc.yoff);
             g.advance   = static_cast<uint8_t>(bc.xadvance);
         }
+//        int thai_valid = 0, thai_invalid = 0;
+//        for (int i = 0; i < MAX_GLYPHS_TH; ++i) {
+//            const GlyphInfo* gi = &default_font.glyphs_th[i];
+//            bool ok = (gi->w > 0 && gi->h > 0 &&
+//                       gi->u < default_font.atlas_w && gi->v < default_font.atlas_h &&
+//                       gi->u + gi->w <= default_font.atlas_w &&
+//                       gi->v + gi->h <= default_font.atlas_h);
+//            if (ok) {
+//                ++thai_valid;
+//            } else {
+//                ++thai_invalid;
+//                uint32_t cp = 0x0E01 + i;
+//                char buf[256];
+//                int n = snprintf(buf, sizeof(buf),
+//                                 "[Font] INVALID Thai glyph U+%04X u=%u v=%u w=%u h=%u atlas=%ux%u\n",
+//                                 cp, gi->u, gi->v, gi->w, gi->h, default_font.atlas_w, default_font.atlas_h);
+//                write(2, buf, (size_t)n);
+//            }
+//        }
+//        {
+//            char buf[128];
+//            int n = snprintf(buf, sizeof(buf), "[Font] Thai glyphs valid=%d invalid=%d\n", thai_valid, thai_invalid);
+//            write(2, buf, (size_t)n);
+//        }
 
         BufferDesc text_vb_desc{};
         text_vb_desc.type        = BufferType::Vertex;
         text_vb_desc.size        = TEXT_MAX_GLYPH * 4 * sizeof(SpriteVertex);
         text_vb_desc.stride      = sizeof(SpriteVertex);
         text_vb_desc.cpu_visible = true;
-        auto tvb                 = backend.create_buffer(text_vb_desc);
+        auto tvb                 = backend->create_buffer(text_vb_desc);
         if (!tvb) {
             return make_unexpected(tvb.error());
         }
@@ -292,7 +335,7 @@ struct Renderer {
         text_ib_desc.size        = TEXT_MAX_GLYPH * 6 * sizeof(uint16_t);
         text_ib_desc.stride      = sizeof(uint16_t);
         text_ib_desc.cpu_visible = true;
-        auto tib                 = backend.create_buffer(text_ib_desc);
+        auto tib                 = backend->create_buffer(text_ib_desc);
         if (!tib) {
             return make_unexpected(tib.error());
         }
@@ -325,7 +368,7 @@ struct Renderer {
         m.store_column_major(view_proj);
     }
 
-    void                     upload_camera() noexcept { backend.update_buffer(camera_ubo, view_proj, 0, sizeof(view_proj)); }
+    void                     upload_camera() noexcept { backend->update_buffer(camera_ubo, view_proj, 0, sizeof(view_proj)); }
 
     Expected<void, RHIError> begin_frame() noexcept {
         flush_text();
@@ -343,7 +386,6 @@ struct Renderer {
     void submit() noexcept {
         ZoneScoped;
         graph.sort();
-
 #if defined(ENGINE_ENABLE_ASSERT)
         bool has_pipeline = false;
         for (uint32_t i = 0; i < graph.command_count; ++i) {
@@ -370,58 +412,63 @@ struct Renderer {
             case CmdType::BindPipeline: {
                 auto h = cmd.data.bind_pipeline.pipeline;
 #if defined(ENGINE_ENABLE_ASSERT)
-                auto *pl = backend.pipelines.get(h.handle);
+                auto *pl = backend->pipelines.get(h.handle);
                 if (!pl) {
                     fprintf(stderr, "BINDPIPELINE FAIL: handle.id=%u gen=%u\n", h.handle.id, h.handle.gen);
                 } else if (!pl->pipeline) {
                     fprintf(stderr, "BINDPIPELINE NIL: handle.id=%u gen=%u pl=%p\n", h.handle.id, h.handle.gen, (void *)pl);
                 }
 #endif
-                backend.bind_pipeline(h);
+                backend->bind_pipeline(h);
                 break;
             }
             case CmdType::BindVertexBuffer: {
                 auto    &vb      = cmd.data.bind_vb;
                 uint32_t binding = vb.binding;
-                backend.bind_vertex_buffers(&vb.buffer, 1, &vb.offset, &vb.stride, &binding);
+                backend->bind_vertex_buffers(&vb.buffer, 1, &vb.offset, &vb.stride, &binding);
                 break;
             }
             case CmdType::BindIndexBuffer: {
                 auto &ib = cmd.data.bind_ib;
-                backend.bind_index_buffer(ib.buffer, ib.type, ib.offset);
+                backend->bind_index_buffer(ib.buffer, ib.type, ib.offset);
                 break;
             }
             case CmdType::BindFragmentTexture: {
                 auto &ft = cmd.data.bind_frag_tex;
-                backend.bind_fragment_texture(ft.texture, ft.index);
+                backend->bind_fragment_texture(ft.texture, ft.index);
                 break;
             }
             case CmdType::BindFragmentSampler: {
                 auto &fs = cmd.data.bind_frag_samp;
-                backend.bind_fragment_sampler(fs.sampler, fs.index);
+                backend->bind_fragment_sampler(fs.sampler, fs.index);
+                break;
+            }
+            case CmdType::BindUniformBuffer: {
+                auto &ubo = cmd.data.bind_ubo;
+                backend->bind_uniform_buffer(ubo.buffer, ubo.binding);
                 break;
             }
             case CmdType::Draw: {
                 auto &d = cmd.data.draw;
-                backend.draw(d.vertex_count, d.instance_count, d.first_vertex, d.first_instance);
+                backend->draw(d.vertex_count, d.instance_count, d.first_vertex, d.first_instance);
                 break;
             }
             case CmdType::DrawIndexed: {
                 auto &di = cmd.data.draw_indexed;
-                backend.draw_indexed(di.index_count, di.instance_count, di.first_index, di.vertex_offset);
+                backend->draw_indexed(di.index_count, di.instance_count, di.first_index, di.vertex_offset);
                 break;
             }
             case CmdType::BeginPass:
-                backend.begin_pass(cmd.data.begin_pass.pass);
+                backend->begin_pass(cmd.data.begin_pass.pass);
                 break;
             case CmdType::EndPass:
-                backend.end_pass();
+                backend->end_pass();
                 break;
             case CmdType::SetViewport:
                 break;
             case CmdType::SetScissor: {
                 auto &s = cmd.data.set_scissor;
-                backend.set_scissor(s.x, s.y, s.w, s.h);
+                backend->set_scissor(s.x, s.y, s.w, s.h);
                 break;
             }
             default:
@@ -432,7 +479,9 @@ struct Renderer {
         FrameMark;
     }
 
-    void end_frame() noexcept { backend.end_frame(); }
+    void end_frame() noexcept {
+        //backend->end_frame();
+    }
 
   private:
     // Internal: vertex generation + draw, parameterized by pipeline/texture/sampler
@@ -560,16 +609,16 @@ struct Renderer {
             uint32_t vb_byte_offset = sprite_vertex_count * sizeof(SpriteVertex);
             uint32_t ib_byte_offset = sprite_index_count * sizeof(uint16_t);
 
-            backend.update_buffer(sprite_vb, verts, vb_byte_offset, vert_count * sizeof(SpriteVertex));
-            backend.update_buffer(sprite_ib, indices, ib_byte_offset, idx_count * sizeof(uint16_t));
+            backend->update_buffer(sprite_vb, verts, vb_byte_offset, vert_count * sizeof(SpriteVertex));
+            backend->update_buffer(sprite_ib, indices, ib_byte_offset, idx_count * sizeof(uint16_t));
 
             SortKey key{0, 0, 0, 1.0f};
             graph.bind_pipeline(pipeline, key);
             graph.bind_vertex_buffer(sprite_vb, 0, vb_byte_offset, sizeof(SpriteVertex), key);
-            graph.bind_vertex_buffer(camera_ubo, 1, 0, sizeof(float) * 16, key);
+            graph.bind_uniform_buffer(camera_ubo, 0, key); // Logical Slot 0: UBO
             graph.bind_index_buffer(sprite_ib, IndexType::Uint16, ib_byte_offset, key);
-            graph.bind_fragment_texture(tex, 0, key);
-            graph.bind_fragment_sampler(sampler, 0, key);
+            graph.bind_fragment_texture(tex, 1, key);      // Logical Slot 1: Sampler
+            graph.bind_fragment_sampler(sampler, 1, key);  // Logical Slot 1: Sampler
             graph.draw_indexed(key, idx_count, 1, 0, 0);
 
             sprite_vertex_count += vert_count;
@@ -643,8 +692,8 @@ struct Renderer {
         desc.vertex_attrs[2]        = {2, PixelFormat::R8G8B8A8_UNORM, 8, 12};
 
         desc.descriptor_count       = 2;
-        desc.descriptor_bindings[0] = {0, DescriptorType::UniformBuffer, 1, 1};
-        desc.descriptor_bindings[1] = {1, DescriptorType::CombinedImageSampler, 2, 1};
+        desc.descriptor_bindings[0] = {0, DescriptorType::UniformBuffer, 1, 1}; // Logical Slot 0
+        desc.descriptor_bindings[1] = {1, DescriptorType::CombinedImageSampler, 2, 1}; // Logical Slot 1
 
         {
             char buf[256];
@@ -655,7 +704,7 @@ struct Renderer {
         desc.vertex_shader   = shader::sprite_vertex();
         desc.fragment_shader = shader::sprite_fragment();
 
-        auto res             = backend.create_pipeline(desc);
+        auto res             = backend->create_pipeline(desc);
         if (!res) {
             return make_unexpected(res.error());
         }
@@ -665,7 +714,7 @@ struct Renderer {
         PipelineDesc add_desc = desc;
         add_desc.src_blend    = BlendFactor::SrcAlpha;
         add_desc.dst_blend    = BlendFactor::One;
-        auto add_res          = backend.create_pipeline(add_desc);
+        auto add_res          = backend->create_pipeline(add_desc);
         if (!add_res) {
             return make_unexpected(add_res.error());
         }
@@ -675,7 +724,7 @@ struct Renderer {
         PipelineDesc mul_desc    = desc;
         mul_desc.src_blend       = BlendFactor::Zero;
         mul_desc.dst_blend       = BlendFactor::SrcColor;
-        auto mul_res             = backend.create_pipeline(mul_desc);
+        auto mul_res             = backend->create_pipeline(mul_desc);
         if (!mul_res) {
             return make_unexpected(mul_res.error());
         }
@@ -685,7 +734,7 @@ struct Renderer {
         PipelineDesc opq_desc    = desc;
         opq_desc.src_blend       = BlendFactor::One;
         opq_desc.dst_blend       = BlendFactor::Zero;
-        auto opq_res             = backend.create_pipeline(opq_desc);
+        auto opq_res             = backend->create_pipeline(opq_desc);
         if (!opq_res) {
             return make_unexpected(opq_res.error());
         }
@@ -700,7 +749,7 @@ struct Renderer {
         sdf_desc.vertex_attrs[1]   = {1, PixelFormat::R16G16_FLOAT, 4, 12};
         sdf_desc.vertex_attrs[2]   = {2, PixelFormat::R8G8B8A8_UNORM, 8, 12};
 
-        auto res2                  = backend.create_pipeline(sdf_desc);
+        auto res2                  = backend->create_pipeline(sdf_desc);
         if (!res2) {
             return make_unexpected(res2.error());
         }
@@ -712,7 +761,7 @@ struct Renderer {
         particle_desc.fragment_shader   = shader::particle_fragment();
         particle_desc.vertex_attr_count = 0;
 
-        auto res3                       = backend.create_pipeline(particle_desc);
+        auto res3                       = backend->create_pipeline(particle_desc);
         if (!res3) {
             return make_unexpected(res3.error());
         }
@@ -744,10 +793,12 @@ struct Renderer {
         uint32_t max_glyphs = len > TEXT_MAX_GLYPH ? TEXT_MAX_GLYPH : len;
         auto    *verts      = temp_arena.alloc_array<SpriteVertex>(max_glyphs * 4);
         if (!verts) {
+            MM_LOG("problem at allocate verts");
             return;
         }
         auto *indices = temp_arena.alloc_array<uint16_t>(max_glyphs * 6);
         if (!indices) {
+            MM_LOG("problem at allocate indices");
             return;
         }
 
@@ -759,20 +810,39 @@ struct Renderer {
 
         // Thai combining character state
         uint32_t    prev_consonant   = 0;
-        float       prev_consonant_x = 0;
-        float       prev_consonant_y = 0;
+        //float       prev_consonant_x = 0;
+        //float       prev_consonant_y = 0;
 
         for (uint16_t g = 0; g < max_glyphs; ++g) {
             uint32_t cp = dec.next();
             if (cp == 0) {
                 break;
             }
-            // {
-            //     char buf[256];
-            //     int  n = snprintf(buf, sizeof(buf), "draw_text: U+%04X\n", cp);
-            //     write(2, buf, (size_t)n);
-            // }
-
+//            auto glyph_valid = [&](const GlyphInfo* gi) noexcept -> bool {
+//                if (!gi) return false;
+//                if (gi->w == 0 || gi->h == 0) return false;
+//                if (gi->u >= font.atlas_w || gi->v >= font.atlas_h) return false;
+//                if (gi->u + gi->w > font.atlas_w) return false;
+//                if (gi->v + gi->h > font.atlas_h) return false;
+//                return true;
+//            };
+//
+//            auto log_glyph = [&](const char* tag, uint32_t cp, const GlyphInfo* gi) noexcept {
+//                if (!gi) {
+//                    char buf[128];
+//                    int n = snprintf(buf, sizeof(buf), "[Glyph] %s cp=U+%04X NULL\n", tag, cp);
+//                    write(2, buf, (size_t)n);
+//                    return;
+//                }
+//                char buf[256];
+//                int n = snprintf(buf, sizeof(buf),
+//                                 "[Glyph] %s cp=U+%04X u=%u v=%u w=%u h=%u atlas=%ux%u adv=%d bx=%d by=%d\n",
+//                                 tag, cp, gi->u, gi->v, gi->w, gi->h,
+//                                 font.atlas_w, font.atlas_h,
+//                                 (int)gi->advance, (int)gi->bearing_x, (int)gi->bearing_y);
+//                write(2, buf, (size_t)n);
+//            };
+//
             // Helper for Thai detection
             auto is_thai_consonant = [](uint32_t c) -> bool { return (c >= 0x0E01 && c <= 0x0E2F) || (c == 0x0E30) || (c == 0x0E32) || (c == 0x0E33); };
             // auto is_thai_vowel_rear  = [](uint32_t c) -> bool { return (c == 0x0E30) || (c == 0x0E32) || (c == 0x0E33); };
@@ -804,30 +874,40 @@ struct Renderer {
 
             // Get glyph (supports Thai range)
             if (cp >= 0x0E01 && cp <= 0x0E5B) {
-                int thai_idx = cp - 0x0E01;
+                auto thai_idx = cp - 0x0E01;
                 if (thai_idx >= 0 && thai_idx < MAX_GLYPHS_TH) {
-                    static GlyphInfo thai_glyph;
-                    auto            &th_g = font.glyphs_th[thai_idx];
-                    if (th_g.w > 0) {
-                        thai_glyph.u         = th_g.u;
-                        thai_glyph.v         = th_g.v;
-                        thai_glyph.w         = th_g.w;
-                        thai_glyph.h         = th_g.h;
-                        thai_glyph.bearing_x = th_g.bearing_x;
-                        thai_glyph.bearing_y = th_g.bearing_y;
-                        thai_glyph.advance   = th_g.advance;
-                        glyph                = &thai_glyph;
+                    auto &th_g = font.glyphs_th[thai_idx];
+                    if (th_g.w > 0 && th_g.h > 0) {
+                        glyph = &th_g;  // Use directly, don't use static copy
                     }
                 }
             } else {
                 glyph = font.get_glyph(cp);
             }
 
-            if (!glyph || glyph->w == 0 || glyph->h == 0) {
+            if (!glyph || glyph->w == 0 || glyph->h == 0 || glyph->u + glyph->w > font.atlas_w || glyph->v + glyph->h > font.atlas_h) {
                 glyph = font.get_glyph('?');
-                if (!glyph) {
+                if (!glyph || glyph->w == 0 || glyph->h == 0) {
                     continue;
                 }
+                // หลังได้ glyph แล้ว
+//                if (!glyph_valid(glyph)) {
+//                    log_glyph("INVALID", cp, glyph);
+//                    // ลอง fallback ไป '?' เพื่อไม่ให้ crash
+//                    const GlyphInfo* fallback = font.get_glyph('?');
+//                    if (!glyph_valid(fallback)) {
+//                        log_glyph("FALLBACK_INVALID", cp, fallback);
+//                        continue; // ข้าม glyph นี้
+//                    } else {
+//                        log_glyph("FALLBACK_OK", cp, fallback);
+//                        glyph = fallback;
+//                    }
+//                } else {
+//                    // เฉพาะช่วงไทย: log ไว้เพื่อเก็บสถิติ
+//                    if (cp >= 0x0E01 && cp <= 0x0E5B) {
+//                        log_glyph("THAI_OK", cp, glyph);
+//                    }
+//                }
             }
 
             float       gx, gy;
@@ -835,19 +915,19 @@ struct Renderer {
             static bool warned_sara_ue = false;
             if ((cp == 0x0E38 || cp == 0x0E39) && !warned_sara_u) {
                 warned_sara_u = true;
-                {
-                    char buf[256];
-                    int  n = snprintf(buf, sizeof(buf), "draw_text: Sara UU or U U+%04X\n", cp);
-                    write(2, buf, (size_t)n);
-                }
+//                {
+//                    char buf[256];
+//                    int  n = snprintf(buf, sizeof(buf), "draw_text: Sara UU or U U+%04X\n", cp);
+//                    write(2, buf, (size_t)n);
+//                }
             }
             if (cp == 0x0E36 && !warned_sara_ue) {
                 warned_sara_ue = true;
-                {
-                    char buf[256];
-                    int  n = snprintf(buf, sizeof(buf), "draw_text: Sara UE U+%04X\n", cp);
-                    write(2, buf, (size_t)n);
-                }
+//                {
+//                    char buf[256];
+//                    int  n = snprintf(buf, sizeof(buf), "draw_text: Sara UE U+%04X\n", cp);
+//                    write(2, buf, (size_t)n);
+//                }
             }
             // Front vowels (เ แ โ ใ ไ)
             if (is_thai_vowel_front(cp)) {
@@ -885,8 +965,8 @@ struct Renderer {
                 // Store for potential combining marks
                 if (is_thai_consonant(cp)) {
                     prev_consonant   = cp;
-                    prev_consonant_x = cursor_x;
-                    prev_consonant_y = cursor_y;
+                    //prev_consonant_x = cursor_x;
+                    //prev_consonant_y = cursor_y;
                 } else {
                     prev_consonant = 0;
                 }
@@ -896,6 +976,12 @@ struct Renderer {
             cursor_x += static_cast<float>(glyph->advance) * scale;
 
         add_quad:
+            // Bounds check before adding quad
+            if (vert_count + 4 > max_glyphs * 4 || idx_count + 6 > max_glyphs * 6) {
+                MM_LOG("WARNING: Text buffer overflow, skipping remaining glyphs");
+                break;
+            }
+
             float    gw       = static_cast<float>(glyph->w) * scale;
             float    gh       = static_cast<float>(glyph->h) * scale;
 
@@ -938,16 +1024,16 @@ struct Renderer {
         uint32_t vb_byte_offset = text_vertex_count * sizeof(SpriteVertex);
         uint32_t ib_byte_offset = text_index_count * sizeof(uint16_t);
 
-        backend.update_buffer(text_vb, verts, vb_byte_offset, vert_count * sizeof(SpriteVertex));
-        backend.update_buffer(text_ib, indices, ib_byte_offset, idx_count * sizeof(uint16_t));
+        backend->update_buffer(text_vb, verts, vb_byte_offset, vert_count * sizeof(SpriteVertex));
+        backend->update_buffer(text_ib, indices, ib_byte_offset, idx_count * sizeof(uint16_t));
 
         SortKey key{1, 0, 0, 1.0f};
         graph.bind_pipeline(sdf_pipeline, key);
         graph.bind_vertex_buffer(text_vb, 0, vb_byte_offset, sizeof(SpriteVertex), key);
-        graph.bind_vertex_buffer(camera_ubo, 1, 0, sizeof(float) * 16, key);
+        graph.bind_uniform_buffer(camera_ubo, 0, key); // Logical Slot 0: UBO
         graph.bind_index_buffer(text_ib, IndexType::Uint16, ib_byte_offset, key);
-        graph.bind_fragment_texture(font_tex, 0, key);
-        graph.bind_fragment_sampler(font_sampler, 0, key);
+        graph.bind_fragment_texture(font_tex, 1, key);     // Logical Slot 1: Sampler
+        graph.bind_fragment_sampler(font_sampler, 1, key); // Logical Slot 1: Sampler
         graph.draw_indexed(key, idx_count, 1, 0, 0);
 
         text_vertex_count += vert_count;
