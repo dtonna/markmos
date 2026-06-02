@@ -59,4 +59,6 @@ xcuserdata/
 *.xcuserdatad/
 *.xccurrentversion
 
+.clangd
+
 /engine/master_prompt*.md
