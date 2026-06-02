@@ -24,6 +24,7 @@
 #include "../render/mm_sprite.hpp"
 #include "../ui/mm_ui.hpp"
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -75,6 +76,9 @@ struct Game {
     SpriteAtlas   star_atlas;
     TextureHandle star_tex;
     SamplerHandle star_sampler;
+
+    TextureHandle demo_tex;
+    Material      demo_mat;
 
     ui::Manager   ui;
 
@@ -520,6 +524,12 @@ static void build_ui_demo() noexcept {
     m.button(0, 0, 100.0f, 34.0f, "One", 0xFF554466, 0xFFFFFFFF, nullptr, btn_panel);
     m.button(0, 0, 100.0f, 34.0f, "Two", 0xFF665577, 0xFFFFFFFF, nullptr, btn_panel);
     m.button(0, 0, 125.0f, 34.0f, "Three", 0xFF776688, 0xFFFFFFFF, nullptr, btn_panel);
+    // Image widget with procedural texture
+    if (g.demo_mat.pipeline.is_valid()) {
+        uint16_t img = m.image(cx + 260, 60, 160, 160);
+        m.set_material(img, g.demo_mat);
+    }
+
     m.layout(g.renderer);
 }
 
@@ -672,6 +682,45 @@ static void game_init(void *) {
     g.renderer.backend.layer     = g_backend->layer;
 
     (void)g.renderer.init(nullptr, 0, 0);
+
+    g.batch.init();
+
+    // Create procedural demo texture (no external PNG needed)
+    {
+        uint8_t tex_pixels[256 * 256 * 4];
+        for (int y = 0; y < 256; ++y) {
+            for (int x = 0; x < 256; ++x) {
+                int   i    = (y * 256 + x) * 4;
+                float cx   = (float)(x - 128);
+                float cy   = (float)(y - 128);
+                float dist = sqrtf(cx * cx + cy * cy) / 128.0f;
+                if (dist > 1.0f) dist = 1.0f;
+                // Blue-purple radial gradient
+                uint8_t r  = (uint8_t)(220 - dist * 180);
+                uint8_t g  = (uint8_t)(160 - dist * 120);
+                uint8_t b  = (uint8_t)(255 - dist * 100);
+                // Checkerboard overlay
+                bool check = ((x / 32) + (y / 32)) % 2 == 0;
+                if (check) { r = r * 6 / 10; g = g * 6 / 10; b = b * 6 / 10; }
+                tex_pixels[i + 0] = r;
+                tex_pixels[i + 1] = g;
+                tex_pixels[i + 2] = b;
+                tex_pixels[i + 3] = 0xFF;
+            }
+        }
+        TextureDesc tex_desc{};
+        tex_desc.type       = TextureType::Tex2D;
+        tex_desc.format     = PixelFormat::R8G8B8A8_UNORM;
+        tex_desc.width      = 256;
+        tex_desc.height     = 256;
+        tex_desc.mip_levels = 1;
+        auto tex_res        = g.renderer.backend.create_texture(tex_desc);
+        if (tex_res) {
+            g.demo_tex = *tex_res;
+            g.renderer.backend.update_texture(g.demo_tex, tex_pixels, 0, 0, 256, 256, 0, 0);
+            g.demo_mat = g.renderer.make_material(g.renderer.sprite_pipeline, g.demo_tex, g.renderer.default_sampler);
+        }
+    }
 
     g.batch.init();
 }

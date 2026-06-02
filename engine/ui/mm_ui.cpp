@@ -331,7 +331,7 @@ void Manager::render(Renderer &r, SpriteBatch &batch, float dt) noexcept {
         if (!(w.flags & WF_Visible)) {
             continue;
         }
-        if (w.bg_color == 0) {
+        if (w.bg_color == 0 && w.type != (uint8_t)WidgetType::Image) {
             continue;
         }
         if (w.type == (uint8_t)WidgetType::Label) {
