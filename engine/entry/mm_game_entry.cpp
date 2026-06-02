@@ -24,6 +24,7 @@
 #include "../render/mm_sprite.hpp"
 #include "../ui/mm_ui.hpp"
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -32,7 +33,7 @@
 static constexpr uint16_t MAX_BLOCKS    = 256;
 static constexpr uint16_t MAX_STARS     = 32;
 
-static constexpr float    GRAVITY       = 300.0f;
+static constexpr float GRAVITY       = 150.0f;
 static constexpr float    COMBO_TIMEOUT = 1.5f;
 
 // ─────────────────────────────────────────────────────────────
@@ -76,11 +77,16 @@ struct Game {
     TextureHandle star_tex;
     SamplerHandle star_sampler;
 
+    TextureHandle demo_tex;
+    Material      demo_mat;
+
     ui::Manager   ui;
 
     Block         blocks[MAX_BLOCKS];
 
     uint16_t      active_blocks = 0;
+
+    uint64_t      frame_count   = 0;
 
     float         drop_timer    = 0.0f;
     float         drop_interval = 0.8f;
@@ -151,6 +157,7 @@ static void reset_game() noexcept {
     g.drop_interval = 0.8f;
 
     g.time          = 0.0f;
+    g.frame_count   = 0;
 
     g.started       = false;
     g.ui_built      = false;
@@ -385,9 +392,10 @@ static void render_world() noexcept {
 
 // ─── UI callbacks ──────────────────────────────────────────────────
 static void on_play_click(uint16_t) {
-    g_game.started = true;
-    g_game.state   = GameState::Playing;
-    g_game.ui.clear();
+    reset_game();
+    g_game.started     = true;
+    g_game.state       = GameState::Playing;
+    g_game.drop_timer  = 0.0f;  // spawn first block immediately
 }
 
 static void on_toggle_sound(uint16_t) {
@@ -520,6 +528,16 @@ static void build_ui_demo() noexcept {
     m.button(0, 0, 100.0f, 34.0f, "One", 0xFF554466, 0xFFFFFFFF, nullptr, btn_panel);
     m.button(0, 0, 100.0f, 34.0f, "Two", 0xFF665577, 0xFFFFFFFF, nullptr, btn_panel);
     m.button(0, 0, 125.0f, 34.0f, "Three", 0xFF776688, 0xFFFFFFFF, nullptr, btn_panel);
+    // Image widget + textured button with procedural texture
+    if (g.demo_mat.pipeline.is_valid()) {
+        uint16_t img = m.image(cx + 260, 60, 160, 160);
+        m.set_material(img, g.demo_mat);
+
+        uint16_t tbtn = m.button(cx + 260, 230, 160.0f, 40.0f, "Tex Btn",
+                                  0xFFFFFFFF, 0xFFFFFFFF, nullptr);
+        m.set_material(tbtn, g.demo_mat);
+    }
+
     m.layout(g.renderer);
 }
 
@@ -528,9 +546,14 @@ static void game_frame(void *, float dt, InputState &input) {
     auto &g         = g_game;
 
     g.time         += dt;
+    ++g.frame_count;
 
     g.tap_cooldown -= dt;
     g.hit_cooldown -= dt;
+
+    float cam_x     = 0.0f;
+    float cam_y     = 0.0f;
+    float cam_angle = 0.0f;
     if (g.combo_timer > 0.0f) {
         g.combo_timer -= dt;
         if (g.combo_timer <= 0.0f) {
@@ -560,31 +583,86 @@ static void game_frame(void *, float dt, InputState &input) {
         }
         g.ui.handle(input);
 
-        // Tap/click to hit blocks (only when no widget was clicked)
-        if (g.tap_cooldown <= 0.0f && g.ui.clicked == UINT16_MAX) {
-            for (uint8_t a = 0; a < input.action_count; ++a) {
-                if (input.actions[a] == InputAction::Select) {
-                    float tx = input.action_x;
-                    float ty = input.action_y;
-                    for (auto &b : g.blocks) {
-                        if (!b.active) {
-                            continue;
-                        }
-                        if (tx >= b.x && tx <= b.x + b.w && ty >= b.y && ty <= b.y + b.h) {
-                            hit_block(b);
-                            g.tap_cooldown = 0.15f;
-                            break;
-                        }
-                    }
-                    break;
+        g.camera.get_offset(g.time, cam_x, cam_y, cam_angle);
+
+        // Move blocks + update animations BEFORE hit-test so visual position matches
+        update_blocks(dt);
+        update_scene(dt);
+        g.tweens.update(dt);
+
+        // Immediate hit on touch-down (before gesture waits for release → blocks drift)
+        bool hit_immediate = false;
+        if (g.ui.clicked == UINT16_MAX) {
+            for (uint8_t i = 0; i < input.touch.active_count; ++i) {
+                auto &f = input.touch.fingers[i];
+                if (f.phase != TouchPhase::Pressing) continue;
+                float tx = f.curr_x + cam_x;
+                float ty = f.curr_y + cam_y;
+                fprintf(stderr, "[pressing] f=%llu tx=%.4f ty=%.4f active:", g.frame_count, tx, ty);
+                for (auto &b : g.blocks) {
+                    if (!b.active) continue;
+                    fprintf(stderr, " (%.1f,%.1f)", b.x, b.y);
                 }
+                fprintf(stderr, "\n");
+                float const EPS_LT = 15.0f;
+                float const EPS_RB = 10.0f;
+                for (int32_t bi = MAX_BLOCKS - 1; bi >= 0; --bi) {
+                    auto &b = g.blocks[bi];
+                    if (!b.active) continue;
+                    float half_w = b.w * 0.5f;
+                    float half_h = b.h * 0.5f;
+                    if (tx + EPS_LT >= b.x - half_w && tx - EPS_RB <= b.x + half_w &&
+                        ty + EPS_LT >= b.y - half_h && ty - EPS_RB <= b.y + half_h) {
+                        fprintf(stderr, "[pressing] HIT block at (%.0f,%.0f)!\n", b.x, b.y);
+                        hit_block(b);
+                        g.tap_cooldown = 0.15f;
+                        hit_immediate = true;
+                        break;
+                    }
+                }
+                break;
             }
         }
 
-        update_blocks(dt);
-        update_scene(dt);
+        // Tap/click to hit blocks (completed gesture — fallback)
+        for (uint8_t a = 0; a < input.action_count && !hit_immediate; ++a) {
+            if (input.actions[a] == InputAction::Select) {
+                float tx = input.action_x;
+                float ty = input.action_y;
+                fprintf(stderr, "[click] f=%llu screen=(%.0f,%.0f) cam=(%.1f,%.1f) world=(%.0f,%.0f) clicked=%u\n",
+                        g.frame_count, tx, ty, cam_x, cam_y, tx + cam_x, ty + cam_y, g.ui.clicked);
+                // Don't hit if a widget was clicked instead
+                if (g.ui.clicked != UINT16_MAX) break;
 
-        g.tweens.update(dt);
+                // Convert screen tap position → world space
+                tx += cam_x;
+                ty += cam_y;
+                fprintf(stderr, "[trace] f=%llu tx=%.4f ty=%.4f active:", g.frame_count, tx, ty);
+                for (auto &b : g.blocks) {
+                    if (!b.active) continue;
+                    fprintf(stderr, " (%.1f,%.1f,%.0f,%.0f)", b.x, b.y, b.w, b.h);
+                }
+                fprintf(stderr, "\n");
+                // Reverse order so top-most (last-rendered) block is checked first
+                // 15px top/left, 10px bottom/right grace
+                float const EPS_LT = 15.0f;
+                float const EPS_RB = 10.0f;
+                for (int32_t bi = MAX_BLOCKS - 1; bi >= 0; --bi) {
+                    auto &b = g.blocks[bi];
+                    if (!b.active) continue;
+                    float half_w = b.w * 0.5f;
+                    float half_h = b.h * 0.5f;
+                    if (tx + EPS_LT >= b.x - half_w && tx - EPS_RB <= b.x + half_w &&
+                        ty + EPS_LT >= b.y - half_h && ty - EPS_RB <= b.y + half_h) {
+                        fprintf(stderr, "[click] HIT block at (%.0f,%.0f)!\n", b.x, b.y);
+                        hit_block(b);
+                        g.tap_cooldown = 0.15f;
+                        break;
+                    }
+                }
+                break;
+            }
+        }
 
         if (g.particles_on) {
             g.particles.update(dt, 0.0f, 400.0f);
@@ -633,17 +711,15 @@ static void game_frame(void *, float dt, InputState &input) {
 
     (void)g.renderer.backend.begin_pass(pass);
 
-    float cam_x;
-    float cam_y;
-    float cam_angle;
-
-    g.camera.get_offset(g.time, cam_x, cam_y, cam_angle);
-
     g.renderer.ortho(cam_x, (float)g.renderer.width + cam_x, (float)g.renderer.height + cam_y, cam_y, -1.0f, 1.0f);
 
     g.renderer.upload_camera();
 
     render_world();
+
+    // Reset camera for UI so hit-tests (pick) match screen coordinates
+    g.renderer.ortho(0.0f, (float)g.renderer.width, (float)g.renderer.height, 0.0f, -1.0f, 1.0f);
+    g.renderer.upload_camera();
 
     g.ui.render(g.renderer, g.batch, dt);
 
@@ -672,6 +748,45 @@ static void game_init(void *) {
     g.renderer.backend.layer     = g_backend->layer;
 
     (void)g.renderer.init(nullptr, 0, 0);
+
+    g.batch.init();
+
+    // Create procedural demo texture (no external PNG needed)
+    {
+        uint8_t tex_pixels[256 * 256 * 4];
+        for (int y = 0; y < 256; ++y) {
+            for (int x = 0; x < 256; ++x) {
+                int   i    = (y * 256 + x) * 4;
+                float cx   = (float)(x - 128);
+                float cy   = (float)(y - 128);
+                float dist = sqrtf(cx * cx + cy * cy) / 128.0f;
+                if (dist > 1.0f) dist = 1.0f;
+                // Blue-purple radial gradient
+                uint8_t r  = (uint8_t)(220 - dist * 180);
+                uint8_t g  = (uint8_t)(160 - dist * 120);
+                uint8_t b  = (uint8_t)(255 - dist * 100);
+                // Checkerboard overlay
+                bool check = ((x / 32) + (y / 32)) % 2 == 0;
+                if (check) { r = r * 6 / 10; g = g * 6 / 10; b = b * 6 / 10; }
+                tex_pixels[i + 0] = r;
+                tex_pixels[i + 1] = g;
+                tex_pixels[i + 2] = b;
+                tex_pixels[i + 3] = 0xFF;
+            }
+        }
+        TextureDesc tex_desc{};
+        tex_desc.type       = TextureType::Tex2D;
+        tex_desc.format     = PixelFormat::R8G8B8A8_UNORM;
+        tex_desc.width      = 256;
+        tex_desc.height     = 256;
+        tex_desc.mip_levels = 1;
+        auto tex_res        = g.renderer.backend.create_texture(tex_desc);
+        if (tex_res) {
+            g.demo_tex = *tex_res;
+            g.renderer.backend.update_texture(g.demo_tex, tex_pixels, 0, 0, 256, 256, 0, 0);
+            g.demo_mat = g.renderer.make_material(g.renderer.sprite_pipeline, g.demo_tex, g.renderer.default_sampler);
+        }
+    }
 
     g.batch.init();
 }

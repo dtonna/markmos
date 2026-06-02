@@ -17,6 +17,7 @@ enum class WidgetType : uint8_t {
     Slider,
     Checkbox,
     TextField,
+    Image,
 };
 
 enum WidgetFlag : uint8_t {
@@ -178,6 +179,8 @@ struct Manager {
                       uint32_t on_c, uint32_t off_c, uint32_t fg,
                       bool initial, void (*cb)(uint16_t),
                       uint16_t parent = UINT16_MAX) noexcept;
+    uint16_t image(float x, float y, float w, float h,
+                   uint16_t parent = UINT16_MAX) noexcept;
     void remove(uint16_t id) noexcept;
     void set_material(uint16_t id, const Material& mat) noexcept;
 
@@ -533,6 +536,25 @@ inline uint16_t Manager::checkbox(float x, float y, const char* text,
     on_color[id] = on_c;
     off_color[id] = off_c;
     std::memcpy(pad[id], theme.checkbox_pad, sizeof(pad[id]));
+    return id;
+}
+
+inline uint16_t Manager::image(float x, float y, float w, float h,
+                                uint16_t parent) noexcept {
+    uint16_t id = alloc();
+    if (id == UINT16_MAX) return id;
+    auto& wg = pool[id];
+    wg.x = x; wg.y = y; wg.w = w; wg.h = h;
+    wg.scale = 1.0f;
+    wg.bg_color = 0xFFFFFFFF;  // white tint = show texture as-is
+    wg.text_color = 0;
+    wg.text[0] = '\0';
+    wg.parent = parent;
+    wg.type = (uint8_t)WidgetType::Image;
+    wg.flags = WF_Visible | WF_Enabled;
+    wg.state = 0;
+    wg.on_click = nullptr;
+    wg.on_draw = nullptr;
     return id;
 }
 
