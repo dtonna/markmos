@@ -364,8 +364,12 @@ void Manager::render(Renderer &r, SpriteBatch &batch, float dt) noexcept {
             r.set_scissor(cx, cy, cw, ch);
         }
 
-        uint32_t color = w.bg_color;
-        if (w.type == (uint8_t)WidgetType::Button) {
+        uint32_t     color   = w.bg_color;
+        bool         has_mat = mat != nullptr;
+        if (has_mat) {
+            // With custom material: draw at full brightness, overlay state later
+            color = 0xFFFFFFFF;
+        } else if (w.type == (uint8_t)WidgetType::Button) {
             if (!(w.flags & WF_Enabled)) {
                 color = ui_darken(color, 80);
             } else if (w.state == (uint8_t)BtnState::Pressed) {
@@ -393,6 +397,43 @@ void Manager::render(Renderer &r, SpriteBatch &batch, float dt) noexcept {
         } else {
             r.flush_sprites(batch, r.white_tex, r.default_sampler);
         }
+    }
+
+    r.set_scissor(0, 0, fw, fh);
+    batch.reset();
+
+    // ── Pass 1.5: state overlays for material-backed buttons ─────
+    has_batch   = false;
+    current_mat = nullptr;
+    for (uint16_t i = 0; i < count; ++i) {
+        auto &w = pool[i];
+        if (!(w.flags & WF_Visible)) continue;
+        if (!widget_material[i].pipeline.is_valid()) continue;
+        if (w.type != (uint8_t)WidgetType::Button) continue;
+
+        uint32_t overlay = 0;
+        if (!(w.flags & WF_Enabled)) {
+            overlay = 0x50000000;
+        } else if (w.state == (uint8_t)BtnState::Pressed) {
+            overlay = 0x80000000;
+        } else if (w.state == (uint8_t)BtnState::Hover) {
+            overlay = 0x30FFFFFF;
+        }
+        if (overlay == 0) continue;
+
+        int16_t  cx, cy;
+        uint16_t cw, ch;
+        if (get_clip(i, cx, cy, cw, ch)) {
+            r.set_scissor(cx, cy, cw, ch);
+        }
+
+        float ax = abs_x(i);
+        float ay = abs_y(i);
+        batch.add(ax + w.w * 0.5f, ay + w.h * 0.5f, w.w, w.h, 0.0f, overlay, 0);
+        has_batch = true;
+    }
+    if (has_batch) {
+        r.flush_sprites(batch, r.white_tex, r.default_sampler);
     }
 
     r.set_scissor(0, 0, fw, fh);

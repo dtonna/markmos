@@ -117,7 +117,8 @@ struct TouchTracker {
         if (f.type == GestureType::None) {
             if (f.duration >= long_press_time) {
                 f.type = GestureType::LongPress;
-            } else if (f.duration <= tap_max_time) {
+            } else {
+                // Any completed press shorter than long_press → Tap
                 f.type = GestureType::Tap;
             }
         }
