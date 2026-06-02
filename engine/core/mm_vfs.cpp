@@ -17,6 +17,7 @@
 #    include <android/asset_manager.h>
 #    include <unistd.h>
 #    include <fcntl.h>
+#    include <sys/stat.h>
 static AAssetManager *g_asset_mgr = nullptr;
 #elif defined(__linux__) || defined(__EMSCRIPTEN__)
 #    include <unistd.h>

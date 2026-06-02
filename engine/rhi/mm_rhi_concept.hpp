@@ -186,6 +186,7 @@ concept RHI_Backend = requires(T t, const BufferDesc& bd, const TextureDesc& td,
     requires ExpectedLike<decltype(t.bind_pipeline(ph)), void, RHIError>;
     requires ExpectedLike<decltype(t.bind_vertex_buffers(&bh, 1, nullptr, nullptr)), void, RHIError>;
     requires ExpectedLike<decltype(t.bind_index_buffer(bh, IndexType::Uint32)), void, RHIError>;
+    requires ExpectedLike<decltype(t.bind_uniform_buffer(bh, 0)), void, RHIError>;
     requires ExpectedLike<decltype(t.draw(0, 0, 0, 0)), void, RHIError>;
     requires ExpectedLike<decltype(t.draw_indexed(0, 0, 0)), void, RHIError>;
 

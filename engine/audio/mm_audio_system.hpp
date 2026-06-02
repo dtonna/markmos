@@ -31,6 +31,8 @@ struct SfxVoice {
 };
 
 struct SfxPool {
+    ma_sound  *sources[MAX_SOUNDS];
+    bool      source_loaded[MAX_SOUNDS];
     SfxVoice voices[MAX_SFX_VOICES];
     uint8_t  voice_count;
 

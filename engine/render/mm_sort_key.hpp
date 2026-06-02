@@ -55,6 +55,9 @@ struct SortKey {
     uint16_t material() const noexcept { return static_cast<uint16_t>((key >> 28) & 0xFFFF); }
     uint32_t depth()    const noexcept { return static_cast<uint32_t>(key & 0xFFFFFFF); }
 
+    static constexpr SortKey min() noexcept { SortKey sk; sk.key = 0; return sk; }
+    static constexpr SortKey max() noexcept { SortKey sk; sk.key = 0xFFFF'FFFF'FFFF'FFFFull; return sk; }
+
     bool operator<(SortKey o) const noexcept { return key < o.key; }
     bool operator>(SortKey o) const noexcept { return key > o.key; }
     bool operator==(SortKey o) const noexcept { return key == o.key; }

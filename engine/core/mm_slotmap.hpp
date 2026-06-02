@@ -12,6 +12,10 @@
 #include <new>
 #include <utility>
 
+#if defined(__ANDROID__) || defined(__linux__)
+#    include <malloc.h>
+#endif
+
 // Slotmap — chunk-based generational handle map
 //
 // @cache_reason    contiguous chunk arrays = linear memory walk on iteration;
@@ -76,18 +80,21 @@ template <typename T, uint32_t ChunkSize = 64> class Slotmap {
         // Allocate each new chunk. On partial failure, free already-allocated
         // new chunks and leave the slotmap in its pre-grow state.
         for (uint32_t i = chunk_count_; i < new_chunk_count; ++i) {
-            // std::aligned_alloc: C11/C++17, portable on all three targets.
-            // Size must be a multiple of alignment — verified by static_assert.
-            static_assert((ChunkSize * sizeof(Slot)) % 64 == 0 || sizeof(Slot) % 64 == 0 || ChunkSize % (64 / sizeof(Slot) + 1) == 0,
-                          "chunk byte size must be a multiple of 64 for aligned_alloc");
-            void *mem = std::aligned_alloc(64, ChunkSize * sizeof(Slot));
+            // Use posix_memalign or aligned_alloc depending on platform support.
+            // On Android, posix_memalign is safer for compatibility.
+            void *mem = nullptr;
+#if defined(__APPLE__) || defined(__ANDROID__) || defined(__linux__)
+            if (posix_memalign(&mem, 64, ChunkSize * sizeof(Slot)) != 0) {
+                mem = nullptr;
+            }
+#else
+            mem = _aligned_malloc(ChunkSize * sizeof(Slot), 64);
+#endif
             if (!mem) {
                 // Partial failure: free newly-allocated chunks, restore count.
                 for (uint32_t j = chunk_count_; j < i; ++j) {
                     std::free(chunks_[j]);
                 }
-                // Note: chunks_ pointer was already updated; chunk_count_ and
-                // capacity_ are still the old values, so slotmap stays valid.
                 return false;
             }
             auto *s = static_cast<Slot *>(mem);
@@ -136,7 +143,11 @@ template <typename T, uint32_t ChunkSize = 64> class Slotmap {
             s->~Slot(); // destroy Slot shell (gen, active, next_free are trivial)
         }
         for (uint32_t i = 0; i < chunk_count_; ++i) {
+#if defined(_WIN32)
+            _aligned_free(chunks_[i]);
+#else
             std::free(chunks_[i]);
+#endif
         }
         std::free(chunks_);
     }
@@ -146,12 +157,12 @@ template <typename T, uint32_t ChunkSize = 64> class Slotmap {
 
     Slotmap(Slotmap &&o) noexcept
         : chunks_(o.chunks_), chunk_count_(o.chunk_count_), capacity_(o.capacity_), size_(o.size_), free_head_(o.free_head_),
-          free_tail_(o.free_tail_) { // FIX: free_tail_ must be moved too
+          free_tail_(o.free_tail_) {
         o.chunks_      = nullptr;
         o.chunk_count_ = 0;
         o.capacity_    = 0;
         o.size_        = 0;
-        o.free_head_   = NULL_IDX; // FIX: NULL_IDX not 0 (0 = first slot index)
+        o.free_head_   = NULL_IDX;
         o.free_tail_   = NULL_IDX;
     }
 

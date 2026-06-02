@@ -53,7 +53,7 @@ struct MetalBackend {
     CA::MetalDrawable         *drawable  = nullptr;
     MTL::Texture              *depth_tex = nullptr;
     MTL::BinaryArchive        *archive   = nullptr;
-
+    
     MTL::Buffer               *volatile current_ib          = nullptr;
     MTL::IndexType              current_ib_type      = MTL::IndexTypeUInt16;
 
@@ -94,12 +94,12 @@ struct MetalBackend {
     }
 
     void shutdown() noexcept {
-        cmd_queue->release();
-        if (depth_tex) {
-            depth_tex->release();
-        }
+        if (encoder)          { encoder->endEncoding(); encoder = nullptr; }
+        if (depth_tex)        { depth_tex->release();        depth_tex  = nullptr; }
+        if (archive)          { archive->release();          archive    = nullptr; }
+        if (cmd_queue)        { cmd_queue->release();        cmd_queue  = nullptr; }
+        // device ไม่ต้อง release — borrowed จาก layer
     }
-
     // Resource creation
     Expected<BufferHandle, RHIError> create_buffer(const BufferDesc &desc) noexcept {
         MTL::ResourceOptions opts = MTL::ResourceStorageModeShared;
@@ -325,6 +325,7 @@ struct MetalBackend {
         if (!drawable) {
             return make_unexpected(RHIError::DeviceLost);
         }
+
         return {};
     }
 
@@ -335,21 +336,34 @@ struct MetalBackend {
             encoder->endEncoding();
             encoder = nullptr;
         }
-        cmd_buf->presentDrawable(drawable);
-        cmd_buf->commit();
+        if (cmd_buf && drawable) {
+            cmd_buf->presentDrawable(drawable);
+            cmd_buf->commit();
+            drawable = nullptr;  // Drawable expires after commit — invalidate
+        }
         ++frame_index;
+
         return {};
     }
 
     Expected<void, RHIError> begin_pass(const PassDesc &pass) noexcept {
-        MTL::RenderPassDescriptor *rpd = MTL::RenderPassDescriptor::renderPassDescriptor();
-        auto                       ca  = rpd->colorAttachments()->object(0);
+        if (!drawable || !cmd_buf) {
+            return make_unexpected(RHIError::DeviceLost);
+        }
+        MTL::RenderPassDescriptor *render_pass_desc = MTL::RenderPassDescriptor::renderPassDescriptor();
+        auto                       ca  = render_pass_desc->colorAttachments()->object(0);
         ca->setTexture(drawable->texture());
         ca->setLoadAction(pass.color_load == LoadOp::Clear ? MTL::LoadActionClear : MTL::LoadActionLoad);
         ca->setStoreAction(MTL::StoreActionStore);
         ca->setClearColor(MTL::ClearColor::Make(pass.clear_color[0], pass.clear_color[1], pass.clear_color[2], pass.clear_color[3]));
 
-        encoder         = cmd_buf->renderCommandEncoder(rpd);
+        encoder = cmd_buf->renderCommandEncoder(render_pass_desc);
+        //rpd->release();  // Release descriptor after use
+        
+        if (!encoder) {
+            return make_unexpected(RHIError::BackendError);
+        }
+        
         current_ib      = nullptr;
         current_ib_type = MTL::IndexTypeUInt16;
         return {};
@@ -401,6 +415,17 @@ struct MetalBackend {
         return {};
     }
 
+    Expected<void, RHIError> bind_uniform_buffer(BufferHandle handle, uint32_t index) noexcept {
+        auto *buf = buffers.get(handle.handle);
+        if (buf) {
+            // Logical 0 -> Buffer 1
+            uint32_t physical_idx = index + 1;
+            encoder->setVertexBuffer(buf->buffer, 0, physical_idx);
+            encoder->setFragmentBuffer(buf->buffer, 0, physical_idx);
+        }
+        return {};
+    }
+
     Expected<void, RHIError> draw(uint32_t vertex_count, uint32_t instance_count, uint32_t first_vertex, uint32_t first_instance) noexcept {
         encoder->drawPrimitives(MTL::PrimitiveTypeTriangle, first_vertex, vertex_count, instance_count, first_instance);
         return {};
@@ -420,7 +445,9 @@ struct MetalBackend {
         if (!tex) {
             return make_unexpected(RHIError::InvalidHandle);
         }
-        encoder->setFragmentTexture(tex->texture, index);
+        // Logical 1 -> Texture 0
+        uint32_t physical_idx = (index > 0) ? (index - 1) : 0;
+        encoder->setFragmentTexture(tex->texture, physical_idx);
         return {};
     }
 
@@ -429,7 +456,9 @@ struct MetalBackend {
         if (!samp) {
             return make_unexpected(RHIError::InvalidHandle);
         }
-        encoder->setFragmentSamplerState(samp->sampler, index);
+        // Logical 1 -> Sampler 0
+        uint32_t physical_idx = (index > 0) ? (index - 1) : 0;
+        encoder->setFragmentSamplerState(samp->sampler, physical_idx);
         return {};
     }
 
