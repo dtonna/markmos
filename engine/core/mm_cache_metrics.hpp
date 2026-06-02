@@ -1,3 +1,6 @@
+// Copyright (c) 2025 Markmos
+// SPDX-License-Identifier: MIT
+
 #pragma once
 #include <cstdint>
 #include <atomic>

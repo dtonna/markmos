@@ -1,3 +1,6 @@
+// Copyright (c) 2025 Markmos
+// SPDX-License-Identifier: MIT
+
 // Android App Entry — Sokol-style: calls user-defined markmos_main() for callbacks
 // Platform handles: Vulkan backend, input queue, audio, native activity lifecycle
 

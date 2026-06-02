@@ -1,3 +1,6 @@
+// Copyright (c) 2025 Markmos
+// SPDX-License-Identifier: MIT
+
 #version 460
 
 layout(location = 0) out vec4 frag_color;

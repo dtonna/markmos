@@ -1,3 +1,6 @@
+// Copyright (c) 2025 Markmos
+// SPDX-License-Identifier: MIT
+
 #include "mm_vfs.hpp"
 #include "mm_job_system.hpp"
 #include "mm_pool.hpp"

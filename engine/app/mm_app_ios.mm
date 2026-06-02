@@ -1,3 +1,6 @@
+// Copyright (c) 2025 Markmos
+// SPDX-License-Identifier: MIT
+
 // iOS App Entry — Sokol-style: calls user-defined markmos_main() for callbacks
 // Platform handles: Metal backend, input queue, audio, CADisplayLink lifecycle
 

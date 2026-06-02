@@ -1,3 +1,6 @@
+// Copyright (c) 2025 Markmos
+// SPDX-License-Identifier: MIT
+
 // Match-3 Board Prototype — complete match-3 gameplay loop
 // Tests: BoardGrid SoA match detection, gravity, swap logic
 //         TweenPool for anim, ParticlePool for effects, InputState for input

@@ -1,3 +1,6 @@
+// Copyright (c) 2025 Markmos
+// SPDX-License-Identifier: MIT
+
 // 2D Stress Test — 10k animated sprites @ 60fps
 // Tests: SpriteBatch SoA fill rate, vertex generation throughput, draw call batching
 

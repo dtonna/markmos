@@ -1,3 +1,6 @@
+// Copyright (c) 2025 Markmos
+// SPDX-License-Identifier: MIT
+
 // macOS App Entry — Sokol-style: calls user-defined markmos_main() for callbacks
 // Platform handles: Metal backend, input queue, audio, display link lifecycle
 // User handles: game init/update/render via AppCallbacks

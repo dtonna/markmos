@@ -1,3 +1,6 @@
+// Copyright (c) 2025 Markmos
+// SPDX-License-Identifier: MIT
+
 // Block Puzzle Prototype — Tetris/block-dropping gameplay
 // Tests: BoardGrid gravity, piece collision, row clear
 //         TweenPool slide anim, ParticlePool clear effects

@@ -1,3 +1,6 @@
+// Copyright (c) 2025 Markmos
+// SPDX-License-Identifier: MIT
+
 #include "mm_font_ttf_data.hpp"
 #include "mm_font_th_data.hpp"
 
