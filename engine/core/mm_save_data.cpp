@@ -1,3 +1,6 @@
+// Copyright (c) 2025 Markmos
+// SPDX-License-Identifier: MIT
+
 #include "mm_save_data.hpp"
 #include "mm_vfs.hpp"
 #include <cstring>

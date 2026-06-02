@@ -1,3 +1,6 @@
+// Copyright (c) 2025 Markmos
+// SPDX-License-Identifier: MIT
+
 #pragma once
 #include "../render/mm_renderer.hpp"
 #include "../input/mm_input_state.hpp"

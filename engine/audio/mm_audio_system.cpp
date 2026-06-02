@@ -1,3 +1,6 @@
+// Copyright (c) 2025 Markmos
+// SPDX-License-Identifier: MIT
+
 #include "mm_audio_system.hpp"
 #include "../core/mm_arena.hpp"
 #include "../thirdparty/miniaudio/miniaudio.h"

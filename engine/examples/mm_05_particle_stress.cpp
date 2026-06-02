@@ -1,3 +1,6 @@
+// Copyright (c) 2025 Markmos
+// SPDX-License-Identifier: MIT
+
 // Particle Stress Test — 2048 GPU-instanced particles @ 60fps
 // Tests: ParticlePool SoA update, GPU instancing throughput, burst/cone/rain emitters
 // Cache measurement: sequential SoA write = L1 streaming, single instanced draw call

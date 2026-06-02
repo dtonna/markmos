@@ -1,3 +1,6 @@
+// Copyright (c) 2025 Markmos
+// SPDX-License-Identifier: MIT
+
 // 3D Stress Test — 100 animated cubes with perspective
 // Tests: Vertex buffer update, MVP uniform, depth-less rasterization
 

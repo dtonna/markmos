@@ -1,3 +1,6 @@
+// Copyright (c) 2025 Markmos
+// SPDX-License-Identifier: MIT
+
 // Production Game Entry — revised architecture version
 // Improvements:
 // - removed hidden sparse leaks

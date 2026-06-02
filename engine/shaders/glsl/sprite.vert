@@ -1,3 +1,6 @@
+// Copyright (c) 2025 Markmos
+// SPDX-License-Identifier: MIT
+
 #version 460
 
 layout(location = 0) in ivec2 a_position;  // packed half2 (int16)
