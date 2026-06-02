@@ -417,6 +417,10 @@ static void on_quit_click(uint16_t) {
     g.state     = GameState::Playing;
 }
 
+static void on_exit_click(uint16_t) {
+    app_quit();
+}
+
 static void on_restart_click(uint16_t) {
     auto &g = g_game;
     reset_game();
@@ -497,6 +501,9 @@ static void build_ui_demo() noexcept {
     // Button
     uint16_t btn_play       = m.button(cx, cy, 240.0f, 50.0f, "เล่นเกมกู", 0xFF4488FF, 0xFFFFFFFF, on_play_click);
     m.pool[btn_play].scale  = 1.0f;
+    cy                     += gap + 4.0f;
+    uint16_t btn_exit       = m.button(cx, cy, 240.0f, 50.0f, "Exit", 0xFF664466, 0xFFFFFFFF, on_exit_click);
+    m.pool[btn_exit].scale  = 1.0f;
     cy                     += gap + 4.0f;
     // Toggle (switch)
     m.toggle(cx, cy, 48.0f, 28.0f, "", 0xFF44FF44, 0xFF444444, 0, false, on_toggle_sound);

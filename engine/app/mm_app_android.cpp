@@ -139,6 +139,13 @@ struct AndroidApp {
 };
 
 static AndroidApp g_app;
+static android_app* g_android_app = nullptr;
+
+void app_quit() noexcept {
+    if (g_android_app && g_android_app->activity) {
+        ANativeActivity_finish(g_android_app->activity);
+    }
+}
 
 extern "C" {
 
@@ -261,6 +268,7 @@ int32_t handle_input(android_app* app, AInputEvent* event) {
 }
 
 void android_main(android_app* app) {
+    g_android_app = app;
     g_callbacks = markmos_main(0, nullptr);
 
     app->onAppCmd = handle_cmd;
