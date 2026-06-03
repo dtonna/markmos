@@ -15,6 +15,7 @@
 #include "mm_shader_registry.hpp"
 #include "mm_sprite_batch.hpp"
 #include "mm_text_renderer.hpp"
+#include "../game/mm_particle_pool.hpp"
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -63,6 +64,8 @@ struct Renderer {
     BufferHandle              camera_ubo{};
     BufferHandle              sprite_vb{};
     BufferHandle              sprite_ib{};
+    BufferHandle              particle_ib{};
+    BufferHandle              particle_atlas_ubo{};
     uint32_t                  ubo_alignment{};
 
     TextureHandle             white_tex{};
@@ -87,10 +90,11 @@ struct Renderer {
     float    inv_width, inv_height;
     float    content_scale       = 1.0f;
 
-    uint32_t text_vertex_count   = 0;
-    uint32_t text_index_count    = 0;
-    uint32_t sprite_vertex_count = 0;
-    uint32_t sprite_index_count  = 0;
+    uint32_t text_vertex_count       = 0;
+    uint32_t text_index_count        = 0;
+    uint32_t sprite_vertex_count     = 0;
+    uint32_t sprite_index_count      = 0;
+    uint32_t particle_instance_count = 0;
 
     Command   *command_storage_0 = nullptr;
     Command   *command_storage_1 = nullptr;
@@ -125,6 +129,8 @@ struct Renderer {
         destroy_safe(camera_ubo, [&](auto &h) { backend->destroy_buffer(h); });
         destroy_safe(sprite_vb, [&](auto &h) { backend->destroy_buffer(h); });
         destroy_safe(sprite_ib, [&](auto &h) { backend->destroy_buffer(h); });
+        destroy_safe(particle_ib, [&](auto &h) { backend->destroy_buffer(h); });
+        destroy_safe(particle_atlas_ubo, [&](auto &h) { backend->destroy_buffer(h); });
         destroy_safe(font_tex, [&](auto &h) { backend->destroy_texture(h); });
         destroy_safe(font_sampler, [&](auto &h) { backend->destroy_sampler(h); });
         destroy_safe(text_vb, [&](auto &h) { backend->destroy_buffer(h); });
@@ -185,6 +191,34 @@ struct Renderer {
             return make_unexpected(ib.error());
         }
         sprite_ib = *ib;
+
+        // Particle instance buffer — holds packed instance data for instanced draw
+        BufferDesc pib_desc{};
+        pib_desc.type        = BufferType::Vertex;
+        pib_desc.size        = MAX_PARTICLES * 64;  // 4 × float4 per particle
+        pib_desc.cpu_visible = true;
+        auto pib             = backend->create_buffer(pib_desc);
+        if (!pib) {
+            MM_ERROR("Renderer::init() - Failed to create Particle IB");
+            return make_unexpected(pib.error());
+        }
+        particle_ib = *pib;
+
+        // Particle atlas UBO — identity mapping (tile_size = atlas_size = 1)
+        BufferDesc atlas_ubo_desc{};
+        atlas_ubo_desc.type        = BufferType::Uniform;
+        atlas_ubo_desc.size        = sizeof(float) * 4;
+        atlas_ubo_desc.cpu_visible = true;
+        auto atlas_ubo             = backend->create_buffer(atlas_ubo_desc);
+        if (!atlas_ubo) {
+            MM_ERROR("Renderer::init() - Failed to create Particle Atlas UBO");
+            return make_unexpected(atlas_ubo.error());
+        }
+        particle_atlas_ubo = *atlas_ubo;
+        {
+            float atlas_data[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+            backend->update_buffer(particle_atlas_ubo, atlas_data, 0, sizeof(atlas_data));
+        }
 
         // Default 1x1 white texture for sprite rendering
         TextureDesc white_tex_desc{};
@@ -372,8 +406,9 @@ struct Renderer {
 
     Expected<void, RHIError> begin_frame() noexcept {
         flush_text();
-        sprite_vertex_count = 0;
-        sprite_index_count  = 0;
+        sprite_vertex_count     = 0;
+        sprite_index_count      = 0;
+        particle_instance_count = 0;
         temp_arena.reset();
         frame_arena.swap();
         graph.init(frame_arena.current().template alloc_array<Command>(MAX_COMMANDS), MAX_COMMANDS);
@@ -640,6 +675,62 @@ struct Renderer {
 
     // Flush with a Technique (uses the first pass)
     void flush_sprites(SpriteBatch &batch, const Technique &tech) noexcept { flush_sprites(batch, tech.current_pass()); }
+
+    // Flush particles — instanced draw from ParticlePool SoA data
+    // Shader expects: [[buffer(1)]] instance data, [[buffer(2)]] camera, [[buffer(3)]] atlas
+    void flush_particles(ParticlePool &pool, SortKey key = {}) noexcept {
+        uint16_t count = pool.count;
+        if (count == 0) return;
+
+        // Pack SoA → contiguous instance buffer (4 × float4 = 64 bytes/particle)
+        struct ParticleInstance {
+            float px, py, _pad0, scale;     // offset +0: float4(pos.xy, 0, scale)
+            float r, g, b, atlas_id;         // offset +16: float4(color.rgb, atlas)
+            float rotation, alpha, _pad1, _pad2; // offset +32: float2(rot, alpha)
+            float _pad3[4];                  // offset +48: unused (4th float4)
+        };
+        static_assert(sizeof(ParticleInstance) == 64, "ParticleInstance must be 64 bytes");
+
+        auto *instances = temp_arena.alloc_array<ParticleInstance>(count);
+        if (!instances) return;
+
+        for (uint16_t i = 0; i < count; ++i) {
+            float life_ratio = pool.life_max[i] > 0.0f
+                                   ? pool.life[i] / pool.life_max[i]
+                                   : 1.0f;
+            float alpha = life_ratio < 0.0f ? 0.0f : (life_ratio > 1.0f ? 1.0f : life_ratio);
+
+            // pool.color[i] = 0xAABBGGRR; update() writes alpha to byte 3
+            float r = ((pool.color[i] >> 16) & 0xFF) / 255.0f;
+            float g = ((pool.color[i] >>  8) & 0xFF) / 255.0f;
+            float b = ((pool.color[i]       ) & 0xFF) / 255.0f;
+
+            instances[i] = {
+                pool.px[i], pool.py[i], 0.0f,
+                pool.scale[i] * 8.0f,  // base particle size
+                r, g, b,
+                static_cast<float>(pool.atlas_id[i]),
+                pool.rotation[i], alpha, 0.0f, 0.0f,
+                {0, 0, 0, 0}
+            };
+        }
+
+        uint32_t byte_offset = particle_instance_count * sizeof(ParticleInstance);
+        backend->update_buffer(particle_ib, instances, byte_offset,
+                               count * sizeof(ParticleInstance));
+
+        auto &mat = materials_[static_cast<uint8_t>(MaterialType::Particle)];
+        graph.bind_pipeline(mat.pipeline, key);
+        graph.bind_vertex_buffer(particle_ib, 1, byte_offset,
+                                 sizeof(ParticleInstance), key);
+        graph.bind_uniform_buffer(camera_ubo, 1, key);       // → [[buffer(2)]]
+        graph.bind_uniform_buffer(particle_atlas_ubo, 2, key); // → [[buffer(3)]]
+        graph.bind_fragment_texture(mat.texture, 1, key);
+        graph.bind_fragment_sampler(mat.sampler, 1, key);
+        graph.draw(key, 4, count, 0, 0);
+
+        particle_instance_count += count;
+    }
 
     void set_scissor(int16_t x, int16_t y, uint16_t w, uint16_t h) noexcept {
         float s = content_scale;

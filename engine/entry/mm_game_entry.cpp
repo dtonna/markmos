@@ -403,6 +403,8 @@ static void render_world() noexcept {
 
     r.flush_sprites(g.batch);
 
+    r.flush_particles(g.particles);
+
     static uint64_t last_log_frame = 0;
     if (g.frame_count > last_log_frame + 120) {
         MM_LOG("render_world: frame=%llu active_blocks=%u", (unsigned long long)g.frame_count, (uint32_t)g.active_blocks);
