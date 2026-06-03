@@ -214,7 +214,10 @@
 //   MM_OPENGLES → NDC z∈[-1,1], Y-up  (default)
 // Define one before including this header.
 // =============================================================================
-#if !defined(MM_VULKAN) && !defined(MM_METAL) && !defined(MM_OPENGLES)
+#if defined(__ANDROID__) && !defined(MM_VULKAN) && !defined(MM_METAL) && !defined(MM_OPENGLES)
+#    undef MM_VULKAN
+#    define MM_VULKAN 1
+#elif !defined(MM_VULKAN) && !defined(MM_METAL) && !defined(MM_OPENGLES)
 #    undef MM_OPENGLES
 #    define MM_OPENGLES 1
 #endif

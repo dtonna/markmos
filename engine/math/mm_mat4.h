@@ -39,7 +39,7 @@ struct mat4 {
         f32 rcp_depth  = 1.0F / (far - near);
         return mat4(
             float4{2.0F * rcp_width, 0, 0, -(right + left) * rcp_width},
-            float4{0, -2.0F * rcp_height, 0, -(top + bottom) * rcp_height},
+            float4{0, -2.0F * rcp_height, 0, (top + bottom) * rcp_height},
             float4{0, 0, rcp_depth, -near * rcp_depth},
             float4{0, 0, 0, 1.0F}
         );

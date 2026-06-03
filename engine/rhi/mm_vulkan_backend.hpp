@@ -552,6 +552,12 @@ struct VulkanBackend {
         rs.lineWidth = 1.0f;
         rs.polygonMode = VK_POLYGON_MODE_FILL;
 
+        // --- Viewport state (required even with dynamic viewport/scissor) ---
+        VkPipelineViewportStateCreateInfo vs{};
+        vs.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+        vs.viewportCount = 1;
+        vs.scissorCount = 1;
+
         // --- Multisample ---
         VkPipelineMultisampleStateCreateInfo ms{};
         ms.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
@@ -653,6 +659,7 @@ struct VulkanBackend {
         gp.pStages = stages;
         gp.pVertexInputState = &vi;
         gp.pInputAssemblyState = &ia;
+        gp.pViewportState = &vs;
         gp.pRasterizationState = &rs;
         gp.pMultisampleState = &ms;
         gp.pDepthStencilState = &ds;
@@ -1033,7 +1040,7 @@ struct VulkanBackend {
                 auto& w = writes[write_count++];
                 w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
                 w.dstSet = pl->desc_set;
-                w.dstBinding = 0; // UBO at logical slot 0
+                w.dstBinding = 1; // UBO at binding 1 (matches GLSL)
                 w.descriptorCount = 1;
                 w.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
                 w.pBufferInfo = &ubo_info;
@@ -1048,7 +1055,7 @@ struct VulkanBackend {
                 auto& w = writes[write_count++];
                 w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
                 w.dstSet = pl->desc_set;
-                w.dstBinding = 1; // Sampler at logical slot 1
+                w.dstBinding = 0; // Sampler at binding 0 (matches GLSL)
                 w.descriptorCount = 1;
                 w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
                 w.pImageInfo = &img_info;
@@ -1115,7 +1122,11 @@ struct VulkanBackend {
         flush_descriptors();
         vkCmdDrawIndexed(cmd_buf, index_count, instance_count, first_index, vertex_offset, 0);
         static uint32_t idx_draw_count = 0;
-        if (++idx_draw_count % 100 == 1) MM_LOG("VulkanBackend::draw_indexed() count=%u indices=%u", idx_draw_count, index_count);
+        ++idx_draw_count;
+        if (idx_draw_count % 100 == 1 || idx_draw_count <= 10) {
+            MM_LOG("VulkanBackend::draw_indexed() count=%u indices=%u instance_count=%u first_index=%u vertex_offset=%d cur_pipeline=%u",
+                   idx_draw_count, index_count, instance_count, first_index, vertex_offset, current_pipeline_handle.handle.id);
+        }
         return {};
     }
 
