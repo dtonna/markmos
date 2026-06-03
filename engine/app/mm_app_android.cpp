@@ -111,10 +111,12 @@ struct AndroidApp {
         width = new_w;
         height = new_h;
         backend->resize();
+        g_content_scale = this->scale_factor;
+        float cs = g_content_scale > 1.0f ? g_content_scale : 1.0f;
         if (g_callbacks.resize) {
             g_callbacks.resize(g_callbacks.user_data,
-                static_cast<uint32_t>(width),
-                static_cast<uint32_t>(height));
+                static_cast<uint32_t>(static_cast<float>(width) / cs + 0.5f),
+                static_cast<uint32_t>(static_cast<float>(height) / cs + 0.5f));
         }
     }
 
@@ -175,7 +177,7 @@ extern "C" {
 void handle_cmd(android_app* app, int32_t cmd) {
     MM_LOG("handle_cmd() called: cmd=%d, active=%d", cmd, g_app.active);
     switch (cmd) {
-        case APP_CMD_INIT_WINDOW:
+        case APP_CMD_INIT_WINDOW: {
             MM_LOG("APP_CMD_INIT_WINDOW received. Window: %p", app->window);
             g_app.window = app->window;
             g_app.asset_manager = app->activity->assetManager;
@@ -183,6 +185,7 @@ void handle_cmd(android_app* app, int32_t cmd) {
             g_app.height = ANativeWindow_getHeight(app->window);
             MM_LOG("Window size: %dx%d", g_app.width, g_app.height);
             g_app.scale_factor = AConfiguration_getDensity(app->config) / 160.0f;
+            g_content_scale = g_app.scale_factor;
 
             if (!g_app.backend) {
                 MM_LOG("g_app.backend is null, calling g_app.init()");
@@ -214,13 +217,15 @@ void handle_cmd(android_app* app, int32_t cmd) {
                 MM_LOG("User init callback finished");
             }
 
-            // Notify user code of initial size
+            // Notify user code of initial size (logical DIPs)
+            float cs = g_content_scale > 1.0f ? g_content_scale : 1.0f;
             if (g_callbacks.resize) {
                 g_callbacks.resize(g_callbacks.user_data,
-                    static_cast<uint32_t>(g_app.width),
-                    static_cast<uint32_t>(g_app.height));
+                    static_cast<uint32_t>(static_cast<float>(g_app.width) / cs + 0.5f),
+                    static_cast<uint32_t>(static_cast<float>(g_app.height) / cs + 0.5f));
             }
             break;
+        }
 
         case APP_CMD_TERM_WINDOW:
             g_app.active = false;
@@ -272,8 +277,9 @@ int32_t handle_input(android_app* app, AInputEvent* event) {
         int32_t pointer_index = (action & AMOTION_EVENT_ACTION_POINTER_INDEX_MASK)
                                 >> AMOTION_EVENT_ACTION_POINTER_INDEX_SHIFT;
         int32_t pointer_id = AMotionEvent_getPointerId(event, pointer_index);
-        float x = AMotionEvent_getX(event, pointer_index);
-        float y = AMotionEvent_getY(event, pointer_index);
+        float cs = g_content_scale > 1.0f ? g_content_scale : 1.0f;
+        float x = AMotionEvent_getX(event, pointer_index) / cs;
+        float y = AMotionEvent_getY(event, pointer_index) / cs;
 
         switch (action & AMOTION_EVENT_ACTION_MASK) {
             case AMOTION_EVENT_ACTION_DOWN:
@@ -286,8 +292,9 @@ int32_t handle_input(android_app* app, AInputEvent* event) {
                 size_t count = AMotionEvent_getPointerCount(event);
                 for (size_t i = 0; i < count && i < 5; ++i) {
                     int32_t pid = AMotionEvent_getPointerId(event, i);
-                    float px = AMotionEvent_getX(event, i);
-                    float py = AMotionEvent_getY(event, i);
+                    float cs2 = g_content_scale > 1.0f ? g_content_scale : 1.0f;
+                    float px = AMotionEvent_getX(event, i) / cs2;
+                    float py = AMotionEvent_getY(event, i) / cs2;
                     g_app.input_queue->push(
                         InputEvent::make_touch_move(static_cast<uint8_t>(pid), px, py));
                 }

@@ -456,6 +456,33 @@ static void on_restart_click(uint16_t) {
 }
 
 // ─── In-game HUD ─────────────────────────────────────────────────
+#if defined(TARGET_ANDROID)
+static void build_hud() noexcept {
+    auto &g  = *g_game;
+    auto &m  = g.ui;
+
+    float cw = static_cast<float>(g.renderer.width);
+
+    // Score label (top-left) — bigger for mobile
+    m.label(16.0f, 12.0f, "Score: 0", 0xFFFFFFFF, 1.4f);
+    g.hud_id_score = g.ui.count - 1;
+
+    // Combo label (center)
+    m.label(cw * 0.5f - 50.0f, 12.0f, "", 0xFF88FF88, 1.4f);
+    g.hud_id_combo = g.ui.count - 1;
+
+    // High score (top-right)
+    char buf[48];
+    int  len = snprintf(buf, sizeof(buf), "Best: %u", g.high_score);
+    if (len > 0) {
+        float tw = static_cast<float>(len) * 14.0f;
+        m.label(cw - tw - 16.0f, 12.0f, buf, 0xFFAAAAAA, 1.2f);
+    }
+
+    // Quit button (top-right corner)
+    m.button(cw - 60.0f, 8.0f, 50.0f, 36.0f, "X", 0x55333333, 0xFFCCCCCC, on_quit_click);
+}
+#else
 static void build_hud() noexcept {
     auto &g  = *g_game;
     auto &m  = g.ui;
@@ -481,8 +508,31 @@ static void build_hud() noexcept {
     // Quit button (bottom-right)
     m.button(cw - 80.0f, 10.0f, 70.0f, 30.0f, "Quit", 0x55333333, 0xFFCCCCCC, on_quit_click);
 }
+#endif
 
 // ─── Game Over screen ─────────────────────────────────────────────
+#if defined(TARGET_ANDROID)
+static void build_game_over() noexcept {
+    auto &g  = *g_game;
+    auto &m  = g.ui;
+
+    float cw = static_cast<float>(g.renderer.width);
+    float ch = static_cast<float>(g.renderer.height);
+    float cx = cw * 0.5f;
+    float cy = ch * 0.5f;
+
+    m.label(cx - 70.0f, cy - 70.0f, "Game Over!", 0xFFFF4444, 2.0f);
+
+    char buf[64];
+    int  len = snprintf(buf, sizeof(buf), "Score: %u  |  Best: %u", g.score, g.high_score);
+    if (len > 0) {
+        m.label(cx - 110.0f, cy - 10.0f, buf, 0xFFFFFFFF, 1.2f);
+    }
+
+    m.button(cx - 95.0f, cy + 40.0f, 190.0f, 52.0f, "Restart", 0xFF4488FF, 0xFFFFFFFF, on_restart_click);
+    m.button(cx - 95.0f, cy + 108.0f, 190.0f, 52.0f, "Main Menu", 0xFF554466, 0xFFFFFFFF, on_quit_click);
+}
+#else
 static void build_game_over() noexcept {
     auto &g  = *g_game;
     auto &m  = g.ui;
@@ -505,8 +555,37 @@ static void build_game_over() noexcept {
     uint16_t btn_menu         = m.button(cx - 120.0f, cy + 100.0f, 240.0f, 44.0f, "Main Menu", 0xFF554466, 0xFFFFFFFF, on_quit_click);
     if (btn_menu != UINT16_MAX) m.pool[btn_menu].scale    = 1.0f;
 }
+#endif
 
 // ─── Title screen ─────────────────────────────────────────────────
+#if defined(TARGET_ANDROID)
+static void build_ui_demo() noexcept {
+    auto &g   = *g_game;
+    auto &m   = g.ui;
+
+    float cw  = static_cast<float>(g.renderer.width);
+    float ch  = static_cast<float>(g.renderer.height);
+    float cx  = cw * 0.5f;
+    float cy  = ch * 0.12f;
+
+    // Title
+    m.label(cx - 70.0f, cy, "Markmos", 0xFFFFAAFF, 1.8f);
+    cy += 80.0f;
+
+    // Play button
+    uint16_t btn_play = m.button(cx - 100.0f, cy, 200.0f, 56.0f, "Play",
+                                 0xFF4488FF, 0xFFFFFFFF, on_play_click);
+    if (btn_play != UINT16_MAX) m.pool[btn_play].scale = 1.0f;
+    cy += 76.0f;
+
+    // Exit button
+    uint16_t btn_exit = m.button(cx - 100.0f, cy, 200.0f, 56.0f, "Exit",
+                                 0xFF664466, 0xFFFFFFFF, on_exit_click);
+    if (btn_exit != UINT16_MAX) m.pool[btn_exit].scale = 1.0f;
+
+    m.layout(g.renderer);
+}
+#else
 static void build_ui_demo() noexcept {
     auto &g   = *g_game;
     auto &m   = g.ui;
@@ -515,7 +594,7 @@ static void build_ui_demo() noexcept {
     float ch  = static_cast<float>(g.renderer.height);
 
     float scale = 1.0f;
-#if defined(TARGET_ANDROID) || (defined(__APPLE__) && TARGET_OS_IPHONE)
+#if defined(__APPLE__) && TARGET_OS_IPHONE
     scale = g.renderer.content_scale * 0.8f;
     if (scale < 0.5f) scale = 0.5f;
 #endif
@@ -574,12 +653,13 @@ static void build_ui_demo() noexcept {
         m.set_material(img, g.demo_mat);
 
         uint16_t tbtn = m.button(cx + 140.0f * scale, ch * 0.1f + 170.0f * scale, 160.0f * scale, 40.0f * scale, "Tex Btn",
-                                  0xFFFFFFFF, 0xFFFFFFFF, nullptr);
+                                   0xFFFFFFFF, 0xFFFFFFFF, nullptr);
         m.set_material(tbtn, g.demo_mat);
     }
 
     m.layout(g.renderer);
 }
+#endif
 
 static void game_frame(void *, float dt, InputState &input) {
 
@@ -736,7 +816,9 @@ static void game_frame(void *, float dt, InputState &input) {
 
     static uint64_t last_log_frame = 0;
     if (g.frame_count > last_log_frame + 60) {
-        MM_LOG("game_frame: f=%llu - adding render commands", (unsigned long long)g.frame_count);
+        MM_LOG("game_frame: f=%llu - adding render commands  w=%u h=%u cs=%.2f",
+               (unsigned long long)g.frame_count,
+               g.renderer.width, g.renderer.height, g.renderer.content_scale);
         last_log_frame = g.frame_count;
     }
 
@@ -745,13 +827,16 @@ static void game_frame(void *, float dt, InputState &input) {
     PassDesc pass{};
     pass.color_load     = LoadOp::Clear;
     pass.color_store    = StoreOp::Store;
-    pass.clear_color[0] = 0.05f; // Dark blue clear
+#if defined(TARGET_ANDROID)
+    pass.clear_color[0] = 0.8f; // Bright red for Android test
+    pass.clear_color[1] = 0.1f;
+    pass.clear_color[2] = 0.1f;
+#else
+    pass.clear_color[0] = 0.05f; // Dark blue clear (desktop)
     pass.clear_color[1] = 0.05f;
     pass.clear_color[2] = 0.10f;
+#endif
     pass.clear_color[3] = 1.0f;
-
-    pass.color_load     = LoadOp::Clear;
-    pass.color_store    = StoreOp::Store;
 
     g.renderer.graph.begin_pass(pass);
 

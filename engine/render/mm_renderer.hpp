@@ -398,11 +398,16 @@ struct Renderer {
     void shutdown() noexcept { destroy_resources(); }
 
     void ortho(float left, float right, float bottom, float top, float near_, float far_) noexcept {
-        mm_math::mat4 m = mm_math::mat4::ortho_mt(left, right, bottom, top, near_, far_);
+        mm_math::mat4 m = mm_math::mat4::ortho(left, right, bottom, top, near_, far_);
         m.store_column_major(view_proj);
     }
 
-    void                     upload_camera() noexcept { backend->update_buffer(camera_ubo, view_proj, 0, sizeof(view_proj)); }
+    void                     upload_camera() noexcept {
+        backend->update_buffer(camera_ubo, view_proj, 0, sizeof(view_proj));
+        // Debug: log camera matrix first few values
+        MM_LOG("CAMERA: view_proj[0]=%.4f [1]=%.4f [4]=%.4f [5]=%.4f [12]=%.4f [13]=%.4f",
+               view_proj[0], view_proj[1], view_proj[4], view_proj[5], view_proj[12], view_proj[13]);
+    }
 
     Expected<void, RHIError> begin_frame() noexcept {
         flush_text();
@@ -446,6 +451,7 @@ struct Renderer {
             switch (cmd.type) {
             case CmdType::BindPipeline: {
                 auto h = cmd.data.bind_pipeline.pipeline;
+                MM_LOG("SUBMIT: BindPipeline handle.id=%u gen=%u", h.handle.id, h.handle.gen);
 #if defined(ENGINE_ENABLE_ASSERT)
                 auto *pl = backend->pipelines.get(h.handle);
                 if (!pl) {
@@ -644,8 +650,47 @@ struct Renderer {
             uint32_t vb_byte_offset = sprite_vertex_count * sizeof(SpriteVertex);
             uint32_t ib_byte_offset = sprite_index_count * sizeof(uint16_t);
 
+            // Debug: log first sprite vertex data
+            if (vert_count > 0) {
+                SpriteVertex &v0 = verts[0];
+                float f16_x = 0.0f, f16_y = 0.0f, f16_u = 0.0f, f16_v = 0.0f;
+                // Approximate f16 decode for logging
+                auto f16_to_approx = [](uint16_t h) -> float {
+                    uint32_t sign = (h >> 15) ? 0x80000000 : 0;
+                    int exp = (h >> 10) & 0x1F;
+                    uint32_t mant = h & 0x3FF;
+                    if (exp == 0) { // subnormal or zero
+                        if (mant == 0) return 0.0f;
+                        exp = -14;
+                    } else {
+                        mant |= 0x400;
+                        exp -= 15;
+                    }
+                    uint32_t f = sign | ((exp + 127) << 23) | (mant << 13);
+                    float result;
+                    memcpy(&result, &f, sizeof(result));
+                    return result;
+                };
+                f16_x = f16_to_approx(v0.x);
+                f16_y = f16_to_approx(v0.y);
+                f16_u = f16_to_approx(v0.u);
+                f16_v = f16_to_approx(v0.v);
+                uint32_t col = v0.color;
+                uint8_t r = col & 0xFF, g = (col >> 8) & 0xFF, b = (col >> 16) & 0xFF, a = (col >> 24) & 0xFF;
+                MM_LOG("FLUSH_SPRITE: first_vert pos=(%.2f, %.2f) uv=(%.4f, %.4f) color=0x%08X (rgba=%u,%u,%u,%u) vert_count=%u",
+                       f16_x, f16_y, f16_u, f16_v, col, r, g, b, a, vert_count);
+            }
+
             backend->update_buffer(sprite_vb, verts, vb_byte_offset, vert_count * sizeof(SpriteVertex));
             backend->update_buffer(sprite_ib, indices, ib_byte_offset, idx_count * sizeof(uint16_t));
+
+            // Debug: log first few indices
+            if (idx_count > 0) {
+                uint16_t first_idx = indices[0];
+                uint16_t second_idx = indices[1];
+                uint16_t third_idx = indices[2];
+                MM_LOG("FLUSH_SPRITE: indices[0-2]=%u,%u,%u idx_count=%u", first_idx, second_idx, third_idx, idx_count);
+            }
 
             SortKey key{0, 0, 0, 1.0f};
             graph.bind_pipeline(pipeline, key);
@@ -783,8 +828,8 @@ struct Renderer {
         desc.vertex_attrs[2]        = {2, PixelFormat::R8G8B8A8_UNORM, 8, 12};
 
         desc.descriptor_count       = 2;
-        desc.descriptor_bindings[0] = {0, DescriptorType::UniformBuffer, 1, 1}; // Logical Slot 0
-        desc.descriptor_bindings[1] = {1, DescriptorType::CombinedImageSampler, 2, 1}; // Logical Slot 1
+        desc.descriptor_bindings[0] = {1, DescriptorType::UniformBuffer, 1, 1}; // Binding 1: UBO (vertex)
+        desc.descriptor_bindings[1] = {0, DescriptorType::CombinedImageSampler, 2, 1}; // Binding 0: CIS (frag)
 
         {
             char buf[256];
