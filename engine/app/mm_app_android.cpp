@@ -70,22 +70,22 @@ struct AndroidApp {
     float             scale_factor;
 
     void init() noexcept {
-        MM_LOG("AndroidApp::init() - Creating VulkanBackend");
+//        MM_LOG("AndroidApp::init() - Creating VulkanBackend");
         backend = new VulkanBackend();
         g_backend = backend;
 
-        MM_LOG("AndroidApp::init() - Creating InputEventQueue");
+//        MM_LOG("AndroidApp::init() - Creating InputEventQueue");
         input_queue = new InputEventQueue();
 
-        MM_LOG("AndroidApp::init() - Creating InputState");
+//        MM_LOG("AndroidApp::init() - Creating InputState");
         input_state = new InputState();
         input_state->init();
 
-        MM_LOG("AndroidApp::init() - Initializing AudioSystem");
+//        MM_LOG("AndroidApp::init() - Initializing AudioSystem");
         g_audio_system.init();
 
         time    = 0.0f;
-        MM_LOG("AndroidApp::init() - Finished base initialization");
+//        MM_LOG("AndroidApp::init() - Finished base initialization");
     }
 
     void shutdown() noexcept {
@@ -121,45 +121,45 @@ struct AndroidApp {
     }
 
     void frame(float dt) noexcept {
-        MM_LOG("frame() START: active=%d paused=%d backend=%p dt=%.3f", active, paused, backend, dt);
+//        MM_LOG("frame() START: active=%d paused=%d backend=%p dt=%.3f", active, paused, backend, dt);
         if (!active || paused || !backend) {
-            MM_LOG("frame() early return: active=%d paused=%d backend=%p", active, paused, backend);
+//            MM_LOG("frame() early return: active=%d paused=%d backend=%p", active, paused, backend);
             return;
         }
         time += dt;
 
         // Process input
-        MM_LOG("frame() processing input...");
+//        MM_LOG("frame() processing input...");
         if (input_state && input_queue) {
-            MM_LOG("frame() input_state=%p input_queue=%p", input_state, input_queue);
+//            MM_LOG("frame() input_state=%p input_queue=%p", input_state, input_queue);
             input_state->process(*input_queue, dt);
-            MM_LOG("frame() input processed OK");
+//            MM_LOG("frame() input processed OK");
         }
         
-        MM_LOG("frame() updating audio...");
+//        MM_LOG("frame() updating audio...");
         g_audio_system.update(dt);
-        MM_LOG("frame() audio updated OK");
+//        MM_LOG("frame() audio updated OK");
 
         // Render lifecycle
-        MM_LOG("frame() calling backend->begin_frame()...");
+//        MM_LOG("frame() calling backend->begin_frame()...");
         auto begin_res = backend->begin_frame();
-        MM_LOG("frame() begin_frame() returned: %d", (int)begin_res.error());
+//        MM_LOG("frame() begin_frame() returned: %d", (int)begin_res.error());
         if (!begin_res) {
             MM_ERROR("frame() begin_frame() failed: %d", (int)begin_res.error());
             return;
         }
 
         // User frame callback — game logic + draw calls (responsible for its own passes)
-        MM_LOG("frame() calling user callback: cb=%p", g_callbacks.frame);
+//        MM_LOG("frame() calling user callback: cb=%p", g_callbacks.frame);
         if (g_callbacks.frame) {
-            MM_LOG("frame() inside user callback");
+//            MM_LOG("frame() inside user callback");
             g_callbacks.frame(g_callbacks.user_data, dt, *input_state);
-            MM_LOG("frame() user callback returned OK");
+//            MM_LOG("frame() user callback returned OK");
         }
 
-        MM_LOG("frame() calling backend->end_frame()...");
+//        MM_LOG("frame() calling backend->end_frame()...");
         backend->end_frame();
-        MM_LOG("frame() END - completed successfully");
+//        MM_LOG("frame() END - completed successfully");
     }
 };
 
@@ -175,10 +175,10 @@ void app_quit() noexcept {
 extern "C" {
 
 void handle_cmd(android_app* app, int32_t cmd) {
-    MM_LOG("handle_cmd() called: cmd=%d, active=%d", cmd, g_app.active);
+//    MM_LOG("handle_cmd() called: cmd=%d, active=%d", cmd, g_app.active);
     switch (cmd) {
         case APP_CMD_INIT_WINDOW: {
-            MM_LOG("APP_CMD_INIT_WINDOW received. Window: %p", app->window);
+//            MM_LOG("APP_CMD_INIT_WINDOW received. Window: %p", app->window);
             g_app.window = app->window;
             g_app.asset_manager = app->activity->assetManager;
             g_app.width = ANativeWindow_getWidth(app->window);
@@ -188,11 +188,11 @@ void handle_cmd(android_app* app, int32_t cmd) {
             g_content_scale = g_app.scale_factor;
 
             if (!g_app.backend) {
-                MM_LOG("g_app.backend is null, calling g_app.init()");
+//                MM_LOG("g_app.backend is null, calling g_app.init()");
                 g_app.init();
             }
 
-            MM_LOG("Calling g_app.backend->init(window)");
+//            MM_LOG("Calling g_app.backend->init(window)");
             {
                 auto result = g_app.backend->init(g_app.window);
                 if (!result) {
@@ -206,15 +206,15 @@ void handle_cmd(android_app* app, int32_t cmd) {
             g_app.active = true;
 
             // Init VFS
-            MM_LOG("Initializing VFS (Internal Data Path: %s)", app->activity->internalDataPath);
+//            MM_LOG("Initializing VFS (Internal Data Path: %s)", app->activity->internalDataPath);
             Vfs::set_asset_manager(g_app.asset_manager);
             g_vfs.init("", app->activity->internalDataPath);
 
             // User init callback
             if (g_callbacks.init) {
-                MM_LOG("Calling user init callback...");
+//                MM_LOG("Calling user init callback...");
                 g_callbacks.init(g_callbacks.user_data);
-                MM_LOG("User init callback finished");
+//                MM_LOG("User init callback finished");
             }
 
             // Notify user code of initial size (logical DIPs)
@@ -234,17 +234,17 @@ void handle_cmd(android_app* app, int32_t cmd) {
             break;
 
         case APP_CMD_RESUME:
-            MM_LOG("APP_CMD_RESUME: resuming rendering");
+//            MM_LOG("APP_CMD_RESUME: resuming rendering");
             g_app.paused = false;
             break;
 
         case APP_CMD_PAUSE:
-            MM_LOG("APP_CMD_PAUSE: pausing rendering");
+//            MM_LOG("APP_CMD_PAUSE: pausing rendering");
             g_app.paused = true;
             if (g_app.backend) {
-                MM_LOG("APP_CMD_PAUSE: calling vkDeviceWaitIdle");
+//                MM_LOG("APP_CMD_PAUSE: calling vkDeviceWaitIdle");
                 vkDeviceWaitIdle(g_app.backend->device);
-                MM_LOG("APP_CMD_PAUSE: vkDeviceWaitIdle complete");
+//                MM_LOG("APP_CMD_PAUSE: vkDeviceWaitIdle complete");
             }
             break;
 
@@ -333,11 +333,11 @@ int32_t handle_input(android_app* app, AInputEvent* event) {
 }
 
 void android_main(android_app* app) {
-    MM_LOG("android_main() started");
+//    MM_LOG("android_main() started");
 
     // Initialize pool allocator (and rpmalloc)
     PoolInit();
-    MM_LOG("Pool allocator initialized");
+//    MM_LOG("Pool allocator initialized");
 
     g_android_app = app;
     g_callbacks = markmos_main(0, nullptr);
@@ -349,44 +349,44 @@ void android_main(android_app* app) {
     bool window_initialized = false;
 
     while (true) {
-        MM_LOG("=== MAIN LOOP START ===");
+//        MM_LOG("=== MAIN LOOP START ===");
         int events;
         android_poll_source* source;
         // If window not initialized, use -1 timeout to wait indefinitely
         // Once initialized, use 0 for non-blocking high-freq updates
         int timeout = (window_initialized && g_app.active) ? 0 : -1;
         
-        MM_LOG("main_loop: calling ALooper_pollOnce(timeout=%d)", timeout);
+//        MM_LOG("main_loop: calling ALooper_pollOnce(timeout=%d)", timeout);
         int poll_result = ALooper_pollOnce(timeout, nullptr, &events,
                                 reinterpret_cast<void**>(&source));
-        MM_LOG("main_loop: ALooper_pollOnce returned %d", poll_result);
+//        MM_LOG("main_loop: ALooper_pollOnce returned %d", poll_result);
         
         if (poll_result >= 0) {
-            MM_LOG("main_loop: processing source=%p", source);
+//            MM_LOG("main_loop: processing source=%p", source);
             if (source) source->process(app, source);
-            MM_LOG("main_loop: source processed");
+//            MM_LOG("main_loop: source processed");
             
             if (app->destroyRequested) {
-                MM_LOG("main_loop: destroyRequested=true, shutting down");
+//                MM_LOG("main_loop: destroyRequested=true, shutting down");
                 g_app.shutdown();
                 return;
             }
             
             // Check if window just became available
             if (!window_initialized && app->window != nullptr) {
-                MM_LOG("Window became available, setting active=true");
+//                MM_LOG("Window became available, setting active=true");
                 window_initialized = true;
                 g_app.active = true;
             }
         }
 
         if (g_app.active && window_initialized) {
-            MM_LOG("main_loop: about to call g_app.frame()");
+//            MM_LOG("main_loop: about to call g_app.frame()");
             float dt = 1.0f / 60.0f;
             g_app.frame(dt);
-            MM_LOG("main_loop: g_app.frame() returned successfully");
+//            MM_LOG("main_loop: g_app.frame() returned successfully");
         }
-        MM_LOG("=== MAIN LOOP END ===");
+//        MM_LOG("=== MAIN LOOP END ===");
     }
 }
 
