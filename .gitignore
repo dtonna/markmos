@@ -66,3 +66,7 @@ xcuserdata/
 /engine/master_prompt*.md
 
 /project
+
+/build-*/
+
+/engine/build_*/
