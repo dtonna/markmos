@@ -345,7 +345,7 @@ if(BUILD_EXAMPLES)
     endforeach()
 
     # Examples include Metal backend header (ObjC) via mm_renderer.hpp
-    if(PLATFORM_MACOS)
+    if(PLATFORM_MACOS OR PLATFORM_IOS)
         set_source_files_properties(${EXAMPLE_SOURCES} PROPERTIES COMPILE_FLAGS "-x objective-c++")
     endif()
 
