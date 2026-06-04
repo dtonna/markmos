@@ -8,8 +8,8 @@
 #include "mm_rhi_concept.hpp"
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <cstdio>
+#include <cstring>
 #include <unistd.h>
 
 // Metal Backend — flat struct, no Obj-C messaging in hot path
@@ -45,31 +45,31 @@ struct MetalSampler {
 };
 
 struct MetalBackend {
-    MTL::Device               *device    = nullptr;
-    MTL::CommandQueue         *cmd_queue = nullptr;
-    MTL::CommandBuffer        *cmd_buf   = nullptr;
-    MTL::RenderCommandEncoder *encoder   = nullptr;
-    CA::MetalLayer            *layer     = nullptr;
-    CA::MetalDrawable         *drawable  = nullptr;
-    MTL::Texture              *depth_tex = nullptr;
-    MTL::BinaryArchive        *archive   = nullptr;
-    
-    MTL::Buffer               *volatile current_ib          = nullptr;
-    MTL::IndexType              current_ib_type      = MTL::IndexTypeUInt16;
+    MTL::Device               *device        = nullptr;
+    MTL::CommandQueue         *cmd_queue     = nullptr;
+    MTL::CommandBuffer        *cmd_buf       = nullptr;
+    MTL::RenderCommandEncoder *encoder       = nullptr;
+    CA::MetalLayer            *layer         = nullptr;
+    CA::MetalDrawable         *drawable      = nullptr;
+    MTL::Texture              *depth_tex     = nullptr;
+    MTL::BinaryArchive        *archive       = nullptr;
 
-    Slotmap<MetalBuffer>       buffers;
-    Slotmap<MetalTexture>      textures;
-    Slotmap<MetalPipeline>     pipelines;
-    Slotmap<MetalSampler>      samplers;
+    MTL::Buffer *volatile current_ib         = nullptr;
+    MTL::IndexType           current_ib_type = MTL::IndexTypeUInt16;
 
-    uint32_t                   frame_index = 0;
+    Slotmap<MetalBuffer>     buffers;
+    Slotmap<MetalTexture>    textures;
+    Slotmap<MetalPipeline>   pipelines;
+    Slotmap<MetalSampler>    samplers;
+
+    uint32_t                 frame_index = 0;
 
     // Init — creates device, command queue, layer
-    Expected<void, RHIError>   init(void *metal_layer) noexcept {
+    Expected<void, RHIError> init(void *metal_layer) noexcept {
         if (cmd_queue) {
             return {};
         }
-        layer  = static_cast<CA::MetalLayer *>(metal_layer);
+        layer = static_cast<CA::MetalLayer *>(metal_layer);
         if (!layer) {
             return make_unexpected(RHIError::BackendError);
         }
@@ -94,10 +94,22 @@ struct MetalBackend {
     }
 
     void shutdown() noexcept {
-        if (encoder)          { encoder->endEncoding(); encoder = nullptr; }
-        if (depth_tex)        { depth_tex->release();        depth_tex  = nullptr; }
-        if (archive)          { archive->release();          archive    = nullptr; }
-        if (cmd_queue)        { cmd_queue->release();        cmd_queue  = nullptr; }
+        if (encoder) {
+            encoder->endEncoding();
+            encoder = nullptr;
+        }
+        if (depth_tex) {
+            depth_tex->release();
+            depth_tex = nullptr;
+        }
+        if (archive) {
+            archive->release();
+            archive = nullptr;
+        }
+        if (cmd_queue) {
+            cmd_queue->release();
+            cmd_queue = nullptr;
+        }
         // device ไม่ต้อง release — borrowed จาก layer
     }
     // Resource creation
@@ -158,9 +170,17 @@ struct MetalBackend {
         if (!vs_lib) {
             if (err) {
                 const char *emsg = err->localizedDescription()->utf8String();
-                { char buf[4096]; int n = snprintf(buf, sizeof(buf), "VS COMPILE ERROR (entry=%s): %s\n", pdesc.vertex_shader.entry, emsg ? emsg : "???"); write(2, buf, (size_t)n); }
+                {
+                    char buf[4096];
+                    int  n = snprintf(buf, sizeof(buf), "VS COMPILE ERROR (entry=%s): %s\n", pdesc.vertex_shader.entry, emsg ? emsg : "???");
+                    write(2, buf, (size_t)n);
+                }
             } else {
-                { char buf[256]; int n = snprintf(buf, sizeof(buf), "VS COMPILE FAIL (entry=%s) — no error info\n", pdesc.vertex_shader.entry); write(2, buf, (size_t)n); }
+                {
+                    char buf[256];
+                    int  n = snprintf(buf, sizeof(buf), "VS COMPILE FAIL (entry=%s) — no error info\n", pdesc.vertex_shader.entry);
+                    write(2, buf, (size_t)n);
+                }
             }
             return make_unexpected(RHIError::ShaderCompileFail);
         }
@@ -174,9 +194,17 @@ struct MetalBackend {
         if (!fs_lib) {
             if (err) {
                 const char *emsg = err->localizedDescription()->utf8String();
-                { char buf[4096]; int n = snprintf(buf, sizeof(buf), "FS COMPILE ERROR (entry=%s): %s\n", pdesc.fragment_shader.entry, emsg ? emsg : "???"); write(2, buf, (size_t)n); }
+                {
+                    char buf[4096];
+                    int  n = snprintf(buf, sizeof(buf), "FS COMPILE ERROR (entry=%s): %s\n", pdesc.fragment_shader.entry, emsg ? emsg : "???");
+                    write(2, buf, (size_t)n);
+                }
             } else {
-                { char buf[256]; int n = snprintf(buf, sizeof(buf), "FS COMPILE FAIL (entry=%s) — no error info\n", pdesc.fragment_shader.entry); write(2, buf, (size_t)n); }
+                {
+                    char buf[256];
+                    int  n = snprintf(buf, sizeof(buf), "FS COMPILE FAIL (entry=%s) — no error info\n", pdesc.fragment_shader.entry);
+                    write(2, buf, (size_t)n);
+                }
             }
             return make_unexpected(RHIError::ShaderCompileFail);
         }
@@ -252,9 +280,17 @@ struct MetalBackend {
         if (!pipeline) {
             if (err) {
                 const char *emsg = err->localizedDescription()->utf8String();
-                { char buf[4096]; int n = snprintf(buf, sizeof(buf), "PIPELINE COMPILE ERROR: %s\n", emsg ? emsg : "???"); write(2, buf, (size_t)n); }
+                {
+                    char buf[4096];
+                    int  n = snprintf(buf, sizeof(buf), "PIPELINE COMPILE ERROR: %s\n", emsg ? emsg : "???");
+                    write(2, buf, (size_t)n);
+                }
             } else {
-                { char buf[256]; int n = snprintf(buf, sizeof(buf), "PIPELINE COMPILE FAIL — no error info\n"); write(2, buf, (size_t)n); }
+                {
+                    char buf[256];
+                    int  n = snprintf(buf, sizeof(buf), "PIPELINE COMPILE FAIL — no error info\n");
+                    write(2, buf, (size_t)n);
+                }
             }
             return make_unexpected(RHIError::PipelineCompileFail);
         }
@@ -339,7 +375,7 @@ struct MetalBackend {
         if (cmd_buf && drawable) {
             cmd_buf->presentDrawable(drawable);
             cmd_buf->commit();
-            drawable = nullptr;  // Drawable expires after commit — invalidate
+            drawable = nullptr; // Drawable expires after commit — invalidate
         }
         ++frame_index;
 
@@ -351,19 +387,19 @@ struct MetalBackend {
             return make_unexpected(RHIError::DeviceLost);
         }
         MTL::RenderPassDescriptor *render_pass_desc = MTL::RenderPassDescriptor::renderPassDescriptor();
-        auto                       ca  = render_pass_desc->colorAttachments()->object(0);
+        auto                       ca               = render_pass_desc->colorAttachments()->object(0);
         ca->setTexture(drawable->texture());
         ca->setLoadAction(pass.color_load == LoadOp::Clear ? MTL::LoadActionClear : MTL::LoadActionLoad);
         ca->setStoreAction(MTL::StoreActionStore);
         ca->setClearColor(MTL::ClearColor::Make(pass.clear_color[0], pass.clear_color[1], pass.clear_color[2], pass.clear_color[3]));
 
         encoder = cmd_buf->renderCommandEncoder(render_pass_desc);
-        //rpd->release();  // Release descriptor after use
-        
+        // rpd->release();  // Release descriptor after use
+
         if (!encoder) {
             return make_unexpected(RHIError::BackendError);
         }
-        
+
         current_ib      = nullptr;
         current_ib_type = MTL::IndexTypeUInt16;
         return {};
@@ -402,7 +438,7 @@ struct MetalBackend {
         return {};
     }
 
-    uint64_t                  current_ib_offset   = 0;
+    uint64_t                 current_ib_offset = 0;
 
     Expected<void, RHIError> bind_index_buffer(BufferHandle handle, IndexType type, uint64_t offset = 0) noexcept {
         auto *buf = buffers.get(handle.handle);
@@ -436,7 +472,8 @@ struct MetalBackend {
             return {};
         }
         uint32_t index_size = (this->current_ib_type == MTL::IndexTypeUInt16) ? 2 : 4;
-        this->encoder->drawIndexedPrimitives(MTL::PrimitiveTypeTriangle, index_count, this->current_ib_type, this->current_ib, current_ib_offset + first_index * index_size, instance_count, vertex_offset, 0);
+        this->encoder->drawIndexedPrimitives(MTL::PrimitiveTypeTriangle, index_count, this->current_ib_type, this->current_ib,
+                                             current_ib_offset + first_index * index_size, instance_count, vertex_offset, 0);
         return {};
     }
 
@@ -489,6 +526,8 @@ struct MetalBackend {
             return MTL::PixelFormatDepth32Float;
         case PixelFormat::ASTC_4x4:
             return MTL::PixelFormatASTC_4x4_LDR;
+        case PixelFormat::R32G32_FLOAT:
+            return MTL::PixelFormatRG32Float;
         default:
             return MTL::PixelFormatBGRA8Unorm;
         }
@@ -544,6 +583,8 @@ struct MetalBackend {
             return MTL::VertexFormatUChar4Normalized;
         case PixelFormat::R16G16_FLOAT:
             return MTL::VertexFormatHalf2;
+        case PixelFormat::R32G32_FLOAT:
+            return MTL::VertexFormatFloat2;
         case PixelFormat::R16G16B16A16_FLOAT:
             return MTL::VertexFormatHalf4;
         case PixelFormat::R32G32B32_FLOAT:

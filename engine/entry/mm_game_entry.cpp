@@ -14,6 +14,8 @@
 
 #include "../app/mm_app.hpp"
 #include "../audio/mm_audio_system.hpp"
+#include "../core/mm_log.hpp"
+#include "../core/mm_vfs.hpp"
 #include "../game/mm_camera_trauma.hpp"
 #include "../game/mm_particle_pool.hpp"
 #include "../game/mm_scene.hpp"
@@ -22,9 +24,7 @@
 #include "../math/mm_color.h"
 #include "../render/mm_renderer.hpp"
 #include "../render/mm_sprite.hpp"
-#include "../core/mm_log.hpp"
 #include "../ui/mm_ui.hpp"
-#include "../core/mm_vfs.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -35,7 +35,7 @@
 static constexpr uint16_t MAX_BLOCKS    = 256;
 static constexpr uint16_t MAX_STARS     = 32;
 
-static constexpr float GRAVITY       = 150.0f;
+static constexpr float    GRAVITY       = 150.0f;
 static constexpr float    COMBO_TIMEOUT = 1.5f;
 
 // ─────────────────────────────────────────────────────────────
@@ -132,7 +132,7 @@ static Game *g_game = nullptr;
 
 // ─────────────────────────────────────────────────────────────
 
-static void play_sfx(uint8_t id, int priority, float base, float range) noexcept {
+static void  play_sfx(uint8_t id, int priority, float base, float range) noexcept {
 
     float pitch = base + static_cast<float>(std::rand() % static_cast<int>(range * 100.0f + 0.5f)) / 100.0f;
 
@@ -161,9 +161,9 @@ static void reset_game() noexcept {
     g.time          = 0.0f;
     g.frame_count   = 0;
 
-    g.started       = false;
-    g.ui_built      = false;
-
+    g.hud_built     = false;
+    g.sound_on      = true;
+    g.particles_on  = true;
     g.state         = GameState::Playing;
 
     g.tap_cooldown  = 0.0f;
@@ -210,8 +210,10 @@ static Block *alloc_block() noexcept {
 
 static float get_game_scale() noexcept {
 #if defined(TARGET_ANDROID) || (defined(__APPLE__) && TARGET_OS_IPHONE)
-    float s = g_game->renderer.content_scale;
-    return s < 0.5f ? 1.0f : s;
+    // On mobile, the coordinate system is already logical (DIPs).
+    // We don't need to scale by content_scale again, but we might want
+    // a small boost (e.g., 1.2f) for better touch targets if needed.
+    return 1.1f;
 #else
     return 1.0f;
 #endif
@@ -226,7 +228,7 @@ static void spawn_block() noexcept {
     }
 
     float scale = get_game_scale();
-    float bw    = 80.0f * scale;
+    float bw    = 60.0f * scale; // Slightly smaller base, but scaled for mobile
     float max_x = static_cast<float>(g_game->renderer.width) - bw;
     b->x        = max_x > bw ? static_cast<float>(std::rand() % static_cast<int>(max_x - bw + 1.0f) + (bw * 0.5f)) : (bw * 0.5f);
     b->y        = -bw;
@@ -327,8 +329,12 @@ static void update_blocks(float dt) noexcept {
         }
     }
 
-    float scale = get_game_scale();
+    float scale   = get_game_scale();
     float gravity = GRAVITY * scale;
+
+#if defined(TARGET_ANDROID) || (defined(__APPLE__) && TARGET_OS_IPHONE)
+    gravity *= 1.5f; // Fall faster on mobile
+#endif
 
     for (auto &b : g.blocks) {
 
@@ -338,7 +344,7 @@ static void update_blocks(float dt) noexcept {
 
         b.y += dt * gravity;
 
-        if (b.y > (float)g_game->renderer.height + (b.h * 2.0f)) {
+        if (b.y > (float)g_game->renderer.height + (b.h * 1.5f)) {
 
             game_over();
 
@@ -417,9 +423,9 @@ static void render_world() noexcept {
 // ─── UI callbacks ──────────────────────────────────────────────────
 static void on_play_click(uint16_t) {
     reset_game();
-    g_game->started     = true;
-    g_game->state       = GameState::Playing;
-    g_game->drop_timer  = 0.0f;  // spawn first block immediately
+    g_game->started    = true;
+    g_game->state      = GameState::Playing;
+    g_game->drop_timer = 0.0f; // spawn first block immediately
 }
 
 static void on_toggle_sound(uint16_t) {
@@ -441,9 +447,7 @@ static void on_quit_click(uint16_t) {
     g.state     = GameState::Playing;
 }
 
-static void on_exit_click(uint16_t) {
-    app_quit();
-}
+static void on_exit_click(uint16_t) { app_quit(); }
 
 static void on_restart_click(uint16_t) {
     auto &g = *g_game;
@@ -456,224 +460,165 @@ static void on_restart_click(uint16_t) {
 }
 
 // ─── In-game HUD ─────────────────────────────────────────────────
-#if defined(TARGET_ANDROID)
 static void build_hud() noexcept {
-    auto &g  = *g_game;
-    auto &m  = g.ui;
+    auto &g     = *g_game;
+    auto &m     = g.ui;
+    auto &r     = g.renderer;
 
-    float cw = static_cast<float>(g.renderer.width);
+    float cw    = static_cast<float>(r.width);
+    float scale = get_game_scale();
 
-    // Score label (top-left) — bigger for mobile
-    m.label(16.0f, 12.0f, "Score: 0", 0xFFFFFFFF, 1.4f);
-    g.hud_id_score = g.ui.count - 1;
-
-    // Combo label (center)
-    m.label(cw * 0.5f - 50.0f, 12.0f, "", 0xFF88FF88, 1.4f);
-    g.hud_id_combo = g.ui.count - 1;
-
-    // High score (top-right)
-    char buf[48];
-    int  len = snprintf(buf, sizeof(buf), "Best: %u", g.high_score);
-    if (len > 0) {
-        float tw = static_cast<float>(len) * 14.0f;
-        m.label(cw - tw - 16.0f, 12.0f, buf, 0xFFAAAAAA, 1.2f);
-    }
-
-    // Quit button (top-right corner)
-    m.button(cw - 60.0f, 8.0f, 50.0f, 36.0f, "X", 0x55333333, 0xFFCCCCCC, on_quit_click);
-}
+    // Safety margin from top
+#if defined(TARGET_ANDROID) || (defined(__APPLE__) && TARGET_OS_IPHONE)
+    float safe_top = 80.0f * scale;
 #else
-static void build_hud() noexcept {
-    auto &g  = *g_game;
-    auto &m  = g.ui;
-
-    float cw = static_cast<float>(g.renderer.width);
-
-    // Score label (top-left)
-    m.label(20.0f, 10.0f, "Score: 0", 0xFFFFFFFF, 1.2f);
-    g.hud_id_score = g.ui.count - 1;
-
-    // Combo label (center)
-    m.label(cw * 0.5f - 40.0f, 10.0f, "", 0xFF88FF88, 1.2f);
-    g.hud_id_combo = g.ui.count - 1;
-
-    // High score (top-right)
-    char buf[48];
-    int  len = snprintf(buf, sizeof(buf), "Best: %u", g.high_score);
-    if (len > 0) {
-        float tw = static_cast<float>(len) * 12.0f;
-        m.label(cw - tw - 20.0f, 10.0f, buf, 0xFFAAAAAA, 1.0f);
-    }
-
-    // Quit button (bottom-right)
-    m.button(cw - 80.0f, 10.0f, 70.0f, 30.0f, "Quit", 0x55333333, 0xFFCCCCCC, on_quit_click);
-}
+    float safe_top = 20.0f;
 #endif
+
+    float sc_scale = 0.9f * scale;
+    m.label(20.0f * scale, safe_top, "Score: 0", 0xFFFFFFFF, sc_scale);
+    g.hud_id_score         = m.count - 1;
+
+    // Combo centered
+    const char *combo_text = "Combo x99"; // max width guess for init
+    float       tw_combo, th_combo;
+    r.measure_text(r.default_font, combo_text, 1.0f * scale, tw_combo, th_combo);
+    m.label(cw * 0.5f - tw_combo * 0.5f, safe_top, "", 0xFF88FF88, 1.0f * scale);
+    g.hud_id_combo = m.count - 1;
+
+    // High score (left of Quit)
+    char buf[48];
+    snprintf(buf, sizeof(buf), "Best: %u", g.high_score);
+    float tw_best, th_best;
+    float best_scale = 0.8f * scale;
+    r.measure_text(r.default_font, buf, best_scale, tw_best, th_best);
+
+    float btn_w = 45.0f * scale;
+    float btn_h = 28.0f * scale;
+    float btn_x = cw - btn_w - (15.0f * scale);
+
+    m.label(btn_x - tw_best - (10.0f * scale), safe_top + (2.0f * scale), buf, 0xFFAAAAAA, best_scale);
+    m.button(btn_x, safe_top - (2.0f * scale), btn_w, btn_h, "Quit", 0x55333333, 0xFFCCCCCC, on_quit_click);
+}
 
 // ─── Game Over screen ─────────────────────────────────────────────
-#if defined(TARGET_ANDROID)
 static void build_game_over() noexcept {
     auto &g  = *g_game;
     auto &m  = g.ui;
+    auto &r  = g.renderer;
 
-    float cw = static_cast<float>(g.renderer.width);
-    float ch = static_cast<float>(g.renderer.height);
+    float cw = static_cast<float>(r.width);
+    float ch = static_cast<float>(r.height);
     float cx = cw * 0.5f;
     float cy = ch * 0.5f;
 
-    m.label(cx - 70.0f, cy - 70.0f, "Game Over!", 0xFFFF4444, 2.0f);
+#if defined(TARGET_ANDROID) || (defined(__APPLE__) && TARGET_OS_IPHONE)
+    float       scale     = 1.1f;
+    float       gap       = 65.0f * scale;
+
+    const char *title     = "Game Over!";
+    float       fsc_title = 1.2f * scale;
+    float       tw_title, th_title;
+    r.measure_text(r.default_font, title, fsc_title, tw_title, th_title);
+    m.label(cx - tw_title * 0.5f, cy - 80.0f * scale, title, 0xFFFF4444, fsc_title);
 
     char buf[64];
-    int  len = snprintf(buf, sizeof(buf), "Score: %u  |  Best: %u", g.score, g.high_score);
-    if (len > 0) {
-        m.label(cx - 110.0f, cy - 10.0f, buf, 0xFFFFFFFF, 1.2f);
-    }
+    snprintf(buf, sizeof(buf), "Score: %u  |  Best: %u", g.score, g.high_score);
+    float fsc_score = 0.9f * scale;
+    float tw_score, th_score;
+    r.measure_text(r.default_font, buf, fsc_score, tw_score, th_score);
+    m.label(cx - tw_score * 0.5f, cy - 10.0f, buf, 0xFFFFFFFF, fsc_score);
 
-    m.button(cx - 95.0f, cy + 40.0f, 190.0f, 52.0f, "Restart", 0xFF4488FF, 0xFFFFFFFF, on_restart_click);
-    m.button(cx - 95.0f, cy + 108.0f, 190.0f, 52.0f, "Main Menu", 0xFF554466, 0xFFFFFFFF, on_quit_click);
-}
+    // Measure and build buttons with dynamic width
+    float       btn_h       = 55.0f * scale;
+    float       pad         = 40.0f * scale;
+
+    const char *restart_txt = "Restart";
+    float       tw_res, th_res;
+    r.measure_text(r.default_font, restart_txt, 1.0f, tw_res, th_res);
+    float bw_res = tw_res + pad;
+    m.button(cx - bw_res * 0.5f, cy + 50.0f, bw_res, btn_h, restart_txt, 0xFF4488FF, 0xFFFFFFFF, on_restart_click);
+
+    const char *menu_txt = "Main Menu";
+    float       tw_menu, th_menu;
+    r.measure_text(r.default_font, menu_txt, 1.0f, tw_menu, th_menu);
+    float bw_menu = tw_menu + pad;
+    m.button(cx - bw_menu * 0.5f, cy + 50.0f + gap, bw_menu, btn_h, menu_txt, 0xFF554466, 0xFFFFFFFF, on_quit_click);
 #else
-static void build_game_over() noexcept {
-    auto &g  = *g_game;
-    auto &m  = g.ui;
-
-    float cw = static_cast<float>(g.renderer.width);
-    float ch = static_cast<float>(g.renderer.height);
-    float cx = cw * 0.5f;
-    float cy = ch * 0.5f;
-
     m.label(cx - 80.0f, cy - 60.0f, "Game Over!", 0xFFFF4444, 2.0f);
-
     char buf[64];
-    int  len = snprintf(buf, sizeof(buf), "Score: %u  |  Best: %u", g.score, g.high_score);
-    if (len > 0) {
-        m.label(cx - 120.0f, cy - 10.0f, buf, 0xFFFFFFFF, 1.2f);
-    }
-
-    uint16_t btn_restart      = m.button(cx - 95.0f, cy + 40.0f, 190.0f, 44.0f, "Restart", 0xFF4488FF, 0xFFFFFFFF, on_restart_click);
-    if (btn_restart != UINT16_MAX) m.pool[btn_restart].scale = 1.0f;
-    uint16_t btn_menu         = m.button(cx - 120.0f, cy + 100.0f, 240.0f, 44.0f, "Main Menu", 0xFF554466, 0xFFFFFFFF, on_quit_click);
-    if (btn_menu != UINT16_MAX) m.pool[btn_menu].scale    = 1.0f;
-}
+    snprintf(buf, sizeof(buf), "Score: %u  |  Best: %u", g.score, g.high_score);
+    m.label(cx - 120.0f, cy - 10.0f, buf, 0xFFFFFFFF, 1.2f);
+    m.button(cx - 95.0f, cy + 40.0f, 190.0f, 44.0f, "Restart", 0xFF4488FF, 0xFFFFFFFF, on_restart_click);
+    m.button(cx - 120.0f, cy + 100.0f, 240.0f, 44.0f, "Main Menu", 0xFF554466, 0xFFFFFFFF, on_quit_click);
 #endif
+}
 
 // ─── Title screen ─────────────────────────────────────────────────
-#if defined(TARGET_ANDROID)
 static void build_ui_demo() noexcept {
-    auto &g   = *g_game;
-    auto &m   = g.ui;
+    auto &g  = *g_game;
+    auto &m  = g.ui;
+    auto &r  = g.renderer;
 
-    float cw  = static_cast<float>(g.renderer.width);
-    float ch  = static_cast<float>(g.renderer.height);
-    float cx  = cw * 0.5f;
-    float cy  = ch * 0.12f;
+    float cw = static_cast<float>(r.width);
+    float ch = static_cast<float>(r.height);
+    float cx = cw * 0.5f;
+    float cy = ch * 0.15f;
 
-    // Title
-    m.label(cx - 70.0f, cy, "Markmos", 0xFFFFAAFF, 1.8f);
-    cy += 80.0f;
+#if defined(TARGET_ANDROID) || (defined(__APPLE__) && TARGET_OS_IPHONE)
+    float       scale     = 1.1f;
+    float       gap       = 65.0f * scale;
 
-    // Play button
-    uint16_t btn_play = m.button(cx - 100.0f, cy, 200.0f, 56.0f, "Play",
-                                 0xFF4488FF, 0xFFFFFFFF, on_play_click);
-    if (btn_play != UINT16_MAX) m.pool[btn_play].scale = 1.0f;
-    cy += 76.0f;
+    const char *title     = "Markmos Mobile";
+    float       fsc_title = 0.95f * scale;
+    float       tw_title, th_title;
+    r.measure_text(r.default_font, title, fsc_title, tw_title, th_title);
+    m.label(cx - tw_title * 0.5f, cy, title, 0xFFFFAAFF, fsc_title);
 
-    // Exit button
-    uint16_t btn_exit = m.button(cx - 100.0f, cy, 200.0f, 56.0f, "Exit",
-                                 0xFF664466, 0xFFFFFFFF, on_exit_click);
-    if (btn_exit != UINT16_MAX) m.pool[btn_exit].scale = 1.0f;
+    cy                    += gap;
+    const char *thai_test  = "ภาษาไทยสู้มื้อ";
+    float       tw_thai, th_thai;
+    r.measure_text(r.default_font, thai_test, 1.0f, tw_thai, th_thai);
+    m.label(cx - tw_thai * 0.5f, cy + 20.0f, thai_test, 0xFF88FF88, 1.0f);
 
-    m.layout(g.renderer);
-}
+    cy += gap;
+    m.button(cx - 100.0f * scale, cy, 200.0f * scale, 55.0f * scale, "เล่นเกม", 0xFF4488FF, 0xFFFFFFFF, on_play_click);
+    cy += gap + 10.0f;
+    m.button(cx - 100.0f * scale, cy, 200.0f * scale, 55.0f * scale, "Exit", 0xFF664466, 0xFFFFFFFF, on_exit_click);
+    cy += gap;
+    m.toggle(cx - 100.0f * scale, cy, 50.0f * scale, 30.0f * scale, "", 0xFF44FF44, 0xFF444444, 0, false, on_toggle_sound);
+    m.label(cx - 40.0f * scale, cy + 25.0f, "Sound", 0xFFCCCCCC, 1.0f);
 #else
-static void build_ui_demo() noexcept {
-    auto &g   = *g_game;
-    auto &m   = g.ui;
-
-    float cw  = static_cast<float>(g.renderer.width);
-    float ch  = static_cast<float>(g.renderer.height);
-
-    float scale = 1.0f;
-#if defined(__APPLE__) && TARGET_OS_IPHONE
-    scale = g.renderer.content_scale * 0.8f;
-    if (scale < 0.5f) scale = 0.5f;
-#endif
-
-    float cx  = cw * 0.5f;
-    float cy  = ch * 0.15f;
-    float gap = 60.0f * scale;
-
-    // Title
-    m.label(cx - 110.0f * scale, cy, "Markmos UI Demo", 0xFFFFAAFF, 1.5f * scale);
-    cy += gap;
-    // Thai font test
-    m.label(cx - 80.0f * scale, cy + 28.0f * scale, "ภาษาไทยสู้มื้อ", 0xFF88FF88, 1.0f * scale);
-    cy                     += gap;
-
-    // Button
-    uint16_t btn_play       = m.button(cx - 120.0f * scale, cy, 240.0f * scale, 50.0f * scale, "เล่นเกมกู", 0xFF4488FF, 0xFFFFFFFF, on_play_click);
-    if (btn_play != UINT16_MAX) m.pool[btn_play].scale  = 1.0f;
-    cy                     += gap + 4.0f * scale;
-    uint16_t btn_exit       = m.button(cx - 120.0f * scale, cy, 240.0f * scale, 50.0f * scale, "Exit", 0xFF664466, 0xFFFFFFFF, on_exit_click);
-    if (btn_exit != UINT16_MAX) m.pool[btn_exit].scale  = 1.0f;
-    cy                     += gap + 4.0f * scale;
-    // Toggle (switch)
-    m.toggle(cx - 120.0f * scale, cy, 48.0f * scale, 28.0f * scale, "", 0xFF44FF44, 0xFF444444, 0, false, on_toggle_sound);
-    m.label(cx - 64.0f * scale, cy + 27.0f * scale, "Sound ON/OFF", 0xFFCCCCCC, 1.0f * scale);
-    cy += gap;
-
-    // Checkbox
-    m.checkbox(cx - 120.0f * scale, cy, "Enable Particles", 0xFF44FF88, 0x33444444, 0xFFCCCCCC, true, on_checkbox_part);
-    cy += gap;
-
-    // Slider
-    m.label(cx - 120.0f * scale, cy + 14.0f * scale, "Volume", 0xFFAAAAAA, 1.0f * scale);
-    cy += 26.0f * scale;
-    m.slider(cx - 120.0f * scale, cy, 200.0f * scale, 28.0f * scale, 0.75f, on_slider_volume);
-    cy += gap;
-
-    // TextField
-    m.label(cx - 120.0f * scale, cy + 14.0f * scale, "Player Name", 0xFFAAAAAA, 1.0f * scale);
-    cy                     += 34.0f * scale;
-    uint16_t txt_name       = m.textfield(cx - 110.0f * scale, cy, 220.0f * scale, 32.0f * scale, "Player1", 0x33555555, 0xFFFFFFFF);
-    if (txt_name != UINT16_MAX) m.pool[txt_name].scale  = 0.6f;
-    cy                     += gap + 26.0f * scale;
-
-    // Buttons row: layout demo
-    float bx                = cx - 220.0f * scale;
-    m.label(bx, cy - 14.0f * scale, "Layout:", 0xFF888888, 1.0f * scale);
-    uint16_t btn_panel = m.panel(bx, cy, 440.0f * scale, 50.0f * scale, 0x22444444);
-    m.set_layout(btn_panel, 1, 8, 8);
-    m.button(0, 0, 100.0f * scale, 34.0f * scale, "One", 0xFF554466, 0xFFFFFFFF, nullptr, btn_panel);
-    m.button(0, 0, 100.0f * scale, 34.0f * scale, "Two", 0xFF665577, 0xFFFFFFFF, nullptr, btn_panel);
-    m.button(0, 0, 125.0f * scale, 34.0f * scale, "Three", 0xFF776688, 0xFFFFFFFF, nullptr, btn_panel);
-    // Image widget + textured button with procedural texture
+    m.label(cx - 110.0f, cy, "Markmos Desktop", 0xFFFFAAFF, 1.5f);
+    cy += 55.0f;
+    m.label(cx - 80.0f, cy + 28.0f, "ภาษาไทยสู้มื้อ", 0xFF88FF88, 1.0f);
+    cy += 55.0f;
+    m.button(cx - 120.0f, cy, 240.0f, 50.0f, "เล่นเกมกู", 0xFF4488FF, 0xFFFFFFFF, on_play_click);
+    cy += 65.0f;
+    m.button(cx - 120.0f, cy, 240.0f, 50.0f, "Exit", 0xFF664466, 0xFFFFFFFF, on_exit_click);
+    cy += 55.0f;
+    m.toggle(cx - 120.0f, cy, 48.0f, 28.0f, "", 0xFF44FF44, 0xFF444444, 0, false, on_toggle_sound);
+    m.label(cx - 64.0f, cy + 27.0f, "Sound ON/OFF", 0xFFCCCCCC, 1.0f);
     if (g.demo_mat.pipeline.is_valid()) {
-        uint16_t img = m.image(cx + 140.0f * scale, ch * 0.1f, 160.0f * scale, 160.0f * scale);
-        m.set_material(img, g.demo_mat);
-
-        uint16_t tbtn = m.button(cx + 140.0f * scale, ch * 0.1f + 170.0f * scale, 160.0f * scale, 40.0f * scale, "Tex Btn",
-                                   0xFFFFFFFF, 0xFFFFFFFF, nullptr);
-        m.set_material(tbtn, g.demo_mat);
+        m.image(cx + 160.0f, ch * 0.15f, 150.0f, 150.0f);
     }
-
-    m.layout(g.renderer);
-}
 #endif
+    m.layout(r);
+}
 
 static void game_frame(void *, float dt, InputState &input) {
 
-    auto &g         = *g_game;
+    auto &g  = *g_game;
 
-    g.time         += dt;
+    g.time  += dt;
     ++g.frame_count;
 
-    g.tap_cooldown -= dt;
-    g.hit_cooldown -= dt;
+    g.tap_cooldown  -= dt;
+    g.hit_cooldown  -= dt;
 
-    float cam_x     = 0.0f;
-    float cam_y     = 0.0f;
-    float cam_angle = 0.0f;
+    float cam_x      = 0.0f;
+    float cam_y      = 0.0f;
+    float cam_angle  = 0.0f;
     if (g.combo_timer > 0.0f) {
         g.combo_timer -= dt;
         if (g.combo_timer <= 0.0f) {
@@ -715,12 +660,16 @@ static void game_frame(void *, float dt, InputState &input) {
         if (g.ui.clicked == UINT16_MAX) {
             for (uint8_t i = 0; i < input.touch.active_count; ++i) {
                 auto &f = input.touch.fingers[i];
-                if (f.phase != TouchPhase::Pressing) continue;
+                if (f.phase != TouchPhase::Pressing) {
+                    continue;
+                }
                 float tx = f.curr_x + cam_x;
                 float ty = f.curr_y + cam_y;
                 fprintf(stderr, "[pressing] f=%llu tx=%.4f ty=%.4f active:", (unsigned long long)g.frame_count, tx, ty);
                 for (auto &b : g.blocks) {
-                    if (!b.active) continue;
+                    if (!b.active) {
+                        continue;
+                    }
                     fprintf(stderr, " (%.1f,%.1f)", b.x, b.y);
                 }
                 fprintf(stderr, "\n");
@@ -728,15 +677,16 @@ static void game_frame(void *, float dt, InputState &input) {
                 float const EPS_RB = 10.0f;
                 for (int32_t bi = MAX_BLOCKS - 1; bi >= 0; --bi) {
                     auto &b = g.blocks[bi];
-                    if (!b.active) continue;
+                    if (!b.active) {
+                        continue;
+                    }
                     float half_w = b.w * 0.5f;
                     float half_h = b.h * 0.5f;
-                    if (tx + EPS_LT >= b.x - half_w && tx - EPS_RB <= b.x + half_w &&
-                        ty + EPS_LT >= b.y - half_h && ty - EPS_RB <= b.y + half_h) {
+                    if (tx + EPS_LT >= b.x - half_w && tx - EPS_RB <= b.x + half_w && ty + EPS_LT >= b.y - half_h && ty - EPS_RB <= b.y + half_h) {
                         fprintf(stderr, "[pressing] HIT block at (%.0f,%.0f)!\n", b.x, b.y);
                         hit_block(b);
                         g.tap_cooldown = 0.15f;
-                        hit_immediate = true;
+                        hit_immediate  = true;
                         break;
                     }
                 }
@@ -749,17 +699,21 @@ static void game_frame(void *, float dt, InputState &input) {
             if (input.actions[a] == InputAction::Select) {
                 float tx = input.action_x;
                 float ty = input.action_y;
-                fprintf(stderr, "[click] f=%llu screen=(%.0f,%.0f) cam=(%.1f,%.1f) world=(%.0f,%.0f) clicked=%u\n",
-                        (unsigned long long)g.frame_count, tx, ty, cam_x, cam_y, tx + cam_x, ty + cam_y, g.ui.clicked);
+                fprintf(stderr, "[click] f=%llu screen=(%.0f,%.0f) cam=(%.1f,%.1f) world=(%.0f,%.0f) clicked=%u\n", (unsigned long long)g.frame_count, tx, ty,
+                        cam_x, cam_y, tx + cam_x, ty + cam_y, g.ui.clicked);
                 // Don't hit if a widget was clicked instead
-                if (g.ui.clicked != UINT16_MAX) break;
+                if (g.ui.clicked != UINT16_MAX) {
+                    break;
+                }
 
                 // Convert screen tap position → world space
                 tx += cam_x;
                 ty += cam_y;
                 fprintf(stderr, "[trace] f=%llu tx=%.4f ty=%.4f active:", (unsigned long long)g.frame_count, tx, ty);
                 for (auto &b : g.blocks) {
-                    if (!b.active) continue;
+                    if (!b.active) {
+                        continue;
+                    }
                     fprintf(stderr, " (%.1f,%.1f,%.0f,%.0f)", b.x, b.y, b.w, b.h);
                 }
                 fprintf(stderr, "\n");
@@ -769,11 +723,12 @@ static void game_frame(void *, float dt, InputState &input) {
                 float const EPS_RB = 10.0f;
                 for (int32_t bi = MAX_BLOCKS - 1; bi >= 0; --bi) {
                     auto &b = g.blocks[bi];
-                    if (!b.active) continue;
+                    if (!b.active) {
+                        continue;
+                    }
                     float half_w = b.w * 0.5f;
                     float half_h = b.h * 0.5f;
-                    if (tx + EPS_LT >= b.x - half_w && tx - EPS_RB <= b.x + half_w &&
-                        ty + EPS_LT >= b.y - half_h && ty - EPS_RB <= b.y + half_h) {
+                    if (tx + EPS_LT >= b.x - half_w && tx - EPS_RB <= b.x + half_w && ty + EPS_LT >= b.y - half_h && ty - EPS_RB <= b.y + half_h) {
                         fprintf(stderr, "[click] HIT block at (%.0f,%.0f)!\n", b.x, b.y);
                         hit_block(b);
                         g.tap_cooldown = 0.15f;
@@ -816,9 +771,9 @@ static void game_frame(void *, float dt, InputState &input) {
 
     static uint64_t last_log_frame = 0;
     if (g.frame_count > last_log_frame + 60) {
-        MM_LOG("game_frame: f=%llu - adding render commands  w=%u h=%u cs=%.2f",
-               (unsigned long long)g.frame_count,
-               g.renderer.width, g.renderer.height, g.renderer.content_scale);
+        // MM_LOG("game_frame: f=%llu - adding render commands  w=%u h=%u cs=%.2f",
+        //        (unsigned long long)g.frame_count,
+        //        g.renderer.width, g.renderer.height, g.renderer.content_scale);
         last_log_frame = g.frame_count;
     }
 
@@ -827,15 +782,9 @@ static void game_frame(void *, float dt, InputState &input) {
     PassDesc pass{};
     pass.color_load     = LoadOp::Clear;
     pass.color_store    = StoreOp::Store;
-#if defined(TARGET_ANDROID)
-    pass.clear_color[0] = 0.8f; // Bright red for Android test
-    pass.clear_color[1] = 0.1f;
-    pass.clear_color[2] = 0.1f;
-#else
-    pass.clear_color[0] = 0.05f; // Dark blue clear (desktop)
+    pass.clear_color[0] = 0.05f;
     pass.clear_color[1] = 0.05f;
     pass.clear_color[2] = 0.10f;
-#endif
     pass.clear_color[3] = 1.0f;
 
     g.renderer.graph.begin_pass(pass);
@@ -866,12 +815,12 @@ static void game_init(void *) {
         g_game = new Game();
     }
     reset_game();
-    auto &g                      = *g_game;
-    g.sfx_hit_id                 = g_audio_system.sfx.register_sound("hit.wav");
-    g.sfx_score_id               = g_audio_system.sfx.register_sound("score.wav");
-    g.sfx_tap_id                 = g_audio_system.sfx.register_sound("tap.wav");
+    auto &g        = *g_game;
+    g.sfx_hit_id   = g_audio_system.sfx.register_sound("hit.wav");
+    g.sfx_score_id = g_audio_system.sfx.register_sound("score.wav");
+    g.sfx_tap_id   = g_audio_system.sfx.register_sound("tap.wav");
 
-    auto rend_res = g.renderer.init(g_backend, nullptr, 0, 0);
+    auto rend_res  = g.renderer.init(g_backend, nullptr, 0, 0);
     if (!rend_res) {
         MM_ERROR("Renderer initialization FAILED!");
     } else {
@@ -889,14 +838,20 @@ static void game_init(void *) {
                 float cx   = (float)(x - 128);
                 float cy   = (float)(y - 128);
                 float dist = sqrtf(cx * cx + cy * cy) / 128.0f;
-                if (dist > 1.0f) dist = 1.0f;
+                if (dist > 1.0f) {
+                    dist = 1.0f;
+                }
                 // Blue-purple radial gradient
-                uint8_t tr  = (uint8_t)(220 - dist * 180);
-                uint8_t tg  = (uint8_t)(160 - dist * 120);
-                uint8_t tb  = (uint8_t)(255 - dist * 100);
+                uint8_t tr    = (uint8_t)(220 - dist * 180);
+                uint8_t tg    = (uint8_t)(160 - dist * 120);
+                uint8_t tb    = (uint8_t)(255 - dist * 100);
                 // Checkerboard overlay
-                bool check = ((x / 32) + (y / 32)) % 2 == 0;
-                if (check) { tr = tr * 6 / 10; tg = tg * 6 / 10; tb = tb * 6 / 10; }
+                bool    check = ((x / 32) + (y / 32)) % 2 == 0;
+                if (check) {
+                    tr = tr * 6 / 10;
+                    tg = tg * 6 / 10;
+                    tb = tb * 6 / 10;
+                }
                 tex_pixels[i + 0] = tr;
                 tex_pixels[i + 1] = tg;
                 tex_pixels[i + 2] = tb;
@@ -904,13 +859,13 @@ static void game_init(void *) {
             }
         }
         TextureDesc tex_desc{};
-        tex_desc.type       = TextureType::Tex2D;
-        tex_desc.format     = PixelFormat::R8G8B8A8_UNORM;
-        tex_desc.width      = 256;
-        tex_desc.height     = 256;
-        tex_desc.mip_levels = 1;
+        tex_desc.type         = TextureType::Tex2D;
+        tex_desc.format       = PixelFormat::R8G8B8A8_UNORM;
+        tex_desc.width        = 256;
+        tex_desc.height       = 256;
+        tex_desc.mip_levels   = 1;
         tex_desc.array_layers = 1;
-        auto tex_res        = g.renderer.backend->create_texture(tex_desc);
+        auto tex_res          = g.renderer.backend->create_texture(tex_desc);
         if (tex_res) {
             g.demo_tex = *tex_res;
             g.renderer.backend->update_texture(g.demo_tex, tex_pixels, 0, 0, 256, 256, 0, 0);
@@ -929,7 +884,7 @@ static void game_resize(void *, uint32_t w, uint32_t h) {
 
 // ─────────────────────────────────────────────────────────────
 
-static void  game_cleanup(void *) {
+static void game_cleanup(void *) {
     if (g_game) {
         g_game->renderer.shutdown();
         delete g_game;

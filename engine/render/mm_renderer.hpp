@@ -6,6 +6,7 @@
 #include "../core/mm_expected.hpp"
 #include "../core/mm_log.hpp"
 #include "../core/mm_tracy.hpp"
+#include "../game/mm_particle_pool.hpp"
 #include "../math/mm_mat4.h"
 #include "../rhi/mm_rhi_concept.hpp"
 #include "mm_font_atlas.hpp"
@@ -15,7 +16,6 @@
 #include "mm_shader_registry.hpp"
 #include "mm_sprite_batch.hpp"
 #include "mm_text_renderer.hpp"
-#include "../game/mm_particle_pool.hpp"
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -47,8 +47,8 @@ static_assert(RHI_Backend<ActiveBackend>, "ActiveBackend must satisfy RHI_Backen
 struct Renderer {
     ActiveBackend *backend = nullptr;
 
-    DoubleArena   frame_arena;
-    RenderGraph   graph;
+    DoubleArena    frame_arena;
+    RenderGraph    graph;
 
     alignas(64) float view_proj[16];
 
@@ -86,20 +86,20 @@ struct Renderer {
     static constexpr size_t   COMMAND_STORAGE_BYTES = sizeof(Command) * MAX_COMMANDS;
     static_assert((COMMAND_STORAGE_BYTES % 64) == 0, "Command storage must be a multiple of cache-line alignment");
 
-    uint32_t width, height;
-    float    inv_width, inv_height;
-    float    content_scale       = 1.0f;
+    uint32_t   width, height;
+    float      inv_width, inv_height;
+    float      content_scale           = 1.0f;
 
-    uint32_t text_vertex_count       = 0;
-    uint32_t text_index_count        = 0;
-    uint32_t sprite_vertex_count     = 0;
-    uint32_t sprite_index_count      = 0;
-    uint32_t particle_instance_count = 0;
+    uint32_t   text_vertex_count       = 0;
+    uint32_t   text_index_count        = 0;
+    uint32_t   sprite_vertex_count     = 0;
+    uint32_t   sprite_index_count      = 0;
+    uint32_t   particle_instance_count = 0;
 
-    Command   *command_storage_0 = nullptr;
-    Command   *command_storage_1 = nullptr;
-    //alignas(64) Command command_storage_0[MAX_COMMANDS];
-    //alignas(64) Command command_storage_1[MAX_COMMANDS];
+    Command   *command_storage_0       = nullptr;
+    Command   *command_storage_1       = nullptr;
+    // alignas(64) Command command_storage_0[MAX_COMMANDS];
+    // alignas(64) Command command_storage_1[MAX_COMMANDS];
 
     FrameArena temp_arena;
     alignas(64) uint8_t temp_storage[1024 * 1024];
@@ -119,7 +119,9 @@ struct Renderer {
     }
 
     void destroy_resources() noexcept {
-        if (!backend) return;
+        if (!backend) {
+            return;
+        }
         destroy_safe(sprite_pipeline, [&](auto &h) { backend->destroy_pipeline(h); });
         destroy_safe(sprite_additive_pipeline, [&](auto &h) { backend->destroy_pipeline(h); });
         destroy_safe(sprite_multiply_pipeline, [&](auto &h) { backend->destroy_pipeline(h); });
@@ -145,10 +147,10 @@ struct Renderer {
     Expected<void, RHIError> init(ActiveBackend *backend_ptr, void *window_handle, uint32_t screen_w, uint32_t screen_h) noexcept {
         backend = backend_ptr;
         (void)window_handle;
-        width      = screen_w;
-        height     = screen_h;
-        inv_width  = screen_w ? 1.0f / static_cast<float>(screen_w) : 1.0f;
-        inv_height = screen_h ? 1.0f / static_cast<float>(screen_h) : 1.0f;
+        width             = screen_w;
+        height            = screen_h;
+        inv_width         = screen_w ? 1.0f / static_cast<float>(screen_w) : 1.0f;
+        inv_height        = screen_h ? 1.0f / static_cast<float>(screen_h) : 1.0f;
 
         command_storage_0 = new Command[MAX_COMMANDS];
         command_storage_1 = new Command[MAX_COMMANDS];
@@ -195,7 +197,7 @@ struct Renderer {
         // Particle instance buffer — holds packed instance data for instanced draw
         BufferDesc pib_desc{};
         pib_desc.type        = BufferType::Vertex;
-        pib_desc.size        = MAX_PARTICLES * 64;  // 4 × float4 per particle
+        pib_desc.size        = MAX_PARTICLES * 64; // 4 × float4 per particle
         pib_desc.cpu_visible = true;
         auto pib             = backend->create_buffer(pib_desc);
         if (!pib) {
@@ -222,13 +224,13 @@ struct Renderer {
 
         // Default 1x1 white texture for sprite rendering
         TextureDesc white_tex_desc{};
-        white_tex_desc.type       = TextureType::Tex2D;
-        white_tex_desc.format     = PixelFormat::R8G8B8A8_UNORM;
-        white_tex_desc.width      = 1;
-        white_tex_desc.height     = 1;
-        white_tex_desc.mip_levels = 1;
+        white_tex_desc.type         = TextureType::Tex2D;
+        white_tex_desc.format       = PixelFormat::R8G8B8A8_UNORM;
+        white_tex_desc.width        = 1;
+        white_tex_desc.height       = 1;
+        white_tex_desc.mip_levels   = 1;
         white_tex_desc.array_layers = 1;
-        auto wt                   = backend->create_texture(white_tex_desc);
+        auto wt                     = backend->create_texture(white_tex_desc);
         if (!wt) {
             MM_ERROR("Renderer::init() - Failed to create white texture");
             return make_unexpected(wt.error());
@@ -265,8 +267,8 @@ struct Renderer {
         }
         stbtt_bakedchar th_cd[MAX_GLYPHS_TH];
         memset(th_cd, 0, sizeof(th_cd));
-        int             th_start = 0x0E01;
-        int             th_end   = 0x0E5B;
+        int th_start = 0x0E01;
+        int th_end   = 0x0E5B;
         if (fa.bake_range(g_sarabun_ttf, 48.0f, 0x0E01, MAX_GLYPHS_TH, ascii_next_y, th_cd) < 0) {
             // Fallback: try to bake each character individually
             for (int cp = th_start; cp <= th_end; ++cp) {
@@ -275,13 +277,13 @@ struct Renderer {
         }
 
         TextureDesc font_tex_desc{};
-        font_tex_desc.type       = TextureType::Tex2D;
-        font_tex_desc.format     = PixelFormat::R8_UNORM;
-        font_tex_desc.width      = FONT_ATLAS_W;
-        font_tex_desc.height     = FONT_ATLAS_H;
-        font_tex_desc.mip_levels = 1;
+        font_tex_desc.type         = TextureType::Tex2D;
+        font_tex_desc.format       = PixelFormat::R8_UNORM;
+        font_tex_desc.width        = FONT_ATLAS_W;
+        font_tex_desc.height       = FONT_ATLAS_H;
+        font_tex_desc.mip_levels   = 1;
         font_tex_desc.array_layers = 1;
-        auto ft                  = backend->create_texture(font_tex_desc);
+        auto ft                    = backend->create_texture(font_tex_desc);
         if (!ft) {
             return make_unexpected(ft.error());
         }
@@ -328,30 +330,30 @@ struct Renderer {
             g.bearing_y = static_cast<int8_t>(bc.yoff);
             g.advance   = static_cast<uint8_t>(bc.xadvance);
         }
-//        int thai_valid = 0, thai_invalid = 0;
-//        for (int i = 0; i < MAX_GLYPHS_TH; ++i) {
-//            const GlyphInfo* gi = &default_font.glyphs_th[i];
-//            bool ok = (gi->w > 0 && gi->h > 0 &&
-//                       gi->u < default_font.atlas_w && gi->v < default_font.atlas_h &&
-//                       gi->u + gi->w <= default_font.atlas_w &&
-//                       gi->v + gi->h <= default_font.atlas_h);
-//            if (ok) {
-//                ++thai_valid;
-//            } else {
-//                ++thai_invalid;
-//                uint32_t cp = 0x0E01 + i;
-//                char buf[256];
-//                int n = snprintf(buf, sizeof(buf),
-//                                 "[Font] INVALID Thai glyph U+%04X u=%u v=%u w=%u h=%u atlas=%ux%u\n",
-//                                 cp, gi->u, gi->v, gi->w, gi->h, default_font.atlas_w, default_font.atlas_h);
-//                write(2, buf, (size_t)n);
-//            }
-//        }
-//        {
-//            char buf[128];
-//            int n = snprintf(buf, sizeof(buf), "[Font] Thai glyphs valid=%d invalid=%d\n", thai_valid, thai_invalid);
-//            write(2, buf, (size_t)n);
-//        }
+        //        int thai_valid = 0, thai_invalid = 0;
+        //        for (int i = 0; i < MAX_GLYPHS_TH; ++i) {
+        //            const GlyphInfo* gi = &default_font.glyphs_th[i];
+        //            bool ok = (gi->w > 0 && gi->h > 0 &&
+        //                       gi->u < default_font.atlas_w && gi->v < default_font.atlas_h &&
+        //                       gi->u + gi->w <= default_font.atlas_w &&
+        //                       gi->v + gi->h <= default_font.atlas_h);
+        //            if (ok) {
+        //                ++thai_valid;
+        //            } else {
+        //                ++thai_invalid;
+        //                uint32_t cp = 0x0E01 + i;
+        //                char buf[256];
+        //                int n = snprintf(buf, sizeof(buf),
+        //                                 "[Font] INVALID Thai glyph U+%04X u=%u v=%u w=%u h=%u atlas=%ux%u\n",
+        //                                 cp, gi->u, gi->v, gi->w, gi->h, default_font.atlas_w, default_font.atlas_h);
+        //                write(2, buf, (size_t)n);
+        //            }
+        //        }
+        //        {
+        //            char buf[128];
+        //            int n = snprintf(buf, sizeof(buf), "[Font] Thai glyphs valid=%d invalid=%d\n", thai_valid, thai_invalid);
+        //            write(2, buf, (size_t)n);
+        //        }
 
         BufferDesc text_vb_desc{};
         text_vb_desc.type        = BufferType::Vertex;
@@ -402,11 +404,14 @@ struct Renderer {
         m.store_column_major(view_proj);
     }
 
-    void                     upload_camera() noexcept {
+    void upload_camera() noexcept {
         backend->update_buffer(camera_ubo, view_proj, 0, sizeof(view_proj));
         // Debug: log camera matrix first few values
-        MM_LOG("CAMERA: view_proj[0]=%.4f [1]=%.4f [4]=%.4f [5]=%.4f [12]=%.4f [13]=%.4f",
-               view_proj[0], view_proj[1], view_proj[4], view_proj[5], view_proj[12], view_proj[13]);
+        // MM_LOG("CAMERA: view_proj[0]=%.4f [1]=%.4f [4]=%.4f [5]=%.4f [12]=%.4f [13]=%.4f", view_proj[0], view_proj[1], view_proj[4], view_proj[5],
+        //        view_proj[12], view_proj[13]);
+        // for (int i = 0; i < 16; i++) {
+        //     MM_LOG("view_proj[%d]=%.4f", i, view_proj[i]);
+        // }
     }
 
     Expected<void, RHIError> begin_frame() noexcept {
@@ -451,7 +456,7 @@ struct Renderer {
             switch (cmd.type) {
             case CmdType::BindPipeline: {
                 auto h = cmd.data.bind_pipeline.pipeline;
-                MM_LOG("SUBMIT: BindPipeline handle.id=%u gen=%u", h.handle.id, h.handle.gen);
+                // MM_LOG("SUBMIT: BindPipeline handle.id=%u gen=%u", h.handle.id, h.handle.gen);
 #if defined(ENGINE_ENABLE_ASSERT)
                 auto *pl = backend->pipelines.get(h.handle);
                 if (!pl) {
@@ -521,7 +526,7 @@ struct Renderer {
     }
 
     void end_frame() noexcept {
-        //backend->end_frame();
+        // backend->end_frame();
     }
 
   private:
@@ -652,53 +657,53 @@ struct Renderer {
 
             // Debug: log first sprite vertex data
             if (vert_count > 0) {
-                SpriteVertex &v0 = verts[0];
-                float f16_x = 0.0f, f16_y = 0.0f, f16_u = 0.0f, f16_v = 0.0f;
+                SpriteVertex &v0    = verts[0];
+                float         f16_x = 0.0f, f16_y = 0.0f, f16_u = 0.0f, f16_v = 0.0f;
                 // Approximate f16 decode for logging
-                auto f16_to_approx = [](uint16_t h) -> float {
+                auto          f16_to_approx = [](uint16_t h) -> float {
                     uint32_t sign = (h >> 15) ? 0x80000000 : 0;
-                    int exp = (h >> 10) & 0x1F;
+                    int      exp  = (h >> 10) & 0x1F;
                     uint32_t mant = h & 0x3FF;
                     if (exp == 0) { // subnormal or zero
-                        if (mant == 0) return 0.0f;
+                        if (mant == 0) {
+                            return 0.0f;
+                        }
                         exp = -14;
                     } else {
                         mant |= 0x400;
-                        exp -= 15;
+                        exp  -= 15;
                     }
                     uint32_t f = sign | ((exp + 127) << 23) | (mant << 13);
-                    float result;
+                    float    result;
                     memcpy(&result, &f, sizeof(result));
                     return result;
                 };
-                f16_x = f16_to_approx(v0.x);
-                f16_y = f16_to_approx(v0.y);
-                f16_u = f16_to_approx(v0.u);
-                f16_v = f16_to_approx(v0.v);
+                f16_x        = f16_to_approx(v0.x);
+                f16_y        = f16_to_approx(v0.y);
+                f16_u        = f16_to_approx(v0.u);
+                f16_v        = f16_to_approx(v0.v);
                 uint32_t col = v0.color;
-                uint8_t r = col & 0xFF, g = (col >> 8) & 0xFF, b = (col >> 16) & 0xFF, a = (col >> 24) & 0xFF;
-                MM_LOG("FLUSH_SPRITE: first_vert pos=(%.2f, %.2f) uv=(%.4f, %.4f) color=0x%08X (rgba=%u,%u,%u,%u) vert_count=%u",
-                       f16_x, f16_y, f16_u, f16_v, col, r, g, b, a, vert_count);
+                uint8_t  r = col & 0xFF, g = (col >> 8) & 0xFF, b = (col >> 16) & 0xFF, a = (col >> 24) & 0xFF;
             }
 
             backend->update_buffer(sprite_vb, verts, vb_byte_offset, vert_count * sizeof(SpriteVertex));
             backend->update_buffer(sprite_ib, indices, ib_byte_offset, idx_count * sizeof(uint16_t));
 
             // Debug: log first few indices
-            if (idx_count > 0) {
-                uint16_t first_idx = indices[0];
-                uint16_t second_idx = indices[1];
-                uint16_t third_idx = indices[2];
-                MM_LOG("FLUSH_SPRITE: indices[0-2]=%u,%u,%u idx_count=%u", first_idx, second_idx, third_idx, idx_count);
-            }
+            // if (idx_count > 0) {
+            //     uint16_t first_idx  = indices[0];
+            //     uint16_t second_idx = indices[1];
+            //     uint16_t third_idx  = indices[2];
+            //     MM_LOG("FLUSH_SPRITE: indices[0-2]=%u,%u,%u idx_count=%u", first_idx, second_idx, third_idx, idx_count);
+            // }
 
             SortKey key{0, 0, 0, 1.0f};
             graph.bind_pipeline(pipeline, key);
             graph.bind_vertex_buffer(sprite_vb, 0, vb_byte_offset, sizeof(SpriteVertex), key);
             graph.bind_uniform_buffer(camera_ubo, 0, key); // Logical Slot 0: UBO
             graph.bind_index_buffer(sprite_ib, IndexType::Uint16, ib_byte_offset, key);
-            graph.bind_fragment_texture(tex, 1, key);      // Logical Slot 1: Sampler
-            graph.bind_fragment_sampler(sampler, 1, key);  // Logical Slot 1: Sampler
+            graph.bind_fragment_texture(tex, 1, key);     // Logical Slot 1: Sampler
+            graph.bind_fragment_sampler(sampler, 1, key); // Logical Slot 1: Sampler
             graph.draw_indexed(key, idx_count, 1, 0, 0);
 
             sprite_vertex_count += vert_count;
@@ -725,53 +730,61 @@ struct Renderer {
     // Shader expects: [[buffer(1)]] instance data, [[buffer(2)]] camera, [[buffer(3)]] atlas
     void flush_particles(ParticlePool &pool, SortKey key = {}) noexcept {
         uint16_t count = pool.count;
-        if (count == 0) return;
+        if (count == 0) {
+            return;
+        }
 
         // Pack SoA → contiguous instance buffer (4 × float4 = 64 bytes/particle)
         struct ParticleInstance {
-            float px, py, _pad0, scale;     // offset +0: float4(pos.xy, 0, scale)
-            float r, g, b, atlas_id;         // offset +16: float4(color.rgb, atlas)
+            float px, py, _pad0, scale;          // offset +0: float4(pos.xy, 0, scale)
+            float r, g, b, atlas_id;             // offset +16: float4(color.rgb, atlas)
             float rotation, alpha, _pad1, _pad2; // offset +32: float2(rot, alpha)
-            float _pad3[4];                  // offset +48: unused (4th float4)
+            float _pad3[4];                      // offset +48: unused (4th float4)
         };
         static_assert(sizeof(ParticleInstance) == 64, "ParticleInstance must be 64 bytes");
 
         auto *instances = temp_arena.alloc_array<ParticleInstance>(count);
-        if (!instances) return;
-
-        for (uint16_t i = 0; i < count; ++i) {
-            float life_ratio = pool.life_max[i] > 0.0f
-                                   ? pool.life[i] / pool.life_max[i]
-                                   : 1.0f;
-            float alpha = life_ratio < 0.0f ? 0.0f : (life_ratio > 1.0f ? 1.0f : life_ratio);
-
-            // pool.color[i] = 0xAABBGGRR; update() writes alpha to byte 3
-            float r = ((pool.color[i] >> 16) & 0xFF) / 255.0f;
-            float g = ((pool.color[i] >>  8) & 0xFF) / 255.0f;
-            float b = ((pool.color[i]       ) & 0xFF) / 255.0f;
-
-            instances[i] = {
-                pool.px[i], pool.py[i], 0.0f,
-                pool.scale[i] * 8.0f,  // base particle size
-                r, g, b,
-                static_cast<float>(pool.atlas_id[i]),
-                pool.rotation[i], alpha, 0.0f, 0.0f,
-                {0, 0, 0, 0}
-            };
+        if (!instances) {
+            return;
         }
 
+        for (uint16_t i = 0; i < count; ++i) {
+            float life_ratio = pool.life_max[i] > 0.0f ? pool.life[i] / pool.life_max[i] : 1.0f;
+            float alpha      = life_ratio < 0.0f ? 0.0f : (life_ratio > 1.0f ? 1.0f : life_ratio);
+
+            // pool.color[i] = 0xAABBGGRR; update() writes alpha to byte 3
+            float r          = ((pool.color[i] >> 16) & 0xFF) / 255.0f;
+            float g          = ((pool.color[i] >> 8) & 0xFF) / 255.0f;
+            float b          = ((pool.color[i]) & 0xFF) / 255.0f;
+
+            instances[i]     = {pool.px[i],
+                                pool.py[i],
+                                0.0f,
+                                pool.scale[i] * 8.0f, // base particle size
+                                r,
+                                g,
+                                b,
+                                static_cast<float>(pool.atlas_id[i]),
+                                pool.rotation[i],
+                                alpha,
+                                0.0f,
+                                0.0f,
+                                {0, 0, 0, 0}};
+        }
+
+        MM_LOG("FLUSH_PARTICLES: count=%u first_px=%.2f first_py=%.2f first_scale=%.2f first_r=%.2f first_g=%.2f first_b=%.2f first_alpha=%.2f", count,
+               instances[0].px, instances[0].py, instances[0].scale, instances[0].r, instances[0].g, instances[0].b, instances[0].alpha);
         uint32_t byte_offset = particle_instance_count * sizeof(ParticleInstance);
-        backend->update_buffer(particle_ib, instances, byte_offset,
-                               count * sizeof(ParticleInstance));
+        // MM_LOG("FLUSH_PARTICLES: count=%u byte_offset=%u size=%lu", count, byte_offset, sizeof(ParticleInstance));
+        (void)backend->update_buffer(particle_ib, instances, byte_offset, count * sizeof(ParticleInstance));
 
         auto &mat = materials_[static_cast<uint8_t>(MaterialType::Particle)];
         graph.bind_pipeline(mat.pipeline, key);
-        graph.bind_vertex_buffer(particle_ib, 1, byte_offset,
-                                 sizeof(ParticleInstance), key);
-        graph.bind_uniform_buffer(camera_ubo, 1, key);       // → [[buffer(2)]]
-        graph.bind_uniform_buffer(particle_atlas_ubo, 2, key); // → [[buffer(3)]]
-        graph.bind_fragment_texture(mat.texture, 1, key);
-        graph.bind_fragment_sampler(mat.sampler, 1, key);
+        graph.bind_vertex_buffer(particle_ib, 1, byte_offset, sizeof(ParticleInstance), key);
+        graph.bind_uniform_buffer(camera_ubo, 1, key);         // Camera -> [[buffer(2)]] / Binding 1
+        graph.bind_uniform_buffer(particle_atlas_ubo, 2, key); // Atlas -> [[buffer(3)]] / Binding 2
+        graph.bind_fragment_texture(mat.texture, 1, key);      // Texture -> [[texture(0)]] / Binding 0
+        graph.bind_fragment_sampler(mat.sampler, 1, key);      // Sampler -> [[sampler(0)]] / Binding 0
         graph.draw(key, 4, count, 0, 0);
 
         particle_instance_count += count;
@@ -810,6 +823,7 @@ struct Renderer {
     void                     bind_pipeline(PipelineHandle pipeline) noexcept { graph.bind_pipeline(pipeline); }
 
     Expected<void, RHIError> create_default_pipelines() noexcept {
+        MM_LOG("create_default_pipelines: START");
         PipelineDesc desc{};
         desc.prim_type              = PrimitiveType::Triangle;
         desc.cull_mode              = CullMode::None;
@@ -828,8 +842,8 @@ struct Renderer {
         desc.vertex_attrs[2]        = {2, PixelFormat::R8G8B8A8_UNORM, 8, 12};
 
         desc.descriptor_count       = 2;
-        desc.descriptor_bindings[0] = {1, DescriptorType::UniformBuffer, 1, 1}; // Binding 1: UBO (vertex)
-        desc.descriptor_bindings[1] = {0, DescriptorType::CombinedImageSampler, 2, 1}; // Binding 0: CIS (frag)
+        desc.descriptor_bindings[0] = {1, DescriptorType::UniformBuffer, 1, 1};        // Slot 1: Camera
+        desc.descriptor_bindings[1] = {0, DescriptorType::CombinedImageSampler, 2, 1}; // Slot 0: Tex/Samp
 
         {
             char buf[256];
@@ -874,9 +888,10 @@ struct Renderer {
         if (!opq_res) {
             return make_unexpected(opq_res.error());
         }
-        sprite_opaque_pipeline     = *opq_res;
+        sprite_opaque_pipeline = *opq_res;
 
         // SDF pipeline (same 12-byte SpriteVertex format as sprites)
+        MM_LOG("create_default_pipelines: about to create sdf_pipeline\n");
         PipelineDesc sdf_desc      = desc;
         sdf_desc.vertex_shader     = shader::sdf_vertex();
         sdf_desc.fragment_shader   = shader::sdf_fragment();
@@ -889,19 +904,31 @@ struct Renderer {
         if (!res2) {
             return make_unexpected(res2.error());
         }
-        sdf_pipeline                    = *res2;
+        sdf_pipeline = *res2;
 
+        MM_LOG("create_default_pipelines: sprite_pipeline=%u sdf_pipeline=%u", sprite_pipeline.handle.id, sdf_pipeline.handle.id);
         // Particle pipeline
+        MM_LOG("create_default_pipelines: about to create particle_pipeline\n");
         PipelineDesc particle_desc      = desc;
+        particle_desc.is_instance       = true;
         particle_desc.vertex_shader     = shader::particle_vertex();
         particle_desc.fragment_shader   = shader::particle_fragment();
-        particle_desc.vertex_attr_count = 0;
+        particle_desc.descriptor_count  = 3;
+        particle_desc.descriptor_bindings[0] = {0, DescriptorType::CombinedImageSampler, 2, 1}; // Texture/sampler
+        particle_desc.descriptor_bindings[1] = {2, DescriptorType::UniformBuffer, 1, 1};        // Camera
+        particle_desc.descriptor_bindings[2] = {3, DescriptorType::UniformBuffer, 1, 1};        // Atlas
+        particle_desc.vertex_attr_count = 3;
+        particle_desc.vertex_attrs[0]   = {0, PixelFormat::R32G32B32A32_FLOAT, 0, 64};
+        particle_desc.vertex_attrs[1]   = {1, PixelFormat::R32G32B32A32_FLOAT, 16, 64};
+        particle_desc.vertex_attrs[2]   = {2, PixelFormat::R32G32B32A32_FLOAT, 32, 64};
 
         auto res3                       = backend->create_pipeline(particle_desc);
         if (!res3) {
+            MM_ERROR("create_default_pipelines: failed to create particle pipeline");
             return make_unexpected(res3.error());
         }
-        particle_pipeline                                              = *res3;
+        particle_pipeline = *res3;
+        MM_LOG("create_default_pipelines: particle_pipeline=%u", particle_pipeline.handle.id);
 
         // Build built-in materials
         materials_[static_cast<uint8_t>(MaterialType::SpriteAlpha)]    = {sprite_pipeline, white_tex, default_sampler};
@@ -919,8 +946,87 @@ struct Renderer {
 
     Material        make_material(PipelineHandle pipeline, TextureHandle texture, SamplerHandle sampler) const noexcept { return {pipeline, texture, sampler}; }
 
+    void            measure_text(BitmapFont &font, const char *text, float scale, float &out_w, float &out_h) noexcept {
+        auto len = static_cast<uint32_t>(std::strlen(text));
+        if (len == 0) {
+            out_w = 0.0f;
+            out_h = 0.0f;
+            return;
+        }
+
+        Utf8Decoder dec(text, len);
+        float       cursor_x            = 0.0f;
+        float       max_x               = 0.0f;
+        float       y                   = 0.0f;
+        uint32_t    prev_consonant      = 0;
+
+        auto        is_thai_vowel_front = [](uint32_t c) -> bool { return (c >= 0x0E40 && c <= 0x0E44); };
+        auto        is_thai_vowel_above = [](uint32_t c) -> bool { return (c == 0x0E31) || (c >= 0x0E34 && c <= 0x0E37) || (c == 0x0E4D); };
+        auto        is_thai_vowel_below = [](uint32_t c) -> bool { return (c >= 0x0E38 && c <= 0x0E39); };
+        auto        is_thai_tone_mark   = [](uint32_t c) -> bool { return (c >= 0x0E48 && c <= 0x0E4B); };
+        auto        is_thai_combining = [&](uint32_t c) -> bool { return is_thai_vowel_above(c) || is_thai_vowel_below(c) || is_thai_tone_mark(c); };
+        auto        is_thai_consonant = [](uint32_t c) -> bool { return (c >= 0x0E01 && c <= 0x0E2F) || (c == 0x0E30) || (c == 0x0E32) || (c == 0x0E33); };
+
+        for (;;) {
+            uint32_t cp = dec.next();
+            if (cp == 0) {
+                break;
+            }
+
+            if (cp == '\n') {
+                if (cursor_x > max_x) {
+                    max_x = cursor_x;
+                }
+                cursor_x        = 0.0f;
+                y              += font.line_height * scale;
+                prev_consonant  = 0;
+                continue;
+            }
+
+            if (cp == ' ') {
+                const GlyphInfo *sg  = font.get_glyph(' ');
+                cursor_x            += sg ? sg->advance * scale : 16.0f * scale;
+                prev_consonant       = 0;
+                continue;
+            }
+
+            const GlyphInfo *g = nullptr;
+            if (cp >= 0x0E01 && cp <= 0x0E5B) {
+                int idx = cp - 0x0E01;
+                if (idx >= 0 && idx < MAX_GLYPHS_TH) {
+                    auto &th_g = font.glyphs_th[idx];
+                    if (th_g.w > 0) {
+                        g = &th_g;
+                    }
+                }
+            } else {
+                g = font.get_glyph(cp);
+            }
+
+            if (!g) {
+                continue;
+            }
+
+            if (is_thai_combining(cp) && prev_consonant != 0) {
+                // Combining marks don't advance cursor
+            } else {
+                cursor_x += g->advance * scale;
+                if (is_thai_consonant(cp)) {
+                    prev_consonant = cp;
+                } else {
+                    prev_consonant = 0;
+                }
+            }
+        }
+        if (cursor_x > max_x) {
+            max_x = cursor_x;
+        }
+        out_w = max_x;
+        out_h = y + font.line_height * scale;
+    }
+
     // แทนที่ draw_text method เดิมด้วยอันนี้
-    void            draw_text(BitmapFont &font, const char *text, float x, float y, uint32_t color = 0xFFFFFFFF, float scale = 1.0f) noexcept {
+    void draw_text(BitmapFont &font, const char *text, float x, float y, uint32_t color = 0xFFFFFFFF, float scale = 1.0f) noexcept {
         auto len = static_cast<uint32_t>(std::strlen(text));
         if (len == 0) {
             return;
@@ -939,48 +1045,24 @@ struct Renderer {
         }
 
         Utf8Decoder dec(text, len);
-        float       cursor_x         = x;
-        float       cursor_y         = y;
-        uint32_t    vert_count       = 0;
-        uint32_t    idx_count        = 0;
+        float       cursor_x       = x;
+        float       cursor_y       = y;
+        uint32_t    vert_count     = 0;
+        uint32_t    idx_count      = 0;
 
         // Thai combining character state
-        uint32_t    prev_consonant   = 0;
-        //float       prev_consonant_x = 0;
-        //float       prev_consonant_y = 0;
+        uint32_t    prev_consonant = 0;
+        // float       prev_consonant_x = 0;
+        // float       prev_consonant_y = 0;
 
         for (uint16_t g = 0; g < max_glyphs; ++g) {
             uint32_t cp = dec.next();
             if (cp == 0) {
                 break;
             }
-//            auto glyph_valid = [&](const GlyphInfo* gi) noexcept -> bool {
-//                if (!gi) return false;
-//                if (gi->w == 0 || gi->h == 0) return false;
-//                if (gi->u >= font.atlas_w || gi->v >= font.atlas_h) return false;
-//                if (gi->u + gi->w > font.atlas_w) return false;
-//                if (gi->v + gi->h > font.atlas_h) return false;
-//                return true;
-//            };
-//
-//            auto log_glyph = [&](const char* tag, uint32_t cp, const GlyphInfo* gi) noexcept {
-//                if (!gi) {
-//                    char buf[128];
-//                    int n = snprintf(buf, sizeof(buf), "[Glyph] %s cp=U+%04X NULL\n", tag, cp);
-//                    write(2, buf, (size_t)n);
-//                    return;
-//                }
-//                char buf[256];
-//                int n = snprintf(buf, sizeof(buf),
-//                                 "[Glyph] %s cp=U+%04X u=%u v=%u w=%u h=%u atlas=%ux%u adv=%d bx=%d by=%d\n",
-//                                 tag, cp, gi->u, gi->v, gi->w, gi->h,
-//                                 font.atlas_w, font.atlas_h,
-//                                 (int)gi->advance, (int)gi->bearing_x, (int)gi->bearing_y);
-//                write(2, buf, (size_t)n);
-//            };
-//
+
             // Helper for Thai detection
-            auto is_thai_consonant = [](uint32_t c) -> bool { return (c >= 0x0E01 && c <= 0x0E2F) || (c == 0x0E30) || (c == 0x0E32) || (c == 0x0E33); };
+            auto is_thai_consonant   = [](uint32_t c) -> bool { return (c >= 0x0E01 && c <= 0x0E2F) || (c == 0x0E30) || (c == 0x0E32) || (c == 0x0E33); };
             // auto is_thai_vowel_rear  = [](uint32_t c) -> bool { return (c == 0x0E30) || (c == 0x0E32) || (c == 0x0E33); };
             auto is_thai_vowel_above = [](uint32_t c) -> bool { return (c == 0x0E31) || (c >= 0x0E34 && c <= 0x0E37) || (c == 0x0E4D); };
             auto is_thai_vowel_below = [](uint32_t c) -> bool { return (c >= 0x0E38 && c <= 0x0E39); };
@@ -1014,7 +1096,7 @@ struct Renderer {
                 if (thai_idx >= 0 && thai_idx < MAX_GLYPHS_TH) {
                     auto &th_g = font.glyphs_th[thai_idx];
                     if (th_g.w > 0 && th_g.h > 0) {
-                        glyph = &th_g;  // Use directly, don't use static copy
+                        glyph = &th_g; // Use directly, don't use static copy
                     }
                 }
             } else {
@@ -1026,24 +1108,6 @@ struct Renderer {
                 if (!glyph || glyph->w == 0 || glyph->h == 0) {
                     continue;
                 }
-                // หลังได้ glyph แล้ว
-//                if (!glyph_valid(glyph)) {
-//                    log_glyph("INVALID", cp, glyph);
-//                    // ลอง fallback ไป '?' เพื่อไม่ให้ crash
-//                    const GlyphInfo* fallback = font.get_glyph('?');
-//                    if (!glyph_valid(fallback)) {
-//                        log_glyph("FALLBACK_INVALID", cp, fallback);
-//                        continue; // ข้าม glyph นี้
-//                    } else {
-//                        log_glyph("FALLBACK_OK", cp, fallback);
-//                        glyph = fallback;
-//                    }
-//                } else {
-//                    // เฉพาะช่วงไทย: log ไว้เพื่อเก็บสถิติ
-//                    if (cp >= 0x0E01 && cp <= 0x0E5B) {
-//                        log_glyph("THAI_OK", cp, glyph);
-//                    }
-//                }
             }
 
             float       gx, gy;
@@ -1051,19 +1115,19 @@ struct Renderer {
             static bool warned_sara_ue = false;
             if ((cp == 0x0E38 || cp == 0x0E39) && !warned_sara_u) {
                 warned_sara_u = true;
-//                {
-//                    char buf[256];
-//                    int  n = snprintf(buf, sizeof(buf), "draw_text: Sara UU or U U+%04X\n", cp);
-//                    write(2, buf, (size_t)n);
-//                }
+                //                {
+                //                    char buf[256];
+                //                    int  n = snprintf(buf, sizeof(buf), "draw_text: Sara UU or U U+%04X\n", cp);
+                //                    write(2, buf, (size_t)n);
+                //                }
             }
             if (cp == 0x0E36 && !warned_sara_ue) {
                 warned_sara_ue = true;
-//                {
-//                    char buf[256];
-//                    int  n = snprintf(buf, sizeof(buf), "draw_text: Sara UE U+%04X\n", cp);
-//                    write(2, buf, (size_t)n);
-//                }
+                //                {
+                //                    char buf[256];
+                //                    int  n = snprintf(buf, sizeof(buf), "draw_text: Sara UE U+%04X\n", cp);
+                //                    write(2, buf, (size_t)n);
+                //                }
             }
             // Front vowels (เ แ โ ใ ไ)
             if (is_thai_vowel_front(cp)) {
@@ -1100,9 +1164,9 @@ struct Renderer {
 
                 // Store for potential combining marks
                 if (is_thai_consonant(cp)) {
-                    prev_consonant   = cp;
-                    //prev_consonant_x = cursor_x;
-                    //prev_consonant_y = cursor_y;
+                    prev_consonant = cp;
+                    // prev_consonant_x = cursor_x;
+                    // prev_consonant_y = cursor_y;
                 } else {
                     prev_consonant = 0;
                 }
