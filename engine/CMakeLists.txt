@@ -25,6 +25,20 @@ if(APPLE)
     endif()
 elseif(ANDROID)
     set(PLATFORM_ANDROID ON)
+    set(MM_ANDROID_API_LEVEL "${CMAKE_SYSTEM_VERSION}")
+    if(ANDROID_PLATFORM MATCHES "^android-([0-9]+)$")
+        set(MM_ANDROID_API_LEVEL "${CMAKE_MATCH_1}")
+    elseif(ANDROID_NATIVE_API_LEVEL MATCHES "^android-([0-9]+)$")
+        set(MM_ANDROID_API_LEVEL "${CMAKE_MATCH_1}")
+    elseif(ANDROID_NATIVE_API_LEVEL MATCHES "^[0-9]+$")
+        set(MM_ANDROID_API_LEVEL "${ANDROID_NATIVE_API_LEVEL}")
+    endif()
+    if(MM_ANDROID_API_LEVEL VERSION_LESS 26)
+        message(FATAL_ERROR
+            "Android Vulkan build needs ANDROID_PLATFORM=android-26 or newer "
+            "because libnativewindow is unavailable for lower API levels. "
+            "Run ./build-android.sh or configure with -DANDROID_PLATFORM=android-30.")
+    endif()
 endif()
 
 # ─── Thirdparty Includes ────────────────────────────────────────
@@ -319,7 +333,14 @@ endif()
 if(BUILD_EXAMPLES)
     foreach(EXAMPLE ${EXAMPLE_SOURCES})
         get_filename_component(EXAMPLE_NAME ${EXAMPLE} NAME_WE)
-        add_executable(${EXAMPLE_NAME} ${EXAMPLE})
+        if(PLATFORM_ANDROID)
+            add_library(${EXAMPLE_NAME} SHARED
+                ${EXAMPLE}
+                ${ANDROID_NDK}/sources/android/native_app_glue/android_native_app_glue.c)
+            target_link_options(${EXAMPLE_NAME} PRIVATE "-Wl,-z,max-page-size=16384")
+        else()
+            add_executable(${EXAMPLE_NAME} ${EXAMPLE})
+        endif()
         target_link_libraries(${EXAMPLE_NAME} PRIVATE markmos)
     endforeach()
 
