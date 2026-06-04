@@ -526,6 +526,8 @@ struct MetalBackend {
             return MTL::PixelFormatDepth32Float;
         case PixelFormat::ASTC_4x4:
             return MTL::PixelFormatASTC_4x4_LDR;
+        case PixelFormat::R32G32_FLOAT:
+            return MTL::PixelFormatRG32Float;
         default:
             return MTL::PixelFormatBGRA8Unorm;
         }
@@ -581,6 +583,8 @@ struct MetalBackend {
             return MTL::VertexFormatUChar4Normalized;
         case PixelFormat::R16G16_FLOAT:
             return MTL::VertexFormatHalf2;
+        case PixelFormat::R32G32_FLOAT:
+            return MTL::VertexFormatFloat2;
         case PixelFormat::R16G16B16A16_FLOAT:
             return MTL::VertexFormatHalf4;
         case PixelFormat::R32G32B32_FLOAT:

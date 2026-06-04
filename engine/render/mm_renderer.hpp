@@ -407,8 +407,11 @@ struct Renderer {
     void upload_camera() noexcept {
         backend->update_buffer(camera_ubo, view_proj, 0, sizeof(view_proj));
         // Debug: log camera matrix first few values
-        MM_LOG("CAMERA: view_proj[0]=%.4f [1]=%.4f [4]=%.4f [5]=%.4f [12]=%.4f [13]=%.4f", view_proj[0], view_proj[1], view_proj[4], view_proj[5],
-               view_proj[12], view_proj[13]);
+        // MM_LOG("CAMERA: view_proj[0]=%.4f [1]=%.4f [4]=%.4f [5]=%.4f [12]=%.4f [13]=%.4f", view_proj[0], view_proj[1], view_proj[4], view_proj[5],
+        //        view_proj[12], view_proj[13]);
+        // for (int i = 0; i < 16; i++) {
+        //     MM_LOG("view_proj[%d]=%.4f", i, view_proj[i]);
+        // }
     }
 
     Expected<void, RHIError> begin_frame() noexcept {
@@ -453,7 +456,7 @@ struct Renderer {
             switch (cmd.type) {
             case CmdType::BindPipeline: {
                 auto h = cmd.data.bind_pipeline.pipeline;
-                MM_LOG("SUBMIT: BindPipeline handle.id=%u gen=%u", h.handle.id, h.handle.gen);
+                // MM_LOG("SUBMIT: BindPipeline handle.id=%u gen=%u", h.handle.id, h.handle.gen);
 #if defined(ENGINE_ENABLE_ASSERT)
                 auto *pl = backend->pipelines.get(h.handle);
                 if (!pl) {
@@ -681,20 +684,18 @@ struct Renderer {
                 f16_v        = f16_to_approx(v0.v);
                 uint32_t col = v0.color;
                 uint8_t  r = col & 0xFF, g = (col >> 8) & 0xFF, b = (col >> 16) & 0xFF, a = (col >> 24) & 0xFF;
-                MM_LOG("FLUSH_SPRITE: first_vert pos=(%.2f, %.2f) uv=(%.4f, %.4f) color=0x%08X (rgba=%u,%u,%u,%u) vert_count=%u", f16_x, f16_y, f16_u, f16_v,
-                       col, r, g, b, a, vert_count);
             }
 
             backend->update_buffer(sprite_vb, verts, vb_byte_offset, vert_count * sizeof(SpriteVertex));
             backend->update_buffer(sprite_ib, indices, ib_byte_offset, idx_count * sizeof(uint16_t));
 
             // Debug: log first few indices
-            if (idx_count > 0) {
-                uint16_t first_idx  = indices[0];
-                uint16_t second_idx = indices[1];
-                uint16_t third_idx  = indices[2];
-                MM_LOG("FLUSH_SPRITE: indices[0-2]=%u,%u,%u idx_count=%u", first_idx, second_idx, third_idx, idx_count);
-            }
+            // if (idx_count > 0) {
+            //     uint16_t first_idx  = indices[0];
+            //     uint16_t second_idx = indices[1];
+            //     uint16_t third_idx  = indices[2];
+            //     MM_LOG("FLUSH_SPRITE: indices[0-2]=%u,%u,%u idx_count=%u", first_idx, second_idx, third_idx, idx_count);
+            // }
 
             SortKey key{0, 0, 0, 1.0f};
             graph.bind_pipeline(pipeline, key);
@@ -771,8 +772,11 @@ struct Renderer {
                                 {0, 0, 0, 0}};
         }
 
+        MM_LOG("FLUSH_PARTICLES: count=%u first_px=%.2f first_py=%.2f first_scale=%.2f first_r=%.2f first_g=%.2f first_b=%.2f first_alpha=%.2f", count,
+               instances[0].px, instances[0].py, instances[0].scale, instances[0].r, instances[0].g, instances[0].b, instances[0].alpha);
         uint32_t byte_offset = particle_instance_count * sizeof(ParticleInstance);
-        backend->update_buffer(particle_ib, instances, byte_offset, count * sizeof(ParticleInstance));
+        // MM_LOG("FLUSH_PARTICLES: count=%u byte_offset=%u size=%lu", count, byte_offset, sizeof(ParticleInstance));
+        (void)backend->update_buffer(particle_ib, instances, byte_offset, count * sizeof(ParticleInstance));
 
         auto &mat = materials_[static_cast<uint8_t>(MaterialType::Particle)];
         graph.bind_pipeline(mat.pipeline, key);
@@ -819,6 +823,7 @@ struct Renderer {
     void                     bind_pipeline(PipelineHandle pipeline) noexcept { graph.bind_pipeline(pipeline); }
 
     Expected<void, RHIError> create_default_pipelines() noexcept {
+        MM_LOG("create_default_pipelines: START");
         PipelineDesc desc{};
         desc.prim_type              = PrimitiveType::Triangle;
         desc.cull_mode              = CullMode::None;
@@ -883,9 +888,10 @@ struct Renderer {
         if (!opq_res) {
             return make_unexpected(opq_res.error());
         }
-        sprite_opaque_pipeline     = *opq_res;
+        sprite_opaque_pipeline = *opq_res;
 
         // SDF pipeline (same 12-byte SpriteVertex format as sprites)
+        MM_LOG("create_default_pipelines: about to create sdf_pipeline\n");
         PipelineDesc sdf_desc      = desc;
         sdf_desc.vertex_shader     = shader::sdf_vertex();
         sdf_desc.fragment_shader   = shader::sdf_fragment();
@@ -898,19 +904,31 @@ struct Renderer {
         if (!res2) {
             return make_unexpected(res2.error());
         }
-        sdf_pipeline                    = *res2;
+        sdf_pipeline = *res2;
 
+        MM_LOG("create_default_pipelines: sprite_pipeline=%u sdf_pipeline=%u", sprite_pipeline.handle.id, sdf_pipeline.handle.id);
         // Particle pipeline
+        MM_LOG("create_default_pipelines: about to create particle_pipeline\n");
         PipelineDesc particle_desc      = desc;
+        particle_desc.is_instance       = true;
         particle_desc.vertex_shader     = shader::particle_vertex();
         particle_desc.fragment_shader   = shader::particle_fragment();
-        particle_desc.vertex_attr_count = 0;
+        particle_desc.descriptor_count  = 3;
+        particle_desc.descriptor_bindings[0] = {0, DescriptorType::CombinedImageSampler, 2, 1}; // Texture/sampler
+        particle_desc.descriptor_bindings[1] = {2, DescriptorType::UniformBuffer, 1, 1};        // Camera
+        particle_desc.descriptor_bindings[2] = {3, DescriptorType::UniformBuffer, 1, 1};        // Atlas
+        particle_desc.vertex_attr_count = 3;
+        particle_desc.vertex_attrs[0]   = {0, PixelFormat::R32G32B32A32_FLOAT, 0, 64};
+        particle_desc.vertex_attrs[1]   = {1, PixelFormat::R32G32B32A32_FLOAT, 16, 64};
+        particle_desc.vertex_attrs[2]   = {2, PixelFormat::R32G32B32A32_FLOAT, 32, 64};
 
         auto res3                       = backend->create_pipeline(particle_desc);
         if (!res3) {
+            MM_ERROR("create_default_pipelines: failed to create particle pipeline");
             return make_unexpected(res3.error());
         }
-        particle_pipeline                                              = *res3;
+        particle_pipeline = *res3;
+        MM_LOG("create_default_pipelines: particle_pipeline=%u", particle_pipeline.handle.id);
 
         // Build built-in materials
         materials_[static_cast<uint8_t>(MaterialType::SpriteAlpha)]    = {sprite_pipeline, white_tex, default_sampler};
@@ -1042,31 +1060,7 @@ struct Renderer {
             if (cp == 0) {
                 break;
             }
-            //            auto glyph_valid = [&](const GlyphInfo* gi) noexcept -> bool {
-            //                if (!gi) return false;
-            //                if (gi->w == 0 || gi->h == 0) return false;
-            //                if (gi->u >= font.atlas_w || gi->v >= font.atlas_h) return false;
-            //                if (gi->u + gi->w > font.atlas_w) return false;
-            //                if (gi->v + gi->h > font.atlas_h) return false;
-            //                return true;
-            //            };
-            //
-            //            auto log_glyph = [&](const char* tag, uint32_t cp, const GlyphInfo* gi) noexcept {
-            //                if (!gi) {
-            //                    char buf[128];
-            //                    int n = snprintf(buf, sizeof(buf), "[Glyph] %s cp=U+%04X NULL\n", tag, cp);
-            //                    write(2, buf, (size_t)n);
-            //                    return;
-            //                }
-            //                char buf[256];
-            //                int n = snprintf(buf, sizeof(buf),
-            //                                 "[Glyph] %s cp=U+%04X u=%u v=%u w=%u h=%u atlas=%ux%u adv=%d bx=%d by=%d\n",
-            //                                 tag, cp, gi->u, gi->v, gi->w, gi->h,
-            //                                 font.atlas_w, font.atlas_h,
-            //                                 (int)gi->advance, (int)gi->bearing_x, (int)gi->bearing_y);
-            //                write(2, buf, (size_t)n);
-            //            };
-            //
+
             // Helper for Thai detection
             auto is_thai_consonant   = [](uint32_t c) -> bool { return (c >= 0x0E01 && c <= 0x0E2F) || (c == 0x0E30) || (c == 0x0E32) || (c == 0x0E33); };
             // auto is_thai_vowel_rear  = [](uint32_t c) -> bool { return (c == 0x0E30) || (c == 0x0E32) || (c == 0x0E33); };
@@ -1114,24 +1108,6 @@ struct Renderer {
                 if (!glyph || glyph->w == 0 || glyph->h == 0) {
                     continue;
                 }
-                // หลังได้ glyph แล้ว
-                //                if (!glyph_valid(glyph)) {
-                //                    log_glyph("INVALID", cp, glyph);
-                //                    // ลอง fallback ไป '?' เพื่อไม่ให้ crash
-                //                    const GlyphInfo* fallback = font.get_glyph('?');
-                //                    if (!glyph_valid(fallback)) {
-                //                        log_glyph("FALLBACK_INVALID", cp, fallback);
-                //                        continue; // ข้าม glyph นี้
-                //                    } else {
-                //                        log_glyph("FALLBACK_OK", cp, fallback);
-                //                        glyph = fallback;
-                //                    }
-                //                } else {
-                //                    // เฉพาะช่วงไทย: log ไว้เพื่อเก็บสถิติ
-                //                    if (cp >= 0x0E01 && cp <= 0x0E5B) {
-                //                        log_glyph("THAI_OK", cp, glyph);
-                //                    }
-                //                }
             }
 
             float       gx, gy;
