@@ -689,8 +689,13 @@ struct VulkanBackend {
             vkAllocateDescriptorSets(device, &dsai, &desc_set);
         }
 
-        VulkanPipeline vp{pipeline, pipeline_layout, desc_set_layout, desc_set,
-                          VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE, 0, true};
+        VulkanPipeline vp{};
+        vp.pipeline = pipeline;
+        vp.layout = pipeline_layout;
+        vp.desc_set_layout = desc_set_layout;
+        vp.desc_set = desc_set;
+        vp.descriptor_dirty = true;
+
         SlotHandle sh = pipelines.emplace(vp);
         return PipelineHandle{sh};
     }
@@ -745,7 +750,7 @@ struct VulkanBackend {
                                                uint32_t x, uint32_t y,
                                                uint32_t w, uint32_t h_,
                                                uint32_t mip, uint32_t slice) noexcept {
-        MM_LOG("update_texture entering: handle=%u %ux%u", h.handle.id, w, h_);
+//        MM_LOG("update_texture entering: handle=%u %ux%u", h.handle.id, w, h_);
         auto* tex = textures.get(h.handle);
         if (!tex) {
             MM_ERROR("update_texture: invalid texture handle");
@@ -767,7 +772,7 @@ struct VulkanBackend {
         VkBuffer staging_buf;
         VmaAllocation staging_alloc;
         VmaAllocationInfo staging_info;
-        MM_LOG("update_texture: creating staging buffer size=%zu (bpp=%u)", (size_t)image_size, bpp);
+//        MM_LOG("update_texture: creating staging buffer size=%zu (bpp=%u)", (size_t)image_size, bpp);
         if (vmaCreateBuffer(allocator, &buf_info, &alloc_info,
                             &staging_buf, &staging_alloc, &staging_info) != VK_SUCCESS) {
             MM_ERROR("update_texture: staging buffer creation failed");
@@ -785,7 +790,7 @@ struct VulkanBackend {
         cmd_alloc.commandBufferCount = 1;
 
         VkCommandBuffer transfer_cmd;
-        MM_LOG("update_texture: allocating command buffer");
+//        MM_LOG("update_texture: allocating command buffer");
         if (vkAllocateCommandBuffers(device, &cmd_alloc, &transfer_cmd) != VK_SUCCESS) {
             MM_ERROR("update_texture: cmd buffer allocation failed");
             vmaDestroyBuffer(allocator, staging_buf, staging_alloc);
@@ -828,7 +833,7 @@ struct VulkanBackend {
         region.imageSubresource.layerCount = 1;
         region.imageOffset = {static_cast<int32_t>(x), static_cast<int32_t>(y), 0};
         region.imageExtent = {w, h_, 1};
-        MM_LOG("update_texture: recording copy command");
+//        MM_LOG("update_texture: recording copy command");
         vkCmdCopyBufferToImage(transfer_cmd, staging_buf, tex->image,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
@@ -854,7 +859,7 @@ struct VulkanBackend {
         VkFence transfer_fence;
         vkCreateFence(device, &fence_info, nullptr, &transfer_fence);
 
-        MM_LOG("update_texture: submitting to queue");
+//        MM_LOG("update_texture: submitting to queue");
         VkResult submit_res = vkQueueSubmit(graphics_queue, 1, &submit, transfer_fence);
         if (submit_res != VK_SUCCESS) {
             MM_ERROR("update_texture: vkQueueSubmit failed with %d", (int)submit_res);
@@ -864,22 +869,22 @@ struct VulkanBackend {
             return make_unexpected(RHIError::BackendError);
         }
 
-        MM_LOG("update_texture: waiting for fence");
+//        MM_LOG("update_texture: waiting for fence");
         vkWaitForFences(device, 1, &transfer_fence, VK_TRUE, UINT64_MAX);
 
-        MM_LOG("update_texture: cleanup");
+//        MM_LOG("update_texture: cleanup");
         vkDestroyFence(device, transfer_fence, nullptr);
         vkFreeCommandBuffers(device, cmd_pool, 1, &transfer_cmd);
         vmaDestroyBuffer(allocator, staging_buf, staging_alloc);
-        MM_LOG("update_texture: done");
+//        MM_LOG("update_texture: done");
 
         return {};
     }
 
     Expected<void, RHIError> begin_frame() noexcept {
-        MM_LOG("VulkanBackend::begin_frame() - waiting for frame_fence");
+//        MM_LOG("VulkanBackend::begin_frame() - waiting for frame_fence");
         vkWaitForFences(device, 1, &frame_fence, VK_TRUE, UINT64_MAX);
-        MM_LOG("VulkanBackend::begin_frame() - frame_fence signaled");
+//        MM_LOG("VulkanBackend::begin_frame() - frame_fence signaled");
         vkResetFences(device, 1, &frame_fence);
 
         VkResult result = vkAcquireNextImageKHR(device, swapchain, UINT64_MAX,
@@ -940,7 +945,7 @@ struct VulkanBackend {
         submit.commandBufferCount = 1;
         submit.pCommandBuffers = &cmd_buf;
 
-        MM_LOG("VulkanBackend::end_frame() - submitting graphics queue");
+//        MM_LOG("VulkanBackend::end_frame() - submitting graphics queue");
         VkResult submit_res = vkQueueSubmit(graphics_queue, 1, &submit, frame_fence);
         if (submit_res != VK_SUCCESS) {
             MM_ERROR("VulkanBackend::end_frame() - vkQueueSubmit failed: %d", (int)submit_res);
@@ -955,10 +960,10 @@ struct VulkanBackend {
         present.pSwapchains = &swapchain;
         present.pImageIndices = &swap_index;
 
-        MM_LOG("VulkanBackend::end_frame() - presenting swapchain");
+//        MM_LOG("VulkanBackend::end_frame() - presenting swapchain");
         VkResult present_res = vkQueuePresentKHR(present_queue, &present);
         if (present_res == VK_ERROR_OUT_OF_DATE_KHR || present_res == VK_SUBOPTIMAL_KHR) {
-            MM_LOG("VulkanBackend::end_frame() - swapchain out of date or suboptimal");
+//            MM_LOG("VulkanBackend::end_frame() - swapchain out of date or suboptimal");
         } else if (present_res != VK_SUCCESS) {
             MM_ERROR("VulkanBackend::end_frame() - vkQueuePresentKHR failed: %d", (int)present_res);
         }
@@ -1026,25 +1031,8 @@ struct VulkanBackend {
         if (!pl || !pl->desc_set) return;
 
         if (pl->descriptor_dirty) {
-            MM_LOG("VulkanBackend::flush_descriptors() - updating set for handle=%u ubo=%p view=%p",
-                   current_pipeline_handle.handle.id, (void*)pl->current_ubo, (void*)pl->current_view);
             uint32_t write_count = 0;
             VkWriteDescriptorSet writes[2] = {};
-
-            VkDescriptorBufferInfo ubo_info{};
-            if (pl->current_ubo) {
-                ubo_info.buffer = pl->current_ubo;
-                ubo_info.offset = 0;
-                ubo_info.range = VK_WHOLE_SIZE;
-
-                auto& w = writes[write_count++];
-                w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                w.dstSet = pl->desc_set;
-                w.dstBinding = 1; // UBO at binding 1 (matches GLSL)
-                w.descriptorCount = 1;
-                w.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-                w.pBufferInfo = &ubo_info;
-            }
 
             VkDescriptorImageInfo img_info{};
             if (pl->current_view && pl->current_sampler) {
@@ -1055,10 +1043,25 @@ struct VulkanBackend {
                 auto& w = writes[write_count++];
                 w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
                 w.dstSet = pl->desc_set;
-                w.dstBinding = 0; // Sampler at binding 0 (matches GLSL)
+                w.dstBinding = 0; // Sampler at binding 0
                 w.descriptorCount = 1;
                 w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
                 w.pImageInfo = &img_info;
+            }
+
+            VkDescriptorBufferInfo ubo_info{};
+            if (pl->current_ubo) {
+                ubo_info.buffer = pl->current_ubo;
+                ubo_info.offset = 0;
+                ubo_info.range = VK_WHOLE_SIZE;
+
+                auto& w = writes[write_count++];
+                w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                w.dstSet = pl->desc_set;
+                w.dstBinding = 1; // UBO at binding 1
+                w.descriptorCount = 1;
+                w.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+                w.pBufferInfo = &ubo_info;
             }
 
             if (write_count > 0) {
