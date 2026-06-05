@@ -5,18 +5,15 @@
 #include <cstdint>
 #include <cstddef>
 #include <cstring>
-
-// Audio System — miniaudio wrapper, SFX pool + music crossfade
-// Cache reason: pre-allocated voice pool, no heap alloc in play()
-// Design:
-//   - SFX pool: play-and-forget, priority-based replacement
-//   - Music: 2 track crossfade (current + next)
-//   - No std::function, no virtual, no heap in hot path
-//   - miniaudio header-only, minimal overhead
+#include "../core/mm_vfs.hpp"
 
 // Forward declare miniaudio types (avoid full include in header)
 struct ma_engine;
 struct ma_sound;
+
+
+
+
 
 static constexpr uint8_t MAX_SFX_VOICES = 16;
 static constexpr uint8_t MAX_SOUNDS    = 32;
@@ -68,12 +65,15 @@ private:
 };
 
 struct MusicLayer {
-    ma_sound* track[2];      // [0] = current, [1] = next
-    float     volume[2];     // crossfade volumes
-    float     crossfade_t;   // 0→1 during crossfade
-    float     crossfade_duration;
-    uint8_t   active_track;  // 0 or 1
-    uint8_t   crossfading;
+    ma_sound*        track[2];      // [0] = current, [1] = next
+    void*            track_bufs[2]; // Persistent buffers (ma_audio_buffer*)
+    void*            track_pcm[2];  // persistent decoded data
+    float            volume[2];     // crossfade volumes
+    float            crossfade_t;   // 0→1 during crossfade
+    float            crossfade_duration;
+    uint8_t          active_track;  // 0 or 1
+    uint8_t          crossfading;
+    bool             track_loaded[2];
 
     ma_engine* engine;
 

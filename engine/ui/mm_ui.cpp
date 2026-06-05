@@ -2,10 +2,12 @@
 // SPDX-License-Identifier: MIT
 
 #include "mm_ui.hpp"
+#include "../core/mm_vfs.hpp"
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <simdjson.h>
+
 
 // simdjson header-only implementation
 #include "../../thirdparty/simdjson/singleheader/simdjson.cpp"
@@ -661,16 +663,21 @@ void Manager::render(Renderer &r, SpriteBatch &batch, float dt) noexcept {
 Theme Theme::load(const char *path) noexcept {
     Theme                   t = Theme::dark();
 
-    simdjson::padded_string json;
-    if (simdjson::padded_string::load(path).get(json) != simdjson::SUCCESS) {
+    VfsBlob blob = g_vfs.read_bundle(path);
+    if (!blob.valid()) {
         return t;
     }
 
+    // simdjson::padded_string expects padding, VFS might not provide it.
+    // However, simdjson can parse from a buffer.
     simdjson::dom::parser  parser;
     simdjson::dom::element doc;
-    if (parser.parse(json).get(doc) != simdjson::SUCCESS) {
+    if (parser.parse(static_cast<const uint8_t*>(blob.data), blob.size).get(doc) != simdjson::SUCCESS) {
+        blob.free();
         return t;
     }
+    blob.free();
+
 
     simdjson::dom::object obj;
     if (doc.get_object().get(obj) != simdjson::SUCCESS) {
