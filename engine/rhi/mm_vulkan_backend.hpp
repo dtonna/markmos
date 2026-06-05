@@ -118,14 +118,32 @@ struct VulkanBackend {
         }
         // Step 1: vkb::InstanceBuilder — no manual vkCreateInstance
         vkb::InstanceBuilder inst_builder;
-        auto                 inst_ret = inst_builder.set_app_name("Markmos")
+        inst_builder.set_app_name("Markmos")
                             .set_engine_name("Markmos Engine")
-                            .require_api_version(1, 1, 0)
-                            .request_validation_layers()
-                            .use_default_debug_messenger()
-                            .enable_extension(VK_KHR_SURFACE_EXTENSION_NAME)
-                            .enable_extension(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME)
-                            .build();
+                            .require_api_version(1, 1, 0);
+
+#if !defined(NDEBUG) && !defined(VK_USE_PLATFORM_ANDROID_KHR)
+        // Validation layers are often missing on Android devices, causing instance creation to fail.
+        // We only enable them on desktop/other platforms for now.
+        inst_builder.request_validation_layers()
+                    .use_default_debug_messenger();
+#endif
+
+        auto inst_ret = inst_builder.build();
+        if (!inst_ret) {
+            // Fallback to Vulkan 1.0 if 1.1 is not available or if extensions failed
+            inst_builder.require_api_version(1, 0, 0);
+            inst_ret = inst_builder.build();
+        }
+
+        if (!inst_ret) {
+            // If it still fails, try one last time with absolutely no extras
+            vkb::InstanceBuilder simple_builder;
+            inst_ret = simple_builder.set_app_name("Markmos")
+                                     .require_api_version(1, 0, 0)
+                                     .build();
+        }
+
         if (!inst_ret) {
             MM_ERROR("Failed to create Vulkan instance: %s", inst_ret.error().message().c_str());
             return make_unexpected(RHIError::BackendError);

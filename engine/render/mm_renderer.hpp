@@ -772,8 +772,8 @@ struct Renderer {
                                 {0, 0, 0, 0}};
         }
 
-        MM_LOG("FLUSH_PARTICLES: count=%u first_px=%.2f first_py=%.2f first_scale=%.2f first_r=%.2f first_g=%.2f first_b=%.2f first_alpha=%.2f", count,
-               instances[0].px, instances[0].py, instances[0].scale, instances[0].r, instances[0].g, instances[0].b, instances[0].alpha);
+        // MM_LOG("FLUSH_PARTICLES: count=%u first_px=%.2f first_py=%.2f first_scale=%.2f first_r=%.2f first_g=%.2f first_b=%.2f first_alpha=%.2f", count,
+        //        instances[0].px, instances[0].py, instances[0].scale, instances[0].r, instances[0].g, instances[0].b, instances[0].alpha);
         uint32_t byte_offset = particle_instance_count * sizeof(ParticleInstance);
         // MM_LOG("FLUSH_PARTICLES: count=%u byte_offset=%u size=%lu", count, byte_offset, sizeof(ParticleInstance));
         (void)backend->update_buffer(particle_ib, instances, byte_offset, count * sizeof(ParticleInstance));
@@ -909,20 +909,20 @@ struct Renderer {
         MM_LOG("create_default_pipelines: sprite_pipeline=%u sdf_pipeline=%u", sprite_pipeline.handle.id, sdf_pipeline.handle.id);
         // Particle pipeline
         MM_LOG("create_default_pipelines: about to create particle_pipeline\n");
-        PipelineDesc particle_desc      = desc;
-        particle_desc.is_instance       = true;
-        particle_desc.vertex_shader     = shader::particle_vertex();
-        particle_desc.fragment_shader   = shader::particle_fragment();
-        particle_desc.descriptor_count  = 3;
+        PipelineDesc particle_desc           = desc;
+        particle_desc.is_instance            = true;
+        particle_desc.vertex_shader          = shader::particle_vertex();
+        particle_desc.fragment_shader        = shader::particle_fragment();
+        particle_desc.descriptor_count       = 3;
         particle_desc.descriptor_bindings[0] = {0, DescriptorType::CombinedImageSampler, 2, 1}; // Texture/sampler
         particle_desc.descriptor_bindings[1] = {2, DescriptorType::UniformBuffer, 1, 1};        // Camera
         particle_desc.descriptor_bindings[2] = {3, DescriptorType::UniformBuffer, 1, 1};        // Atlas
-        particle_desc.vertex_attr_count = 3;
-        particle_desc.vertex_attrs[0]   = {0, PixelFormat::R32G32B32A32_FLOAT, 0, 64};
-        particle_desc.vertex_attrs[1]   = {1, PixelFormat::R32G32B32A32_FLOAT, 16, 64};
-        particle_desc.vertex_attrs[2]   = {2, PixelFormat::R32G32B32A32_FLOAT, 32, 64};
+        particle_desc.vertex_attr_count      = 3;
+        particle_desc.vertex_attrs[0]        = {0, PixelFormat::R32G32B32A32_FLOAT, 0, 64};
+        particle_desc.vertex_attrs[1]        = {1, PixelFormat::R32G32B32A32_FLOAT, 16, 64};
+        particle_desc.vertex_attrs[2]        = {2, PixelFormat::R32G32B32A32_FLOAT, 32, 64};
 
-        auto res3                       = backend->create_pipeline(particle_desc);
+        auto res3                            = backend->create_pipeline(particle_desc);
         if (!res3) {
             MM_ERROR("create_default_pipelines: failed to create particle pipeline");
             return make_unexpected(res3.error());

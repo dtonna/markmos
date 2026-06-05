@@ -182,7 +182,7 @@ static void reset_game() noexcept {
     g.camera.decay = 0.92f;
 
     g.ui.init();
-    g.ui.theme = ui::Theme::load("test_theme.json");
+    g.ui.theme = ui::Theme::load("themes/test_theme.json");
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -413,7 +413,7 @@ static void render_world() noexcept {
 
     static uint64_t last_log_frame = 0;
     if (g.frame_count > last_log_frame + 120) {
-        MM_LOG("render_world: frame=%llu active_blocks=%u", (unsigned long long)g.frame_count, (uint32_t)g.active_blocks);
+        // MM_LOG("render_world: frame=%llu active_blocks=%u", (unsigned long long)g.frame_count, (uint32_t)g.active_blocks);
         last_log_frame = g.frame_count;
     }
 }
@@ -816,9 +816,10 @@ static void game_init(void *) {
     }
     reset_game();
     auto &g        = *g_game;
-    g.sfx_hit_id   = g_audio_system.sfx.register_sound("hit.wav");
-    g.sfx_score_id = g_audio_system.sfx.register_sound("score.wav");
-    g.sfx_tap_id   = g_audio_system.sfx.register_sound("tap.wav");
+    g.sfx_hit_id   = g_audio_system.sfx.register_sound("sfx/hit.wav");
+    g.sfx_score_id = g_audio_system.sfx.register_sound("sfx/score.wav");
+    g.sfx_tap_id   = g_audio_system.sfx.register_sound("sfx/tap.wav");
+
 
     auto rend_res  = g.renderer.init(g_backend, nullptr, 0, 0);
     if (!rend_res) {
