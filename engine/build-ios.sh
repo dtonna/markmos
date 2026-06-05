@@ -17,6 +17,7 @@ cmake_args="
 if [ "${DEVELOPMENT_TEAM:-}" != "" ]; then
     cmake_args="$cmake_args -DCMAKE_XCODE_ATTRIBUTE_DEVELOPMENT_TEAM=$DEVELOPMENT_TEAM"
 fi
+build_args=""
 
 # Examples:
 #   ./build-ios.sh
@@ -26,4 +27,5 @@ cmake $cmake_args -S . -B "$BUILD_DIR"
 
 cmake --build "$BUILD_DIR" \
     --config "$CONFIG" \
-    --target "$TARGET"
+    --target "$TARGET" \
+    -- $build_args

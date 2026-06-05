@@ -54,6 +54,10 @@ set(RPMALLOC_DEFS ENABLE_PRELOAD=0 ENABLE_OVERRIDE=0 RPMALLOC_CONFIGURED=1)
 set(MINIAUDIO_SRCS
     "${THIRDPARTY_DIR}/miniaudio/miniaudio.c"
 )
+if(PLATFORM_IOS)
+    # CoreAudio headers on iOS use Objective-C types (NSString etc.)
+    set_source_files_properties(${MINIAUDIO_SRCS} PROPERTIES COMPILE_FLAGS "-x objective-c")
+endif()
 # simdjson — header-only
 # stb — header-only
 # metal-cpp — header-only
@@ -187,6 +191,7 @@ if(PLATFORM_IOS)
         rhi/mm_metal_backend_priv.mm
         app/mm_app_ios.mm
     )
+    set_source_files_properties(app/mm_app_ios.mm PROPERTIES COMPILE_FLAGS "-fobjc-arc")
 
 elseif(PLATFORM_MACOS)
     list(APPEND ENGINE_SOURCES
@@ -259,13 +264,21 @@ endif()
 # Platform defines
 if(PLATFORM_IOS)
     target_compile_definitions(markmos PUBLIC TARGET_IOS USE_METAL_BACKEND)
+    set_target_properties(markmos PROPERTIES
+        XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED "NO"
+    )
     target_link_libraries(markmos PUBLIC
+        "-framework Foundation"
         "-framework UIKit"
         "-framework Metal"
         "-framework MetalKit"
         "-framework QuartzCore"
         "-framework CoreGraphics"
         "-framework CoreHaptics"
+        "-framework CoreFoundation"
+        "-framework CoreAudio"
+        "-framework AudioToolbox"
+        "-framework AVFoundation"
     )
 elseif(PLATFORM_MACOS)
     target_compile_definitions(markmos PUBLIC TARGET_MACOS USE_METAL_BACKEND)
@@ -404,8 +417,10 @@ if(BUILD_GAME)
         target_link_options(markmos_game PRIVATE "-Wl,-z,max-page-size=16384")
     endif()
 
-    if(PLATFORM_MACOS)
+    if(PLATFORM_MACOS OR PLATFORM_IOS)
         set_source_files_properties(entry/mm_game_entry.cpp PROPERTIES COMPILE_FLAGS "-x objective-c++")
+    endif()
+    if(PLATFORM_MACOS)
         set_target_properties(markmos_game PROPERTIES
             MACOSX_BUNDLE TRUE
             MACOSX_BUNDLE_GUI_IDENTIFIER "com.markmos.game"
@@ -413,11 +428,32 @@ if(BUILD_GAME)
         )
     endif()
     if(PLATFORM_IOS)
+        set(MACOSX_BUNDLE_GUI_IDENTIFIER "com.markmos.game")
+        set(MACOSX_BUNDLE_NAME "Markmos")
+        set(MACOSX_BUNDLE_DISPLAY_NAME "Markmos")
+        set(MACOSX_BUNDLE_SHORT_VERSION_STRING "1.0")
+        set(MACOSX_BUNDLE_BUNDLE_VERSION "1.0")
+        configure_file("${CMAKE_CURRENT_SOURCE_DIR}/app/Info.plist.in" "${CMAKE_CURRENT_BINARY_DIR}/markmos_game.dir/Info.plist" @ONLY)
         set_target_properties(markmos_game PROPERTIES
             MACOSX_BUNDLE TRUE
-            MACOSX_BUNDLE_GUI_IDENTIFIER "com.markmos.game"
-            MACOSX_BUNDLE_BUNDLE_VERSION "1.0"
-            XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY "Apple Development"
+            XCODE_ATTRIBUTE_INFOPLIST_FILE "${CMAKE_CURRENT_BINARY_DIR}/markmos_game.dir/Info.plist"
+            XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "com.markmos.game"
+            XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY ""
+            XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED "YES"
+        )
+        # Link frameworks directly on the executable target (simulator needs explicit linkage)
+        target_link_libraries(markmos_game PRIVATE
+            "-framework Foundation"
+            "-framework UIKit"
+            "-framework Metal"
+            "-framework MetalKit"
+            "-framework QuartzCore"
+            "-framework CoreGraphics"
+            "-framework CoreHaptics"
+            "-framework CoreFoundation"
+            "-framework CoreAudio"
+            "-framework AudioToolbox"
+            "-framework AVFoundation"
         )
     endif()
 endif()
