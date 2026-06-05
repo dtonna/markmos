@@ -3,8 +3,10 @@
 
 #include "mm_vfs.hpp"
 #include "mm_job_system.hpp"
+#include "mm_log.hpp"
 #include "mm_pool.hpp"
 #include "mm_tracy.hpp"
+
 #include <cstdio>
 #include <cstring>
 
@@ -154,14 +156,18 @@ VfsBlob Vfs::read_file(const char *full_path) noexcept {
     if (g_asset_mgr) {
         AAsset *asset = AAssetManager_open(g_asset_mgr, full_path, AASSET_MODE_BUFFER);
         if (asset) {
+            MM_LOG("VFS: Successfully opened asset: %s", full_path);
             off64_t size = AAsset_getLength64(asset);
+
             if (size <= 0) {
+                MM_ERROR("VFS: Asset found but size <= 0: %s", full_path);
                 AAsset_close(asset);
                 return {};
             }
             // mmap the asset data directly (avoids copy)
             const void *src = AAsset_getBuffer(asset);
             if (!src) {
+                MM_ERROR("VFS: Failed to get buffer for asset: %s", full_path);
                 AAsset_close(asset);
                 return {};
             }
@@ -169,13 +175,18 @@ VfsBlob Vfs::read_file(const char *full_path) noexcept {
             auto  blob_size = static_cast<uint64_t>(size);
             void *dst       = pool_alloc(static_cast<size_t>(blob_size));
             if (!dst) {
+                MM_ERROR("VFS: Out of memory for asset blob: %s (%llu bytes)", full_path, (unsigned long long)blob_size);
                 AAsset_close(asset);
                 return {};
             }
             std::memcpy(dst, src, static_cast<size_t>(blob_size));
             AAsset_close(asset);
             return {dst, blob_size};
+        } else {
+            // MM_LOG("VFS: Asset not found in AAssetManager: %s", full_path);
         }
+    } else {
+        MM_ERROR("VFS: AAssetManager is NULL! Cannot read asset: %s", full_path);
     }
 #endif
     // POSIX fallback (works on all platforms including Android for doc path)

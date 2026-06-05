@@ -13,6 +13,8 @@
 #include "../input/mm_input_event.hpp"
 #include "../input/mm_input_state.hpp"
 #include "../core/mm_vfs.hpp"
+#include "../core/mm_pool.hpp"
+#include "../core/mm_job_system.hpp"
 
 #include "../core/mm_log.hpp"
 
@@ -115,6 +117,10 @@ static KeyCode keycode_from_ns(uint16_t kc) noexcept {
         g_input_state = new InputState();
         g_input_state->init();
         g_audio_system.init();
+
+        // Init pool allocator, job system
+        PoolInit();
+        JobSystemInit(0);
 
         // 3. Setup VFS and environment paths
         NSString* bundlePath = [[NSBundle mainBundle] resourcePath];
