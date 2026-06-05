@@ -12,6 +12,8 @@
 #include "../input/mm_input_event.hpp"
 #include "../input/mm_input_state.hpp"
 #include "../core/mm_vfs.hpp"
+#include "../core/mm_pool.hpp"
+#include "../core/mm_job_system.hpp"
 
 #import <UIKit/UIKit.h>
 #import <QuartzCore/CAMetalLayer.h>
@@ -83,6 +85,10 @@ void app_quit() noexcept {
         g_backend = new MetalBackend();
         g_backend->init((__bridge void*)layer);
         g_audio_system.init();
+
+        // Init pool allocator, job system, and VFS
+        PoolInit();
+        JobSystemInit(0);
 
         // Init VFS with bundle resource path and documents directory
         NSString* bundlePath = [[NSBundle mainBundle] resourcePath];

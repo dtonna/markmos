@@ -215,18 +215,20 @@ struct MetalBackend {
         // Vertex descriptor from vertex_attrs
         MTL::VertexDescriptor *vd         = MTL::VertexDescriptor::alloc()->init();
         uint32_t               max_stride = 0;
+        uint32_t               buf_idx    = pdesc.is_instance ? 1 : 0;
         for (uint8_t i = 0; i < pdesc.vertex_attr_count; ++i) {
             auto &attr = pdesc.vertex_attrs[i];
             vd->attributes()->object(attr.location)->setFormat(to_metal_vertex_format(attr.format));
             vd->attributes()->object(attr.location)->setOffset(attr.offset);
-            vd->attributes()->object(attr.location)->setBufferIndex(0);
+            vd->attributes()->object(attr.location)->setBufferIndex(buf_idx);
             if (attr.stride > max_stride) {
                 max_stride = attr.stride;
             }
         }
         if (pdesc.vertex_attr_count > 0) {
-            vd->layouts()->object(0)->setStride(max_stride);
-            vd->layouts()->object(0)->setStepFunction(MTL::VertexStepFunctionPerVertex);
+            vd->layouts()->object(buf_idx)->setStride(max_stride);
+            vd->layouts()->object(buf_idx)->setStepFunction(
+                pdesc.is_instance ? MTL::VertexStepFunctionPerInstance : MTL::VertexStepFunctionPerVertex);
         }
         rpd->setVertexDescriptor(vd);
 

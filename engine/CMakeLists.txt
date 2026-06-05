@@ -382,10 +382,19 @@ if(BUILD_GAME)
         add_dependencies(markmos_game shader_embed)
     endif()
 
-    # Mark assets as bundle resources for macOS/iOS
+    # Mark assets as bundle resources for macOS/iOS — preserve subdirectory structure
     if(PLATFORM_MACOS OR PLATFORM_IOS)
-        set_source_files_properties(${GAME_RESOURCES} PROPERTIES
-            MACOSX_PACKAGE_LOCATION "Resources")
+        foreach(RESOURCE ${GAME_RESOURCES})
+            string(REPLACE "${CMAKE_CURRENT_SOURCE_DIR}/assets/" "" REL "${RESOURCE}")
+            get_filename_component(DIR "${REL}" DIRECTORY)
+            if(DIR)
+                set_source_files_properties("${RESOURCE}" PROPERTIES
+                    MACOSX_PACKAGE_LOCATION "Resources/${DIR}")
+            else()
+                set_source_files_properties("${RESOURCE}" PROPERTIES
+                    MACOSX_PACKAGE_LOCATION "Resources")
+            endif()
+        endforeach()
     endif()
 
     target_link_libraries(markmos_game PRIVATE markmos)
