@@ -428,6 +428,13 @@ if(BUILD_GAME)
         )
     endif()
     if(PLATFORM_IOS)
+        set_source_files_properties(app/PrivacyInfo.xcprist PROPERTIES
+            MACOSX_PACKAGE_LOCATION "Resources")
+        target_sources(markmos_game PRIVATE
+            app/PrivacyInfo.xcprist
+            app/Assets.xcassets)
+        set_source_files_properties(app/Assets.xcassets PROPERTIES
+            XCODE_ATTRIBUTE_ASSETCATALOG_COMPILER_APPICON_NAME "AppIcon")
         set(MACOSX_BUNDLE_GUI_IDENTIFIER "com.markmos.game")
         set(MACOSX_BUNDLE_NAME "Markmos")
         set(MACOSX_BUNDLE_DISPLAY_NAME "Markmos")
