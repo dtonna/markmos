@@ -59,12 +59,6 @@ engine/
 └── entry/         # Game entry point
 ```
 
-## Screenshots
-
-<img src="screenshots/title.png" width="240">
-<img src="screenshots/gameplay.png" width="240">
-<img src="screenshots/gameover.png" width="240">
-
 ## License
 
 MIT
