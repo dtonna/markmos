@@ -95,7 +95,7 @@ vertex VSOutput sdf_vertex_main(
     float4 pos = float4(float2(vert.position), 0.0, 1.0);
     out.position = camera.view_proj * pos;
     out.uv = float2(vert.uv);
-    out.color = float4(1.0);
+    out.color = vert.color;
     out.alpha_scale = 1.0;
     return out;
 }

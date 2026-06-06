@@ -345,24 +345,46 @@ struct VulkanBackend {
     }
 
     void shutdown() noexcept {
-        vkDeviceWaitIdle(device); // one-time at shutdown only
+        vkDeviceWaitIdle(device);
 
         vkDestroyFence(device, frame_fence, nullptr);
+        frame_fence = VK_NULL_HANDLE;
         vkDestroySemaphore(device, acquire_sem, nullptr);
+        acquire_sem = VK_NULL_HANDLE;
         vkDestroySemaphore(device, release_sem, nullptr);
+        release_sem = VK_NULL_HANDLE;
         vkDestroyCommandPool(device, cmd_pool, nullptr);
+        cmd_pool = VK_NULL_HANDLE;
 
         vkDestroyDescriptorPool(device, desc_pool, nullptr);
+        desc_pool = VK_NULL_HANDLE;
         for (auto v : swap_views) {
             vkDestroyImageView(device, v, nullptr);
         }
+        swap_views.clear();
+        swap_images.clear();
+
         vmaDestroyAllocator(allocator);
+        allocator = VK_NULL_HANDLE;
         if (surface) {
             vkDestroySurfaceKHR(instance, surface, nullptr);
+            surface = VK_NULL_HANDLE;
         }
         vkb::destroy_swapchain(vkb_swapchain);
         vkb::destroy_device(vkb_device);
         vkb::destroy_instance(vkb_instance);
+
+        instance   = VK_NULL_HANDLE;
+        device     = VK_NULL_HANDLE;
+        phys_device = VK_NULL_HANDLE;
+        graphics_queue = VK_NULL_HANDLE;
+        present_queue = VK_NULL_HANDLE;
+        swapchain  = VK_NULL_HANDLE;
+        cmd_buf    = VK_NULL_HANDLE;
+        vkb_swapchain = {};
+        vkb_device    = {};
+        vkb_instance  = {};
+
     }
 
     Expected<BufferHandle, RHIError> create_buffer(const BufferDesc &desc) noexcept {
@@ -919,13 +941,24 @@ struct VulkanBackend {
     }
 
     Expected<void, RHIError> begin_frame() noexcept {
-        //        MM_LOG("VulkanBackend::begin_frame() - waiting for frame_fence");
-        vkWaitForFences(device, 1, &frame_fence, VK_TRUE, UINT64_MAX);
-        //        MM_LOG("VulkanBackend::begin_frame() - frame_fence signaled");
-        vkResetFences(device, 1, &frame_fence);
+        VkResult fence_res = vkWaitForFences(device, 1, &frame_fence, VK_TRUE, UINT64_MAX);
+        if (fence_res == VK_ERROR_DEVICE_LOST) {
+            MM_ERROR("begin_frame: device lost on vkWaitForFences");
+            return make_unexpected(RHIError::DeviceLost);
+        }
+
+        VkResult reset_res = vkResetFences(device, 1, &frame_fence);
+        if (reset_res == VK_ERROR_DEVICE_LOST) {
+            MM_ERROR("begin_frame: device lost on vkResetFences");
+            return make_unexpected(RHIError::DeviceLost);
+        }
 
         VkResult result = vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, acquire_sem, VK_NULL_HANDLE, &swap_index);
         if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+            return make_unexpected(RHIError::DeviceLost);
+        }
+        if (result == VK_ERROR_DEVICE_LOST) {
+            MM_ERROR("begin_frame: device lost on vkAcquireNextImageKHR");
             return make_unexpected(RHIError::DeviceLost);
         }
 
@@ -984,8 +1017,12 @@ struct VulkanBackend {
 
         //        MM_LOG("VulkanBackend::end_frame() - submitting graphics queue");
         VkResult submit_res         = vkQueueSubmit(graphics_queue, 1, &submit, frame_fence);
+        if (submit_res == VK_ERROR_DEVICE_LOST) {
+            MM_ERROR("end_frame: device lost on vkQueueSubmit");
+            return make_unexpected(RHIError::DeviceLost);
+        }
         if (submit_res != VK_SUCCESS) {
-            MM_ERROR("VulkanBackend::end_frame() - vkQueueSubmit failed: %d", (int)submit_res);
+            MM_ERROR("end_frame: vkQueueSubmit failed: %d", (int)submit_res);
             return make_unexpected(RHIError::BackendError);
         }
 
@@ -1001,8 +1038,11 @@ struct VulkanBackend {
         VkResult present_res       = vkQueuePresentKHR(present_queue, &present);
         if (present_res == VK_ERROR_OUT_OF_DATE_KHR || present_res == VK_SUBOPTIMAL_KHR) {
             //            MM_LOG("VulkanBackend::end_frame() - swapchain out of date or suboptimal");
+        } else if (present_res == VK_ERROR_DEVICE_LOST) {
+            MM_ERROR("end_frame: device lost on vkQueuePresentKHR");
+            return make_unexpected(RHIError::DeviceLost);
         } else if (present_res != VK_SUCCESS) {
-            MM_ERROR("VulkanBackend::end_frame() - vkQueuePresentKHR failed: %d", (int)present_res);
+            MM_ERROR("end_frame: vkQueuePresentKHR failed: %d", (int)present_res);
         }
 
         ++timeline_value;
