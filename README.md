@@ -1,11 +1,17 @@
-# markmos
+# Markmos
 
 Cross-platform game engine with Metal backend (macOS/iOS) and Vulkan backend (Android).
+
+## Screenshots
+
+<img src="screenshots/gameplay.png" width="240">
+<img src="screenshots/title.png" width="240">
+<img src="screenshots/gameover.png" width="240">
 
 ## Features
 
 - **C++23** without exceptions or RTTI
-- **Renderer abstraction** - Metal (Apple) / Vulkan (Android)
+- **Renderer abstraction** — Metal (Apple) / Vulkan (Android)
 - **Audio** via miniaudio
 - **Memory management** via rpmalloc
 - **Job system** for multithreaded tasks
@@ -13,30 +19,22 @@ Cross-platform game engine with Metal backend (macOS/iOS) and Vulkan backend (An
 
 ## Build
 
-### macOS/iOS
+### iOS
 
 ```bash
 cd engine
-./build-xcode.sh
-# or
-cmake -G Xcode -S . -B build-xcode
+./build-ios.sh              # device debug
+./build-ios-sim.sh          # simulator debug
+DEVELOPMENT_TEAM=XXXXXXXX ./ios_build.sh   # release archive → .ipa
 ```
 
 ### Android
 
 ```bash
 cd engine
-cmake -S . -B build-android -DANDROID=ON
+./build-android.sh          # debug APK
+CONFIG=Release ./build-android.sh  # release APK
 ```
-
-### CMake Options
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `USE_TRACY` | `OFF` | Enable Tracy profiling |
-| `USE_IMGUI` | `OFF` | Include debug ImGui |
-| `BUILD_EXAMPLES` | `ON` | Build example programs |
-| `BUILD_TESTS` | `ON` | Build test targets |
 
 ## Project Structure
 
@@ -45,8 +43,12 @@ engine/
 ├── core/          # Memory, VFS, job system, utilities
 ├── render/        # Renderer, shaders, sprite batch
 ├── rhi/           # Metal/Vulkan backends
-├── app/           # Platform entry points
-├── thirdparty/     # rpmalloc, miniaudio, simdjson, stb, metal-cpp, VMA
+├── app/           # Platform entry points (iOS, Android, macOS)
+├── thirdparty/    # rpmalloc, miniaudio, simdjson, stb, metal-cpp, VMA
 ├── shaders/       # GLSL sources (Vulkan)
-└── examples/      # Demo programs
+└── entry/         # Game entry point
 ```
+
+## License
+
+MIT
