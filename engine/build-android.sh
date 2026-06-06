@@ -1,5 +1,16 @@
-# วิธีที่ 1: ใช้ toolchain file (NDK < 25)
-# cmake -G "Android Gradle" -DANDROID_SDK=<path> -DANDROID_NDK=<path> -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-30 -DCMAKE_SYSTEM_VERSION=30 -S . -B build-android
+#!/usr/bin/env bash
+set -euo pipefail
 
-# วิธี 2: ใช้ CMake รุ่นใหม่ (NDK >= 25) กับ toolchain file
-cmake -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-30 -DCMAKE_SYSTEM_VERSION=30 -S . -B build-android
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ENGINE_DIR="$(cd "$SCRIPT_DIR" && pwd)"
+PROJECT_DIR="$(cd "$ENGINE_DIR/../project/android" && pwd)"
+
+if [ -z "${ANDROID_NDK_HOME:-}" ] && [ -z "${ANDROID_NDK:-}" ]; then
+    echo "ERROR: ANDROID_NDK_HOME not set"
+    exit 1
+fi
+
+CONFIG="${CONFIG:-Debug}"
+
+cd "$PROJECT_DIR"
+./gradlew "assemble${CONFIG}" --parallel

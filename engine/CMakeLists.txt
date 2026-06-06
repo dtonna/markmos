@@ -412,6 +412,13 @@ if(BUILD_GAME)
 
     target_link_libraries(markmos_game PRIVATE markmos)
 
+    if(PLATFORM_IOS OR PLATFORM_MACOS)
+        # Force linker to load all ObjC classes/categories from static library
+        target_link_options(markmos_game PRIVATE "-ObjC")
+        # Simulator Metal framework lacks some symbols — weak-link them
+        target_link_options(markmos_game PRIVATE "-Wl,-U,_MTLIOErrorDomain" "-Wl,-U,_MTLTensorDomain")
+    endif()
+
     if(PLATFORM_ANDROID)
         # Fix 16 KB page size compatibility warning for Android 15
         target_link_options(markmos_game PRIVATE "-Wl,-z,max-page-size=16384")
