@@ -112,6 +112,7 @@ void SfxPool::init(ma_engine* eng) noexcept {
     engine      = eng;
     voice_count = MAX_SFX_VOICES;
     sound_count = 0;
+    master_volume = 1.0f;
 
     memset(sound_paths,   0, sizeof(sound_paths));
     memset(source_loaded, 0, sizeof(source_loaded));
@@ -211,6 +212,7 @@ static bool play_entry(SfxPool& pool, uint8_t id, uint8_t priority, float pitch)
     v.priority = priority;
     v.active   = 1;
     ma_sound_set_pitch(v.sound, pitch);
+    ma_sound_set_volume(v.sound, pool.master_volume);
     ma_sound_start(v.sound);
     return true;
 }
@@ -270,6 +272,7 @@ void SfxPool::stop_all() noexcept {
 }
 
 void SfxPool::set_master_volume(float vol) noexcept {
+    master_volume = vol;
     for (uint8_t i = 0; i < voice_count; ++i)
         if (voices[i].active && voices[i].sound)
             ma_sound_set_volume(voices[i].sound, vol);
@@ -436,10 +439,9 @@ bool AudioSystem::init() noexcept {
     ma_engine_config config = ma_engine_config_init();
 
 #if defined(TARGET_ANDROID)
-    // Emulators and some Android devices perform better with larger buffers.
-    // periodSizeInFrames = 0 means use backend default.
-    // For Emulator, we try to force a safer larger buffer if default fails.
-    config.periodSizeInFrames = 2048;
+    // Emulator: use larger buffer to prevent audio thread suspension
+    // when there are gaps between sound triggers.
+    config.periodSizeInMilliseconds = 40;
 #endif
 
     ma_result result = ma_engine_init(&config, engine_);

@@ -13,7 +13,7 @@
 
 class Vfs;
 
-static constexpr uint32_t SAVE_MAGIC   = 0xCAFE2D00u;
+static constexpr uint32_t SAVE_MAGIC   = 0xCAFE2D01u;
 static constexpr uint32_t MAX_LEVELS   = 200;
 static constexpr uint32_t MAX_STARS    = 3u;  // 0-3 stars per level (2 bits)
 
@@ -28,6 +28,7 @@ struct SaveData {
         magic = SAVE_MAGIC;
         memset(this, 0, sizeof(*this));
         magic = SAVE_MAGIC;
+        settings_flags = 3; // sound + particles ON by default
     }
 
     bool valid() const noexcept {

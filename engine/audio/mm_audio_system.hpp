@@ -39,6 +39,8 @@ struct SfxPool {
     const char* sound_paths[MAX_SOUNDS];
     uint8_t     sound_count;
 
+    float     master_volume = 1.0f;
+
     void init(ma_engine* eng) noexcept;
     void shutdown() noexcept;
 

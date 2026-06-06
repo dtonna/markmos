@@ -15,6 +15,7 @@
 #include "../app/mm_app.hpp"
 #include "../audio/mm_audio_system.hpp"
 #include "../core/mm_log.hpp"
+#include "../core/mm_save_data.hpp"
 #include "../core/mm_vfs.hpp"
 #include "../game/mm_camera_trauma.hpp"
 #include "../game/mm_particle_pool.hpp"
@@ -33,7 +34,6 @@
 // ─────────────────────────────────────────────────────────────
 
 static constexpr uint16_t MAX_BLOCKS    = 256;
-static constexpr uint16_t MAX_STARS     = 32;
 
 static constexpr float    GRAVITY       = 150.0f;
 static constexpr float    COMBO_TIMEOUT = 1.5f;
@@ -133,6 +133,7 @@ static Game *g_game = nullptr;
 // ─────────────────────────────────────────────────────────────
 
 static void  play_sfx(uint8_t id, int priority, float base, float range) noexcept {
+    if (g_game && !g_game->sound_on) return;
 
     float pitch = base + static_cast<float>(std::rand() % static_cast<int>(range * 100.0f + 0.5f)) / 100.0f;
 
@@ -162,8 +163,6 @@ static void reset_game() noexcept {
     g.frame_count   = 0;
 
     g.hud_built     = false;
-    g.sound_on      = true;
-    g.particles_on  = true;
     g.state         = GameState::Playing;
 
     g.tap_cooldown  = 0.0f;
@@ -175,6 +174,7 @@ static void reset_game() noexcept {
 
     g.tweens.reset();
     g.popups.reset();
+    g.particles.reset();
 
     g.scene.init();
 
@@ -272,7 +272,10 @@ static void game_over() noexcept {
         g.high_score = g.score;
     }
 
-    play_sfx(g.sfx_score_id, 200, 0.8f, 0.1f);
+    g_save_data.set_score(0, g.high_score);
+    save_data_save(g_vfs);
+
+    play_sfx(g.sfx_score_id, 50, 0.8f, 0.1f);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -306,7 +309,7 @@ static void hit_block(Block &b) noexcept {
 
         g.hit_cooldown = 0.08f;
 
-        play_sfx(g.sfx_hit_id, 100, 0.9f, 0.2f);
+        play_sfx(g.sfx_hit_id, 150, 0.9f, 0.2f);
     }
 }
 
@@ -370,7 +373,7 @@ static void update_scene(float dt) noexcept {
 
         g_game->scene.y[idx]        -= dt * 40.0f;
 
-        if (g_game->scene.y[idx] < -80.0f) {
+        if (g_game->scene.y[idx] < -80.0f && g_game->destroy_count < MAX_ENTITIES) {
 
             g_game->destroy_queue[g_game->destroy_count++] = idx;
         }
@@ -428,12 +431,18 @@ static void on_play_click(uint16_t) {
     g_game->drop_timer = 0.0f; // spawn first block immediately
 }
 
-static void on_toggle_sound(uint16_t) {
-    g_game->sound_on = !g_game->sound_on;
+static void on_toggle_sound(uint16_t id) {
+    g_game->sound_on = g_game->ui.pool[id].state != 0;
     g_audio_system.sfx.set_master_volume(g_game->sound_on ? 1.0f : 0.0f);
+    g_save_data.set_sound(g_game->sound_on);
+    save_data_save(g_vfs);
 }
 
-static void on_checkbox_part(uint16_t) { g_game->particles_on = !g_game->particles_on; }
+static void on_checkbox_part(uint16_t id) {
+    g_game->particles_on = g_game->ui.pool[id].state != 0;
+    g_save_data.set_haptic(g_game->particles_on);
+    save_data_save(g_vfs);
+}
 
 static void on_slider_volume(uint16_t, float val) { g_audio_system.sfx.set_master_volume(val); }
 
@@ -451,6 +460,7 @@ static void on_exit_click(uint16_t) { app_quit(); }
 
 static void on_restart_click(uint16_t) {
     auto &g = *g_game;
+    g_audio_system.sfx.stop_all();
     reset_game();
     g.ui.clear();
     g.ui_built  = false;
@@ -586,7 +596,7 @@ static void build_ui_demo() noexcept {
     cy += gap + 10.0f;
     m.button(cx - 100.0f * scale, cy, 200.0f * scale, 55.0f * scale, "Exit", 0xFF664466, 0xFFFFFFFF, on_exit_click);
     cy += gap;
-    m.toggle(cx - 100.0f * scale, cy, 50.0f * scale, 30.0f * scale, "", 0xFF44FF44, 0xFF444444, 0, false, on_toggle_sound);
+    m.toggle(cx - 100.0f * scale, cy, 50.0f * scale, 30.0f * scale, "", 0xFF44FF44, 0xFF444444, 0, g.sound_on, on_toggle_sound);
     m.label(cx - 40.0f * scale, cy + 25.0f, "Sound", 0xFFCCCCCC, 1.0f);
 #else
     m.label(cx - 110.0f, cy, "Markmos Desktop", 0xFFFFAAFF, 1.5f);
@@ -597,7 +607,7 @@ static void build_ui_demo() noexcept {
     cy += 65.0f;
     m.button(cx - 120.0f, cy, 240.0f, 50.0f, "Exit", 0xFF664466, 0xFFFFFFFF, on_exit_click);
     cy += 55.0f;
-    m.toggle(cx - 120.0f, cy, 48.0f, 28.0f, "", 0xFF44FF44, 0xFF444444, 0, false, on_toggle_sound);
+    m.toggle(cx - 120.0f, cy, 48.0f, 28.0f, "", 0xFF44FF44, 0xFF444444, 0, g.sound_on, on_toggle_sound);
     m.label(cx - 64.0f, cy + 27.0f, "Sound ON/OFF", 0xFFCCCCCC, 1.0f);
     if (g.demo_mat.pipeline.is_valid()) {
         m.image(cx + 160.0f, ch * 0.15f, 150.0f, 150.0f);
@@ -816,6 +826,13 @@ static void game_init(void *) {
     }
     reset_game();
     auto &g        = *g_game;
+
+    save_data_load(g_vfs);
+    g.high_score   = g_save_data.get_score(0);
+    g.sound_on     = g_save_data.sound_enabled();
+    g_audio_system.sfx.set_master_volume(g.sound_on ? 1.0f : 0.0f);
+    g.particles_on = g_save_data.haptic_enabled();
+
     g.sfx_hit_id   = g_audio_system.sfx.register_sound("sfx/hit.wav");
     g.sfx_score_id = g_audio_system.sfx.register_sound("sfx/score.wav");
     g.sfx_tap_id   = g_audio_system.sfx.register_sound("sfx/tap.wav");
@@ -887,6 +904,8 @@ static void game_resize(void *, uint32_t w, uint32_t h) {
 
 static void game_cleanup(void *) {
     if (g_game) {
+        g_save_data.set_score(0, g_game->high_score);
+        save_data_save(g_vfs);
         g_game->renderer.shutdown();
         delete g_game;
         g_game = nullptr;
