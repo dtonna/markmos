@@ -15,6 +15,7 @@
 #include "../app/mm_app.hpp"
 #include "../audio/mm_audio_system.hpp"
 #include "../core/mm_log.hpp"
+#include "../core/mm_save_data.hpp"
 #include "../core/mm_vfs.hpp"
 #include "../game/mm_camera_trauma.hpp"
 #include "../game/mm_particle_pool.hpp"
@@ -33,7 +34,6 @@
 // ─────────────────────────────────────────────────────────────
 
 static constexpr uint16_t MAX_BLOCKS    = 256;
-static constexpr uint16_t MAX_STARS     = 32;
 
 static constexpr float    GRAVITY       = 150.0f;
 static constexpr float    COMBO_TIMEOUT = 1.5f;
@@ -162,8 +162,6 @@ static void reset_game() noexcept {
     g.frame_count   = 0;
 
     g.hud_built     = false;
-    g.sound_on      = true;
-    g.particles_on  = true;
     g.state         = GameState::Playing;
 
     g.tap_cooldown  = 0.0f;
@@ -271,6 +269,9 @@ static void game_over() noexcept {
     if (g.score > g.high_score) {
         g.high_score = g.score;
     }
+
+    g_save_data.set_score(0, g.high_score);
+    save_data_save(g_vfs);
 
     play_sfx(g.sfx_score_id, 200, 0.8f, 0.1f);
 }
@@ -431,9 +432,15 @@ static void on_play_click(uint16_t) {
 static void on_toggle_sound(uint16_t) {
     g_game->sound_on = !g_game->sound_on;
     g_audio_system.sfx.set_master_volume(g_game->sound_on ? 1.0f : 0.0f);
+    g_save_data.set_sound(g_game->sound_on);
+    save_data_save(g_vfs);
 }
 
-static void on_checkbox_part(uint16_t) { g_game->particles_on = !g_game->particles_on; }
+static void on_checkbox_part(uint16_t) {
+    g_game->particles_on = !g_game->particles_on;
+    g_save_data.set_haptic(g_game->particles_on);
+    save_data_save(g_vfs);
+}
 
 static void on_slider_volume(uint16_t, float val) { g_audio_system.sfx.set_master_volume(val); }
 
@@ -816,6 +823,13 @@ static void game_init(void *) {
     }
     reset_game();
     auto &g        = *g_game;
+
+    save_data_load(g_vfs);
+    g.high_score   = g_save_data.get_score(0);
+    g.sound_on     = g_save_data.sound_enabled();
+    g_audio_system.sfx.set_master_volume(g.sound_on ? 1.0f : 0.0f);
+    g.particles_on = g_save_data.haptic_enabled();
+
     g.sfx_hit_id   = g_audio_system.sfx.register_sound("sfx/hit.wav");
     g.sfx_score_id = g_audio_system.sfx.register_sound("sfx/score.wav");
     g.sfx_tap_id   = g_audio_system.sfx.register_sound("sfx/tap.wav");
@@ -887,6 +901,8 @@ static void game_resize(void *, uint32_t w, uint32_t h) {
 
 static void game_cleanup(void *) {
     if (g_game) {
+        g_save_data.set_score(0, g_game->high_score);
+        save_data_save(g_vfs);
         g_game->renderer.shutdown();
         delete g_game;
         g_game = nullptr;
