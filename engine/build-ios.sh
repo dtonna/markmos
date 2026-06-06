@@ -1,7 +1,8 @@
 #!/usr/bin/env sh
 set -eu
 
-BUILD_DIR="${BUILD_DIR:-build-ios}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+BUILD_DIR="${BUILD_DIR:-${SCRIPT_DIR}/build-ios}"
 CONFIG="${CONFIG:-Debug}"
 TARGET="${TARGET:-markmos_game}"
 SDK="${SDK:-iphoneos}"
@@ -17,15 +18,10 @@ cmake_args="
 if [ "${DEVELOPMENT_TEAM:-}" != "" ]; then
     cmake_args="$cmake_args -DCMAKE_XCODE_ATTRIBUTE_DEVELOPMENT_TEAM=$DEVELOPMENT_TEAM"
 fi
-build_args=""
 
-# Examples:
-#   ./build-ios.sh
-#   SDK=iphonesimulator TARGET=mm_05_particle_stress ./build-ios.sh
-#   DEVELOPMENT_TEAM=ABCDE12345 CONFIG=Release ./build-ios.sh
-cmake $cmake_args -S . -B "$BUILD_DIR"
+cmake $cmake_args -S "$SCRIPT_DIR" -B "$BUILD_DIR"
 
 cmake --build "$BUILD_DIR" \
     --config "$CONFIG" \
     --target "$TARGET" \
-    -- $build_args
+    --
