@@ -215,13 +215,20 @@ void app_quit() noexcept {
 
     if (!g_backend) return;
 
-    g_backend->begin_frame();
+    auto begin_res = g_backend->begin_frame();
+    if (!begin_res) {
+        MM_ERROR("_renderFrame: begin_frame failed: %d", (int)begin_res.error());
+        return;
+    }
 
     if (g_callbacks.frame) {
         g_callbacks.frame(g_callbacks.user_data, dt, *g_input_state);
     }
 
-    g_backend->end_frame();
+    auto end_res = g_backend->end_frame();
+    if (!end_res) {
+        MM_ERROR("_renderFrame: end_frame failed: %d", (int)end_res.error());
+    }
 }
 
 // ─── Touch ID helpers ────────────────────────────────────────────────────────
