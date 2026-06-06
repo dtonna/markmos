@@ -120,7 +120,7 @@ struct VulkanBackend {
         vkb::InstanceBuilder inst_builder;
         inst_builder.set_app_name("Markmos")
                             .set_engine_name("Markmos Engine")
-                            .require_api_version(1, 1, 0);
+                            .require_api_version(1, 2, 0);
 
 #if !defined(NDEBUG) && !defined(VK_USE_PLATFORM_ANDROID_KHR)
         // Validation layers are often missing on Android devices, causing instance creation to fail.
@@ -172,7 +172,7 @@ struct VulkanBackend {
         MM_LOG("Selecting Physical Device");
 
         vkb::PhysicalDeviceSelector phys_dev_selector(vkb_instance);
-        auto                        phys_dev_ret = phys_dev_selector.set_minimum_version(1, 1)
+        auto                        phys_dev_ret = phys_dev_selector.set_minimum_version(1, 2)
                                 .set_surface(surface) // Pass surface explicitly to ensure presentation support
                                 .add_required_extension(VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME)
                                 .select();
@@ -278,7 +278,7 @@ struct VulkanBackend {
         alloc_info.physicalDevice   = phys_device;
         alloc_info.instance         = instance;
         alloc_info.pVulkanFunctions = &vma_funcs;
-        alloc_info.vulkanApiVersion = VK_API_VERSION_1_1;
+        alloc_info.vulkanApiVersion = VK_API_VERSION_1_2;
         VkResult vma_res            = vmaCreateAllocator(&alloc_info, &allocator);
         if (vma_res != VK_SUCCESS) {
             MM_ERROR("Failed to create VMA allocator, result: %d", (int)vma_res);
