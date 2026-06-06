@@ -2,12 +2,6 @@
 
 Cross-platform game engine with Metal backend (macOS/iOS) and Vulkan backend (Android).
 
-## Screenshots
-
-<img src="screenshots/gameplay.png" width="240">
-<img src="screenshots/title.png" width="240">
-<img src="screenshots/gameover.png" width="240">
-
 ## Features
 
 - **C++23** without exceptions or RTTI
@@ -48,6 +42,12 @@ engine/
 ├── shaders/       # GLSL sources (Vulkan)
 └── entry/         # Game entry point
 ```
+
+## Screenshots
+
+<img src="screenshots/title.png" width="240">
+<img src="screenshots/gameplay.png" width="240">
+<img src="screenshots/gameover.png" width="240">
 
 ## License
 
