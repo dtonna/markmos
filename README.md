@@ -1,33 +1,49 @@
-# Markmos
+# Markmos Engine
 
-Cross-platform game engine with Metal backend (macOS/iOS) and Vulkan backend (Android).
+A cross-platform game engine built from scratch — Metal backend for iOS/macOS,
+Vulkan backend for Android.
+
+Written in C++23 with no exceptions, no RTTI, and no engine hiding the details from you.
+
+## Screenshots
+
+<div align="center">
+  <img src="screenshots/title.png" width="200" style="border-radius: 20px">
+  <img src="screenshots/gameplay.png" width="200" style="border-radius: 20px">
+  <img src="screenshots/gameover.png" width="200" style="border-radius: 20px">
+</div>
 
 ## Features
 
-- **C++23** without exceptions or RTTI
-- **Renderer abstraction** — Metal (Apple) / Vulkan (Android)
+- **Renderer abstraction** — Metal (iOS/macOS) and Vulkan (Android) behind a unified RHI
+- **Sokol-style architecture** — `markmos_main()` as the single cross-platform entry point
 - **Audio** via miniaudio
-- **Memory management** via rpmalloc
+- **Memory** via rpmalloc
 - **Job system** for multithreaded tasks
-- **Sprite batching** with efficient sorting
+- **Sprite batching** with draw call sorting
+- **C++23** — no exceptions, no RTTI, no unnecessary abstractions
 
 ## Build
 
-### iOS
+### iOS (device)
 
 ```bash
 cd engine
-./build-ios.sh              # device debug
-./build-ios-sim.sh          # simulator debug
-DEVELOPMENT_TEAM=XXXXXXXX ./ios_build.sh   # release archive → .ipa
+./build-ios.sh
+```
+
+### iOS (simulator)
+
+```bash
+./build-ios-sim.sh
 ```
 
 ### Android
 
 ```bash
 cd engine
-./build-android.sh          # debug APK
-CONFIG=Release ./build-android.sh  # release APK
+./build-android.sh                    # debug APK
+CONFIG=Release ./build-android.sh     # release APK
 ```
 
 ## Project Structure
@@ -42,12 +58,6 @@ engine/
 ├── shaders/       # GLSL sources (Vulkan)
 └── entry/         # Game entry point
 ```
-
-## Screenshots
-
-<img src="screenshots/title.png" width="240">
-<img src="screenshots/gameplay.png" width="240">
-<img src="screenshots/gameover.png" width="240">
 
 ## License
 
