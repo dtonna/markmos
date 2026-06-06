@@ -245,13 +245,56 @@ struct AndroidApp {
         // ── Render ────────────────────────────────────────────────────────────
         auto begin_res = backend->begin_frame();
         if (!begin_res) {
-            MM_ERROR("frame() begin_frame() failed: %d", (int)begin_res.error());
+            if (begin_res.error() == RHIError::DeviceLost) {
+                MM_LOG("Device lost in begin_frame — triggering recovery");
+                recover_device();
+            }
             return;
         }
         if (g_callbacks.frame) {
             g_callbacks.frame(g_callbacks.user_data, dt, *input_state);
         }
-        backend->end_frame();
+        auto end_res = backend->end_frame();
+        if (!end_res) {
+            if (end_res.error() == RHIError::DeviceLost) {
+                MM_LOG("Device lost in end_frame — triggering recovery");
+                recover_device();
+            }
+        }
+    }
+
+    void recover_device() noexcept {
+        MM_LOG("Recovering from Vulkan device lost...");
+        active = false;
+
+        if (g_callbacks.cleanup) {
+            g_callbacks.cleanup(g_callbacks.user_data);
+        }
+
+        backend->shutdown();
+
+        auto result = backend->init(window);
+        if (!result) {
+            MM_ERROR("Device recovery failed — cannot re-init Vulkan backend");
+            app_quit();
+            return;
+        }
+        MM_LOG("Device recovery: Vulkan backend re-initialized");
+
+        g_content_scale = scale_factor > 1.0f ? scale_factor : 1.0f;
+        if (g_callbacks.init) {
+            g_callbacks.init(g_callbacks.user_data);
+        }
+
+        float cs = g_content_scale > 1.0f ? g_content_scale : 1.0f;
+        if (g_callbacks.resize) {
+            g_callbacks.resize(g_callbacks.user_data, static_cast<uint32_t>(static_cast<float>(width) / cs + 0.5f),
+                               static_cast<uint32_t>(static_cast<float>(height) / cs + 0.5f));
+        }
+
+        active = true;
+        resync_time();
+        MM_LOG("Device recovery complete");
     }
 };
 
@@ -420,6 +463,7 @@ int32_t handle_input(android_app *app, AInputEvent *event) {
 
 // ─── Main loop ────────────────────────────────────────────────────────────────
 void android_main(android_app *app) {
+    MM_LOG("android_main() started");
     PoolInit();
 
     g_android_app     = app;
