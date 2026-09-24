@@ -223,6 +223,8 @@ if(BUILD_EXAMPLES)
         examples/mm_03_match3_board.cpp
         examples/mm_04_block_puzzle.cpp
         examples/mm_05_particle_stress.cpp
+        examples/mm_06_shader_lab.cpp
+        examples/mm_07_ui_lab.cpp
     )
 endif()
 
