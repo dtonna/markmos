@@ -2,104 +2,104 @@
 // SPDX-License-Identifier: MIT
 
 #pragma once
-#include <cstdint>
-#include <cstddef>
-#include <cstring>
 #include "../core/mm_vfs.hpp"
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
 
 // Forward declare miniaudio types (avoid full include in header)
 struct ma_engine;
 struct ma_sound;
 
-
-
-
-
-static constexpr uint8_t MAX_SFX_VOICES = 16;
-static constexpr uint8_t MAX_SOUNDS    = 32;
+static constexpr uint8_t MAX_SFX_VOICES   = 16;
+static constexpr uint8_t MAX_SOUNDS       = 32;
 static constexpr uint8_t SFX_PRIORITY_MAX = 255;
-static constexpr uint8_t SFX_NO_SOUND  = UINT8_MAX;
+static constexpr uint8_t SFX_NO_SOUND     = UINT8_MAX;
 
 struct SfxVoice {
-    ma_sound* sound;       // miniaudio sound handle
-    uint8_t   priority;    // lower = more important
+    ma_sound *sound;    // miniaudio sound handle
+    void     *buffer;   // per-voice ma_audio_buffer (independent cursor)
+    uint8_t   priority; // lower = more important
     uint8_t   active;
-    uint16_t  _pad;
+    uint8_t   buffer_inited;
+    uint8_t   pad;
 };
 
 struct SfxPool {
-    ma_sound  *sources[MAX_SOUNDS];
-    bool      source_loaded[MAX_SOUNDS];
-    SfxVoice voices[MAX_SFX_VOICES];
-    uint8_t  voice_count;
+    ma_sound   *sources[MAX_SOUNDS];
+    bool        source_loaded[MAX_SOUNDS];
+    SfxVoice    voices[MAX_SFX_VOICES];
+    uint8_t     voice_count;
 
-    ma_engine* engine;
+    ma_engine  *engine;
 
     // Sound registry: index → path mapping
-    const char* sound_paths[MAX_SOUNDS];
+    const char *sound_paths[MAX_SOUNDS];
     uint8_t     sound_count;
 
-    float     master_volume = 1.0f;
+    float       master_volume = 1.0f;
 
-    void init(ma_engine* eng) noexcept;
-    void shutdown() noexcept;
+    void        init(ma_engine *eng) noexcept;
+    void        shutdown() noexcept;
 
     // Register a sound path, returns uint8_t ID (SFX_NO_SOUND on full)
-    uint8_t register_sound(const char* path) noexcept;
+    uint8_t     register_sound(const char *path) noexcept;
 
     // Play by path string
-    bool play(const char* path, uint8_t priority = 128) noexcept;
-    bool play(const char* path, uint8_t priority, float pitch) noexcept;
+    bool        play(const char *path, uint8_t priority = 128) noexcept;
+    bool        play(const char *path, uint8_t priority, float pitch) noexcept;
+    bool        play(const char *path, uint8_t priority, float pitch, float volume_scale) noexcept;
 
     // Play by registered ID
-    bool play_id(uint8_t id, uint8_t priority = 128) noexcept;
-    bool play_id(uint8_t id, uint8_t priority, float pitch) noexcept;
+    bool        play_id(uint8_t id, uint8_t priority = 128) noexcept;
+    bool        play_id(uint8_t id, uint8_t priority, float pitch) noexcept;
+    bool        play_id(uint8_t id, uint8_t priority, float pitch, float volume_scale) noexcept;
 
     // Stop all sounds
-    void stop_all() noexcept;
+    void        stop_all() noexcept;
 
     // Set master volume [0, 1]
-    void set_master_volume(float vol) noexcept;
+    void        set_master_volume(float vol) noexcept;
 
-private:
+  private:
     // Find lowest-priority active voice for replacement
     uint8_t find_lowest_priority() noexcept;
 };
 
 struct MusicLayer {
-    ma_sound*        track[2];      // [0] = current, [1] = next
-    void*            track_bufs[2]; // Persistent buffers (ma_audio_buffer*)
-    void*            track_pcm[2];  // persistent decoded data
-    float            volume[2];     // crossfade volumes
-    float            crossfade_t;   // 0→1 during crossfade
-    float            crossfade_duration;
-    uint8_t          active_track;  // 0 or 1
-    uint8_t          crossfading;
-    bool             track_loaded[2];
+    ma_sound  *track[2];      // [0] = current, [1] = next
+    void      *track_bufs[2]; // Persistent buffers (ma_audio_buffer*)
+    void      *track_pcm[2];  // persistent decoded data
+    float      volume[2];     // crossfade volumes
+    float      crossfade_t;   // 0→1 during crossfade
+    float      crossfade_duration;
+    uint8_t    active_track; // 0 or 1
+    uint8_t    crossfading;
+    bool       track_loaded[2];
 
-    ma_engine* engine;
+    ma_engine *engine;
 
-    void init(ma_engine* eng) noexcept;
-    void shutdown() noexcept;
+    void       init(ma_engine *eng) noexcept;
+    void       shutdown() noexcept;
 
-    void play(const char* path, float fade_duration = 1.0f) noexcept;
-    void stop(float fade_duration = 0.5f) noexcept;
-    void update(float dt) noexcept;
-    void set_volume(float vol) noexcept;
-    bool is_playing() const noexcept;
+    void       play(const char *path, float fade_duration = 1.0f) noexcept;
+    void       stop(float fade_duration = 0.5f) noexcept;
+    void       update(float dt) noexcept;
+    void       set_volume(float vol) noexcept;
+    bool       is_playing() const noexcept;
 };
 
 // AudioSystem — top-level wrapper that owns ma_engine + SfxPool + MusicLayer
 struct AudioSystem {
-    SfxPool     sfx;
-    MusicLayer  music;
+    SfxPool    sfx;
+    MusicLayer music;
 
-    bool init() noexcept;
-    void shutdown() noexcept;
-    void update(float dt) noexcept;
+    bool       init() noexcept;
+    void       shutdown() noexcept;
+    void       update(float dt) noexcept;
 
-private:
-    ma_engine* engine_ = nullptr;
+  private:
+    ma_engine *engine = nullptr;
 };
 
 extern AudioSystem g_audio_system;

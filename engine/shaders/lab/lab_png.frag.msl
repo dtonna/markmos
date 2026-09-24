@@ -1,0 +1,51 @@
+// Shader Lab — normal mode D8: PNG normal map from disk.
+// Hot-reload: save this file (shader) or lab_normal.png (texture) while the
+// lab runs in png mode (key 8) — both poll for changes. Put lab_normal.png
+// next to this file; if missing, the host uploads a flat (128,128,255)
+// normal and prints a warning. Same lighting math as lab_derive/lab_proc.
+//
+// PNG requirements: RGB/RGBA8, tangent-space, +Y up, LINEAR data (the host
+// uploads UNORM, never sRGB). Any size works — the host recreates the GPU
+// texture when the file size changes.
+//
+// Binding note: [[texture(1)]] is bound by the host with logical index 2
+// (Metal backend quirk — index 1 aliases slot 0).
+//
+// Rules: entry `lab_png_main`, VSOutput = sprite vertex, params
+// `LabNormalParams` (two float4s) at [[buffer(2)]]. Metal only.
+
+#include <metal_stdlib>
+using namespace metal;
+
+struct VSOutput {
+    float4 position [[position]];
+    float2 uv;
+    float4 color;
+};
+
+struct LabNormalParams {
+    float4 light_dir;  // xyz = direction TO light, w = intensity
+    float4 misc;       // x = ambient, y = spec strength, z = unused here, w = spare
+};
+
+fragment float4 lab_png_main(
+    VSOutput                 input [[stage_in]],
+    texture2d<float>         albedo [[texture(0)]],
+    texture2d<float>         nrm    [[texture(1)]],
+    sampler                  samp  [[sampler(0)]],
+    sampler                  samp1 [[sampler(1)]],
+    constant LabNormalParams& p    [[buffer(2)]]
+) {
+    float3 n = normalize(nrm.sample(samp1, input.uv).rgb * 2.0 - 1.0);
+
+    float3 ldir = normalize(p.light_dir.xyz);
+    float4 base = albedo.sample(samp, input.uv) * input.color;
+
+    float diff = max(dot(n, ldir), 0.0) * p.light_dir.w;
+
+    float3 h = normalize(ldir + float3(0.0, 0.0, 1.0));
+    float spec = pow(max(dot(n, h), 0.0), 32.0) * p.misc.y;
+
+    float3 col = base.rgb * (p.misc.x + diff) + spec;
+    return float4(col, base.a);
+}

@@ -1,0 +1,78 @@
+// Shader Lab — cartoon mode (C): toon shading on the card albedo.
+// Hot-reload: save this file while the lab runs in cartoon mode (key C).
+// Uses lab_card.png only — no normal texture needed.
+//
+// Look: diffuse quantized into `bands` flat steps, ink outline wherever the
+// albedo luminance changes abruptly (Sobel edge — catches ALL print edges,
+// sharper than normal-discontinuity ink), one-step specular.
+// Bands are driven by the +/- keys (toon.x); edit defaults below freely.
+//
+// Rules:
+//   - Entry MUST stay named `lab_cartoon_main` (looked up by name).
+//   - VSOutput MUST match sprite_vertex_msl (position/uv/color).
+//   - Params MUST be `LabCartoonParams` at [[buffer(2)]]: three float4s.
+//     (Metal packs vectors at 16-byte boundaries — float4 members ONLY.)
+//   - Metal only.
+
+#include <metal_stdlib>
+using namespace metal;
+
+struct VSOutput {
+    float4 position [[position]];
+    float2 uv;
+    float4 color;
+};
+
+struct LabCartoonParams {
+    float4 light_dir;  // xyz = direction TO light, w = intensity
+    float4 misc;       // x = ambient, y = spec on/off, z = height_scale, w = spare
+    float4 toon;       // x = bands (2..5), y = ink threshold, z = ink strength, w = spare
+};
+
+float cartoon_luma(float3 c) {
+    return dot(c, float3(0.299, 0.587, 0.114));
+}
+
+fragment float4 lab_cartoon_main(
+    VSOutput                  input [[stage_in]],
+    texture2d<float>          tex   [[texture(0)]],
+    sampler                   samp  [[sampler(0)]],
+    constant LabCartoonParams& p    [[buffer(2)]]
+) {
+    float2 texel = 1.0 / float2(tex.get_width(), tex.get_height());
+
+    // Sobel 3x3 on albedo luminance: gradient magnitude = ink mask,
+    // gradient direction = shade normal (emboss look, same as derive mode).
+    float tl = cartoon_luma(tex.sample(samp, input.uv + texel * float2(-1, -1)).rgb);
+    float t  = cartoon_luma(tex.sample(samp, input.uv + texel * float2( 0, -1)).rgb);
+    float tr = cartoon_luma(tex.sample(samp, input.uv + texel * float2( 1, -1)).rgb);
+    float l  = cartoon_luma(tex.sample(samp, input.uv + texel * float2(-1,  0)).rgb);
+    float r  = cartoon_luma(tex.sample(samp, input.uv + texel * float2( 1,  0)).rgb);
+    float bl = cartoon_luma(tex.sample(samp, input.uv + texel * float2(-1,  1)).rgb);
+    float b  = cartoon_luma(tex.sample(samp, input.uv + texel * float2( 0,  1)).rgb);
+    float br = cartoon_luma(tex.sample(samp, input.uv + texel * float2( 1,  1)).rgb);
+
+    float dhdx = (tr + 2.0 * r + br) - (tl + 2.0 * l + bl);
+    float dhdy = (bl + 2.0 * b + br) - (tl + 2.0 * t + tr);
+    float edge = length(float2(dhdx, dhdy));
+
+    float3 n = normalize(float3(-dhdx * p.misc.z, -dhdy * p.misc.z, 1.0));
+    float3 ldir = normalize(p.light_dir.xyz);
+    float4 base = tex.sample(samp, input.uv) * input.color;
+
+    // Quantized diffuse: N steps over [ambient, ambient + intensity].
+    float bands = max(p.toon.x, 2.0);
+    float d = max(dot(n, ldir), 0.0) * p.light_dir.w;
+    float shade = p.misc.x + (floor(d * bands) / bands) * (1.0 - p.misc.x);
+
+    // One-step specular (cel highlight).
+    float3 h = normalize(ldir + float3(0.0, 0.0, 1.0));
+    float spec = step(0.85, max(dot(n, h), 0.0)) * p.misc.y;
+
+    // Ink: darken where the print edge is strong.
+    float ink = (1.0 - smoothstep(p.toon.y, p.toon.y * 2.0, edge)) * p.toon.z;
+
+    float3 col = base.rgb * shade + spec;
+    col *= 1.0 - ink;
+    return float4(col, base.a);
+}
