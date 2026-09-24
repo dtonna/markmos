@@ -432,6 +432,7 @@ static KeyCode keycode_from_ns(uint16_t kc) noexcept {
     }
     [self.window setContentView:view];
     [self.window makeKeyAndOrderFront:nil];
+    [NSApp activateIgnoringOtherApps:YES];
 }
 
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication*)sender {
@@ -462,7 +463,9 @@ int main(int argc, const char* argv[]) {
     @autoreleasepool {
         g_callbacks = markmos_main(argc, const_cast<char**>(argv));
         [NSApplication sharedApplication];
+        [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
         [NSApp setDelegate:[[AppDelegate alloc] init]];
+        [NSApp activateIgnoringOtherApps:YES];
         [NSApp run];
     }
     return 0;
