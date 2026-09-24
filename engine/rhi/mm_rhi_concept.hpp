@@ -105,24 +105,31 @@ struct VertexAttribute {
     uint32_t    stride;
 };
 
+struct FunctionConstant {
+    uint32_t index;      // function constant index
+    bool     value;      // boolean value
+};
+
 struct PipelineDesc {
-    ShaderDesc        vertex_shader;
-    ShaderDesc        fragment_shader;
-    PrimitiveType     prim_type;
-    CullMode          cull_mode;
-    BlendFactor       src_blend, dst_blend;
-    BlendOp           blend_op;
-    bool              depth_test;
-    bool              depth_write;
-    CompareOp         depth_compare;
-    PixelFormat       color_formats[4];
-    uint8_t           color_count;
-    PixelFormat       depth_format;
-    VertexAttribute   vertex_attrs[16];
-    uint8_t           vertex_attr_count;
-    DescriptorBinding descriptor_bindings[8];
-    uint8_t           descriptor_count;
-    bool              is_instance;
+    ShaderDesc         vertex_shader;
+    ShaderDesc         fragment_shader;
+    PrimitiveType      prim_type;
+    CullMode           cull_mode;
+    BlendFactor        src_blend, dst_blend;
+    BlendOp            blend_op;
+    bool               depth_test;
+    bool               depth_write;
+    CompareOp          depth_compare;
+    PixelFormat        color_formats[4];
+    uint8_t            color_count;
+    PixelFormat        depth_format;
+    VertexAttribute    vertex_attrs[16];
+    uint8_t            vertex_attr_count;
+    DescriptorBinding  descriptor_bindings[8];
+    uint8_t            descriptor_count;
+    bool               is_instance;
+    FunctionConstant   function_constants[4];
+    uint8_t            function_constant_count;
 };
 
 struct PassDesc {

@@ -109,18 +109,16 @@ struct color {
                ((u32)(b * 255.0F + 0.5F) << 8) |
                ((u32)(a * 255.0F + 0.5F));
     }
+    // Engine packed format: 0xAARRGGBB (alpha in the high byte — sprite
+    // tints, palettes, vertex colors, K_* constants). The Metal backend
+    // swizzles R8G8B8A8 vertex/texture data to BGRA so these literals
+    // render correctly; always unpack with the shifts below, never by
+    // raw byte order.
     MM_FORCE_INLINE u32 to_u32_argb() const noexcept {
         return ((u32)(a * 255.0F + 0.5F) << 24) |
                ((u32)(r * 255.0F + 0.5F) << 16) |
                ((u32)(g * 255.0F + 0.5F) << 8) |
                ((u32)(b * 255.0F + 0.5F));
-    }
-    // Engine pixel format: 0xAABBGGRR
-    MM_FORCE_INLINE u32 to_u32_bgra() const noexcept {
-        return ((u32)(a * 255.0F + 0.5F) << 24) |
-               ((u32)(b * 255.0F + 0.5F) << 16) |
-               ((u32)(g * 255.0F + 0.5F) << 8) |
-               ((u32)(r * 255.0F + 0.5F));
     }
 
     MM_FORCE_INLINE static color from_u32_rgba(u32 rgba) noexcept {

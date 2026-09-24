@@ -9,3 +9,6 @@ extern const unsigned int  g_karla_ttf_size;
 
 extern const unsigned char* g_sarabun_ttf;
 extern const unsigned int  g_sarabun_ttf_size;
+
+extern const unsigned char* g_noto_symbols1_ttf;
+extern const unsigned int  g_noto_symbols1_ttf_len;

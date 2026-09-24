@@ -245,11 +245,11 @@ static void spawn_block() noexcept {
         color(1.0f, 1.0f, 0.267f),
     };
 
-    b->color       = colors[std::rand() % 4].to_u32_bgra();
+    b->color       = colors[std::rand() % 4].to_u32_argb(); // 0xAARRGGBB engine literals
 
     b->spawn_scale = 0.0f;
 
-    g_game->tweens.spawn(&b->spawn_scale, 0.0f, 1.0f, 0.3f, EaseType::BackOut);
+    g_game->tweens.spawn(&b->spawn_scale, 0.0f, 1.0f, 0.3f, e_ease_type::BACK_OUT);
 }
 
 // ─────────────────────────────────────────────────────────────

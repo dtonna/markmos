@@ -3,6 +3,7 @@
 
 #pragma once
 #include "../render/mm_renderer.hpp"
+#include "../math/mm_color.h"
 #include "../input/mm_input_state.hpp"
 #include <cstring>
 
@@ -35,6 +36,33 @@ enum class BtnState : uint8_t {
     Pressed,
 };
 
+// ─── Layout alignment per axis: 0 = Start (left/top, legacy default) ──
+enum class LayoutAlign : uint8_t {
+    Start  = 0, // left / top (legacy: children pile from padding)
+    Center = 1, // centered group within container inner size
+    End    = 2, // right / bottom
+};
+
+// ─── Shape type for WidgetStyle ──────────────────────────────────
+enum class ShapeType : uint8_t {
+    Default = 0,    // use style's shape setting
+    Rect,
+    RoundedRect,
+    Circle,
+    Custom,         // skip Pass 1, on_draw handles everything
+};
+
+// ─── WidgetStyle: shared visual definition ───────────────────────
+struct WidgetStyle {
+    TextureHandle bg_tex;        // invalid = fallback bg_color
+    uint32_t      border_color;  // 0 = no border
+    float         border_width;  // normalized [0-1]
+    float         corner_r;      // 0=sharp, >0=rounded rect, 0.5=circle
+    ShapeType     shape;         // Rect / RoundedRect / Circle
+    uint8_t       _pad[3];
+};
+static_assert(sizeof(WidgetStyle) == 24, "WidgetStyle size");
+
 // ─── Widget node ─────────────────────────────────────────────────
 using DrawCallback = void (*)(uint16_t id, Renderer& r, SpriteBatch& batch,
                               float abs_x, float abs_y, float dt);
@@ -43,8 +71,13 @@ using ChangeCallback = void (*)(uint16_t id, float value);
 struct Widget {
     float x, y, w, h;
     float scale;
-    uint32_t bg_color;      // 0xAABBGGRR, 0 = transparent
-    uint32_t text_color;    // 0xAABBGGRR
+    uint32_t bg_color;      // 0xAARRGGBB, 0 = transparent
+    uint32_t text_color;    // 0xAARRGGBB
+    float press_scale;          // current animated press scale (1.0 = normal)
+    float press_scale_target;   // target scale (1.0 normal, <1 pressed)
+    float anim_t;               // animation timer
+    float thumb_pos;            // toggle thumb position 0=off 1=on (smooth slide)
+    float hover_factor;         // hover glow transition 0=idle 1=full glow
     void (*on_click)(uint16_t id);
     DrawCallback on_draw;
     char text[48];
@@ -52,10 +85,12 @@ struct Widget {
     uint8_t type;           // WidgetType
     uint8_t flags;          // WidgetFlag
     uint8_t state;          // BtnState or toggle bool
-    uint8_t _pad[3];
+    uint8_t style_id;       // index into Manager::styles[] (0 = classic)
+    uint8_t shape;          // ShapeType override (0 = use style's shape)
+    uint8_t _pad[1];        // 8-byte alignment padding
 };
 
-static_assert(sizeof(Widget) == 104, "Widget size");
+static_assert(sizeof(Widget) == 120, "Widget size");
 
 // ─── Theme — centralized color palette ───────────────────────────
 struct Theme {
@@ -136,6 +171,11 @@ struct Manager {
     uint8_t  layout_type[MAX];     // 0=None, 1=HBox, 2=VBox
     uint8_t  layout_pad[MAX];      // uniform padding
     uint8_t  layout_spacing[MAX];  // gap between children
+    // Extended layout (all default 0 = legacy behavior: absolute pos/size)
+    uint8_t  layout_align[MAX]; // packed: bits[1:0]=main-axis, bits[3:2]=cross-axis (LayoutAlign)
+    uint8_t  size_pct_w[MAX];   // 0 = absolute w, else % of container inner width
+    uint8_t  size_pct_h[MAX];   // 0 = absolute h, else % of container inner height
+    int8_t   margin[MAX][4];    // outer margin [top, right, bottom, left]
 
     // TextField data (parallel arrays)
     uint8_t  cursor_pos[MAX];
@@ -148,43 +188,67 @@ struct Manager {
     uint16_t content_h[MAX];
     uint16_t content_ascent[MAX];  // max ascender (baseline up) from glyph metrics
 
+    // Absolute position cache (rebuilt each frame)
+    float _abs_x[MAX];
+    float _abs_y[MAX];
+
     // TextField edit state
     uint16_t editing_id;
     float    cursor_timer;
 
+    // Measure dirty flag — skips measure() when nothing changed
+    bool measure_dirty;
+    bool abs_cache_dirty;
+
     // Theme
     Theme theme;
+
+    // Style pool (shared visual definitions)
+    static constexpr uint16_t MAX_STYLES = 64;
+    WidgetStyle styles[MAX_STYLES];
+    uint16_t    style_count;
+
+    uint8_t register_style(const WidgetStyle &s) noexcept {
+        assert(style_count < MAX_STYLES);
+        uint8_t id = static_cast<uint8_t>(style_count++);
+        styles[id] = s;
+        return id;
+    }
 
     void init() noexcept;
     void clear() noexcept;
 
     uint16_t panel(float x, float y, float w, float h, uint32_t color,
-                   uint16_t parent = UINT16_MAX) noexcept;
+                   uint16_t parent = UINT16_MAX, uint8_t style_id = 0) noexcept;
     uint16_t label(float x, float y, const char* text, uint32_t color, float scale,
-                   uint16_t parent = UINT16_MAX) noexcept;
+                   uint16_t parent = UINT16_MAX, uint8_t style_id = 0) noexcept;
     uint16_t button(float x, float y, float w, float h, const char* text,
-                    uint32_t bg, uint32_t fg, void (*cb)(uint16_t),
-                    uint16_t parent = UINT16_MAX) noexcept;
+                     uint32_t bg, uint32_t fg, void (*cb)(uint16_t),
+                     uint16_t parent = UINT16_MAX, float scale = 1.2f,
+                     uint8_t style_id = 0) noexcept;
     uint16_t toggle(float x, float y, float w, float h, const char* text,
                     uint32_t bg_on, uint32_t bg_off, uint32_t fg,
                     bool initial, void (*cb)(uint16_t),
-                    uint16_t parent = UINT16_MAX) noexcept;
+                    uint16_t parent = UINT16_MAX, uint8_t style_id = 0) noexcept;
     uint16_t slider(float x, float y, float w, float h,
                     float initial, ChangeCallback cb,
-                    uint16_t parent = UINT16_MAX) noexcept;
+                    uint16_t parent = UINT16_MAX, uint8_t style_id = 0) noexcept;
     uint16_t textfield(float x, float y, float w, float h, const char* initial_text,
                        uint32_t bg, uint32_t fg,
-                       uint16_t parent = UINT16_MAX) noexcept;
+                       uint16_t parent = UINT16_MAX, uint8_t style_id = 0) noexcept;
     uint16_t checkbox(float x, float y, const char* text,
                       uint32_t on_c, uint32_t off_c, uint32_t fg,
                       bool initial, void (*cb)(uint16_t),
-                      uint16_t parent = UINT16_MAX) noexcept;
+                      uint16_t parent = UINT16_MAX, uint8_t style_id = 0) noexcept;
     uint16_t image(float x, float y, float w, float h,
-                   uint16_t parent = UINT16_MAX) noexcept;
+                   uint16_t parent = UINT16_MAX, uint8_t style_id = 0) noexcept;
     void remove(uint16_t id) noexcept;
     void set_material(uint16_t id, const Material& mat) noexcept;
 
     void set_layout(uint16_t id, uint8_t type, uint8_t padding = 0, uint8_t spacing = 0) noexcept;
+    void set_layout_align(uint16_t id, uint8_t main_align, uint8_t cross_align) noexcept;
+    void set_size_pct(uint16_t id, uint8_t w_pct, uint8_t h_pct) noexcept;
+    void set_margin(uint16_t id, int8_t top, int8_t right, int8_t bottom, int8_t left) noexcept;
     void measure(Renderer& r) noexcept;
     void layout(Renderer& r) noexcept;
 
@@ -198,6 +262,11 @@ struct Manager {
 
 private:
     uint16_t alloc() noexcept;
+    void rebuild_abs_cache() noexcept;
+    void layout_children(uint16_t parent_id) noexcept; // runtime dispatch on HBox/VBox
+    template <uint8_t Axis>                           // 0 = horizontal flow, 1 = vertical flow
+    void layout_children_axis(uint16_t parent_id) noexcept;
+    void layout_subtree(uint16_t id) noexcept; // layout container + nested containers below it
     float abs_x(uint16_t id) const noexcept;
     float abs_y(uint16_t id) const noexcept;
     uint16_t pick(float px, float py) const noexcept;
@@ -206,59 +275,65 @@ private:
                   uint16_t& cw, uint16_t& ch) const noexcept;
     uint16_t find_next_focus(uint16_t from) const noexcept;
     uint16_t find_prev_focus(uint16_t from) const noexcept;
-    void layout_children(uint16_t parent_id) noexcept;
 };
 
-// ─── Color helpers (engine format: 0xAABBGGRR) ──────────────────
+// ─── Color helpers (engine format: 0xAARRGGBB) ──────────────────
 MM_FORCE_INLINE static uint32_t ui_lighten(uint32_t color, uint8_t amount) noexcept {
     uint32_t a = color & 0xFF000000;
-    uint32_t r = (uint32_t)((color & 0xFF) + amount);
-    if (r > 255) r = 255;
+    uint32_t b = (uint32_t)((color & 0xFF) + amount);
+    if (b > 255) b = 255;
     uint32_t g = (uint32_t)(((color >> 8) & 0xFF) + amount);
     if (g > 255) g = 255;
-    uint32_t b = (uint32_t)(((color >> 16) & 0xFF) + amount);
-    if (b > 255) b = 255;
-    return a | (b << 16) | (g << 8) | r;
+    uint32_t r = (uint32_t)(((color >> 16) & 0xFF) + amount);
+    if (r > 255) r = 255;
+    return a | (r << 16) | (g << 8) | b;
+}
+
+MM_FORCE_INLINE static uint32_t ui_lerp_color(uint32_t a, uint32_t b, float t) noexcept {
+    // Packed engine colors (0xAARRGGBB) — same per-channel math as before,
+    // now explicit about the packing.
+    return mm_math::color::from_u32_argb(a).lerp(mm_math::color::from_u32_argb(b), t).to_u32_argb();
 }
 
 MM_FORCE_INLINE static uint32_t ui_darken(uint32_t color, uint8_t amount) noexcept {
     uint32_t a = color & 0xFF000000;
-    uint32_t r = (uint32_t)((int)(color & 0xFF) - (int)amount);
-    if (r > 255) r = 0;
+    uint32_t b = (uint32_t)((int)(color & 0xFF) - (int)amount);
+    if (b > 255) b = 0;
     uint32_t g = (uint32_t)((int)(((color >> 8) & 0xFF)) - (int)amount);
     if (g > 255) g = 0;
-    uint32_t b = (uint32_t)((int)(((color >> 16) & 0xFF)) - (int)amount);
-    if (b > 255) b = 0;
-    return a | (b << 16) | (g << 8) | r;
+    uint32_t r = (uint32_t)((int)(((color >> 16) & 0xFF)) - (int)amount);
+    if (r > 255) r = 0;
+    return a | (r << 16) | (g << 8) | b;
 }
 
 inline Theme Theme::dark() noexcept {
     Theme t{};
-    t.panel_bg         = 0x2D2D2DFF;
-    t.button_bg        = 0x3A3A3AFF;
+    // format: 0xAARRGGBB
+    t.panel_bg         = 0xFF2D2D2D;
+    t.button_bg        = 0xFF3A3A3A;
     t.button_text      = 0xFFFFFFFF;
-    t.toggle_track_on  = 0x5CB85CFF;
-    t.toggle_track_off = 0x444444FF;
+    t.toggle_track_on  = 0xFF5CB85C;
+    t.toggle_track_off = 0xFF444444;
     t.toggle_thumb     = 0xFFF0F0FF;
-    t.toggle_thumb_hot = 0xCCEEFFFF;
+    t.toggle_thumb_hot = 0xFFEECCFF;
     t.toggle_text      = 0xFFFFFFFF;
-    t.slider_bg        = 0x444444FF;
-    t.slider_track     = 0x333333FF;
-    t.slider_fill      = 0x44FF88FF;
-    t.slider_thumb     = 0x66FFAAFF;
-    t.slider_thumb_hot = 0x88FFAAFF;
+    t.slider_bg        = 0xFF444444;
+    t.slider_track     = 0xFF333333;
+    t.slider_fill      = 0xFF88FF44;
+    t.slider_thumb     = 0xFFAAFF66;
+    t.slider_thumb_hot = 0xFFAAFF88;
     t.slider_text      = 0xFF88FF88;
-    t.checkbox_on      = 0x5CB85CFF;
-    t.checkbox_off     = 0x444444FF;
+    t.checkbox_on      = 0xFF5CB85C;
+    t.checkbox_off     = 0xFF444444;
     t.checkbox_border  = 0xFF888888;
     t.checkbox_check   = 0xFFFFFFFF;
     t.checkbox_text    = 0xFFFFFFFF;
-    t.textfield_bg     = 0x2D2D2DFF;
+    t.textfield_bg     = 0xFF2D2D2D;
     t.textfield_text   = 0xFFFFFFFF;
     t.cursor           = 0xFFFFFFFF;
-    t.focus_color      = 0x44FF88FF;
+    t.focus_color      = 0xFF88FF44;
     t.text_primary     = 0xFFFFFFFF;
-    t.text_secondary   = 0xAAAAAAFF;
+    t.text_secondary   = 0xFFAAAAAA;
 
     t.panel_pad[0] = t.panel_pad[1] = t.panel_pad[2] = t.panel_pad[3] = 0;
     t.label_pad[0] = t.label_pad[1] = t.label_pad[2] = t.label_pad[3] = 0;
@@ -287,11 +362,19 @@ inline void Manager::init() noexcept {
     editing_id = UINT16_MAX;
     cursor_timer = 0.0f;
     theme = Theme::dark();
+    style_count = 0;
+    register_style({TextureHandle::invalid(), 0, 0.0f, 0.0f, ShapeType::RoundedRect, {}});
+    measure_dirty = true;
+    abs_cache_dirty = true;
     for (uint16_t i = 0; i < MAX; ++i) {
         widget_material[i].pipeline = PipelineHandle::invalid();
         layout_type[i] = 0;
         layout_pad[i] = 0;
         layout_spacing[i] = 0;
+        layout_align[i] = 0;
+        size_pct_w[i] = 0;
+        size_pct_h[i] = 0;
+        margin[i][0] = margin[i][1] = margin[i][2] = margin[i][3] = 0;
         cursor_pos[i] = 0;
         on_color[i] = 0;
         off_color[i] = 0;
@@ -299,17 +382,25 @@ inline void Manager::init() noexcept {
         content_w[i] = 0;
         content_h[i] = 0;
         content_ascent[i] = 0;
+        _abs_x[i] = 0;
+        _abs_y[i] = 0;
     }
 }
 
 inline void Manager::clear() noexcept {
     count = 0;
     freelist_count = 0;
+    hot = UINT16_MAX;
+    active = UINT16_MAX;
+    clicked = UINT16_MAX;
     focus_id = UINT16_MAX;
     editing_id = UINT16_MAX;
+    measure_dirty = true;
+    abs_cache_dirty = true;
 }
 
 inline uint16_t Manager::alloc() noexcept {
+    abs_cache_dirty = true;
     if (freelist_count > 0) return freelist[--freelist_count];
     if (count >= MAX) return UINT16_MAX;
     return count++;
@@ -326,18 +417,34 @@ inline void Manager::remove(uint16_t id) noexcept {
     if (active == id) active = UINT16_MAX;
     if (hot == id) hot = UINT16_MAX;
     if (clicked == id) clicked = UINT16_MAX;
+    measure_dirty = true;
+    abs_cache_dirty = true;
+}
+
+inline void Manager::rebuild_abs_cache() noexcept {
+    if (!abs_cache_dirty) return;
+    abs_cache_dirty = false;
+    for (uint16_t i = 0; i < count; ++i) {
+        float ax = 0.0f, ay = 0.0f;
+        uint16_t p = i;
+        uint8_t guard = 0;
+        while (p != UINT16_MAX && guard < MAX) {
+            ax += pool[p].x;
+            ay += pool[p].y;
+            p = pool[p].parent;
+            ++guard;
+        }
+        _abs_x[i] = ax;
+        _abs_y[i] = ay;
+    }
 }
 
 inline float Manager::abs_x(uint16_t id) const noexcept {
-    float ax = pool[id].x;
-    if (pool[id].parent != UINT16_MAX) ax += abs_x(pool[id].parent);
-    return ax;
+    return _abs_x[id];
 }
 
 inline float Manager::abs_y(uint16_t id) const noexcept {
-    float ay = pool[id].y;
-    if (pool[id].parent != UINT16_MAX) ay += abs_y(pool[id].parent);
-    return ay;
+    return _abs_y[id];
 }
 
 inline uint16_t Manager::pick(float px, float py) const noexcept {
@@ -381,7 +488,7 @@ inline bool Manager::get_clip(uint16_t id, int16_t& cx, int16_t& cy,
 }
 
 inline uint16_t Manager::panel(float x, float y, float w, float h, uint32_t color,
-                               uint16_t parent) noexcept {
+                               uint16_t parent, uint8_t style_id) noexcept {
     uint16_t id = alloc();
     if (id == UINT16_MAX) return id;
     auto& wg = pool[id];
@@ -389,19 +496,27 @@ inline uint16_t Manager::panel(float x, float y, float w, float h, uint32_t colo
     wg.scale = 1.0f;
     wg.bg_color = color;
     wg.text_color = 0;
+    wg.press_scale = 1.0f;
+    wg.press_scale_target = 1.0f;
+    wg.anim_t = 0.0f;
+    wg.thumb_pos = 0.0f;
+    wg.hover_factor = 0.0f;
     wg.text[0] = '\0';
     wg.parent = parent;
     wg.type = (uint8_t)WidgetType::Panel;
     wg.flags = WF_Visible;
     wg.state = 0;
+    wg.style_id = style_id;
+    wg.shape = 0;
     wg.on_click = nullptr;
     wg.on_draw = nullptr;
     std::memcpy(pad[id], theme.panel_pad, sizeof(pad[id]));
+    measure_dirty = true;
     return id;
 }
 
 inline uint16_t Manager::label(float x, float y, const char* text, uint32_t color,
-                               float scale, uint16_t parent) noexcept {
+                               float scale, uint16_t parent, uint8_t style_id) noexcept {
     uint16_t id = alloc();
     if (id == UINT16_MAX) return id;
     auto& wg = pool[id];
@@ -409,44 +524,60 @@ inline uint16_t Manager::label(float x, float y, const char* text, uint32_t colo
     wg.scale = scale;
     wg.bg_color = 0;
     wg.text_color = color;
+    wg.press_scale = 1.0f;
+    wg.press_scale_target = 1.0f;
+    wg.anim_t = 0.0f;
+    wg.thumb_pos = 0.0f;
+    wg.hover_factor = 0.0f;
     std::strncpy(wg.text, text, sizeof(wg.text) - 1);
     wg.text[sizeof(wg.text) - 1] = '\0';
     wg.parent = parent;
     wg.type = (uint8_t)WidgetType::Label;
     wg.flags = WF_Visible | WF_AutoW | WF_AutoH;
     wg.state = 0;
+    wg.style_id = style_id;
+    wg.shape = 0;
     wg.on_click = nullptr;
     wg.on_draw = nullptr;
     std::memcpy(pad[id], theme.label_pad, sizeof(pad[id]));
+    measure_dirty = true;
     return id;
 }
 
 inline uint16_t Manager::button(float x, float y, float w, float h, const char* text,
                                 uint32_t bg, uint32_t fg, void (*cb)(uint16_t),
-                                uint16_t parent) noexcept {
+                                uint16_t parent, float scale, uint8_t style_id) noexcept {
     uint16_t id = alloc();
     if (id == UINT16_MAX) return id;
     auto& wg = pool[id];
     wg.x = x; wg.y = y; wg.w = w; wg.h = h;
-    wg.scale = 1.2f;
+    wg.scale = scale;
     wg.bg_color = bg;
     wg.text_color = fg;
+    wg.press_scale = 1.0f;
+    wg.press_scale_target = 1.0f;
+    wg.anim_t = 0.0f;
+    wg.thumb_pos = 0.0f;
+    wg.hover_factor = 0.0f;
     std::strncpy(wg.text, text, sizeof(wg.text) - 1);
     wg.text[sizeof(wg.text) - 1] = '\0';
     wg.parent = parent;
     wg.type = (uint8_t)WidgetType::Button;
     wg.flags = WF_Visible | WF_Enabled;
     wg.state = 0;
+    wg.style_id = style_id;
+    wg.shape = 0;
     wg.on_click = cb;
     wg.on_draw = nullptr;
     std::memcpy(pad[id], theme.button_pad, sizeof(pad[id]));
+    measure_dirty = true;
     return id;
 }
 
 inline uint16_t Manager::toggle(float x, float y, float w, float h, const char* text,
                                 uint32_t bg_on, uint32_t bg_off, uint32_t fg,
                                 bool initial, void (*cb)(uint16_t),
-                                uint16_t parent) noexcept {
+                                uint16_t parent, uint8_t style_id) noexcept {
     uint16_t id = alloc();
     if (id == UINT16_MAX) return id;
     auto& wg = pool[id];
@@ -454,23 +585,31 @@ inline uint16_t Manager::toggle(float x, float y, float w, float h, const char* 
     wg.scale = 1.0f;
     wg.bg_color = theme.toggle_track_off;
     wg.text_color = fg;
+    wg.press_scale = 1.0f;
+    wg.press_scale_target = 1.0f;
+    wg.anim_t = 0.0f;
+    wg.thumb_pos = 0.0f;
+    wg.hover_factor = 0.0f;
     std::strncpy(wg.text, text, sizeof(wg.text) - 1);
     wg.text[sizeof(wg.text) - 1] = '\0';
     wg.parent = parent;
     wg.type = (uint8_t)WidgetType::Toggle;
     wg.flags = WF_Visible | WF_Enabled | WF_Focusable;
     wg.state = initial ? 1 : 0;
+    wg.style_id = style_id;
+    wg.shape = 0;
     wg.on_click = cb;
     wg.on_draw = nullptr;
     on_color[id] = bg_on;
     off_color[id] = bg_off;
     std::memcpy(pad[id], theme.toggle_pad, sizeof(pad[id]));
+    measure_dirty = true;
     return id;
 }
 
 inline uint16_t Manager::slider(float x, float y, float w, float h,
                                 float initial, ChangeCallback cb,
-                                uint16_t parent) noexcept {
+                                uint16_t parent, uint8_t style_id) noexcept {
     uint16_t id = alloc();
     if (id == UINT16_MAX) return id;
     auto& wg = pool[id];
@@ -478,22 +617,30 @@ inline uint16_t Manager::slider(float x, float y, float w, float h,
     wg.scale = 1.0f;
     wg.bg_color = theme.slider_bg;
     wg.text_color = 0;
+    wg.press_scale = 1.0f;
+    wg.press_scale_target = 1.0f;
+    wg.anim_t = 0.0f;
+    wg.thumb_pos = 0.0f;
+    wg.hover_factor = 0.0f;
     wg.text[0] = '\0';
     wg.parent = parent;
     wg.type = (uint8_t)WidgetType::Slider;
     wg.flags = WF_Visible | WF_Enabled | WF_Focusable;
     wg.state = 0;
+    wg.style_id = style_id;
+    wg.shape = 0;
     wg.on_click = nullptr;
     wg.on_draw = nullptr;
     slider_value[id] = initial;
     on_change[id] = cb;
     std::memcpy(pad[id], theme.slider_pad, sizeof(pad[id]));
+    measure_dirty = true;
     return id;
 }
 
 inline uint16_t Manager::textfield(float x, float y, float w, float h, const char* initial_text,
                                    uint32_t bg, uint32_t fg,
-                                   uint16_t parent) noexcept {
+                                   uint16_t parent, uint8_t style_id) noexcept {
     uint16_t id = alloc();
     if (id == UINT16_MAX) return id;
     auto& wg = pool[id];
@@ -501,23 +648,31 @@ inline uint16_t Manager::textfield(float x, float y, float w, float h, const cha
     wg.scale = 1.0f;
     wg.bg_color = bg;
     wg.text_color = fg;
+    wg.press_scale = 1.0f;
+    wg.press_scale_target = 1.0f;
+    wg.anim_t = 0.0f;
+    wg.thumb_pos = 0.0f;
+    wg.hover_factor = 0.0f;
     std::strncpy(wg.text, initial_text, sizeof(wg.text) - 1);
     wg.text[sizeof(wg.text) - 1] = '\0';
     wg.parent = parent;
     wg.type = (uint8_t)WidgetType::TextField;
     wg.flags = WF_Visible | WF_Enabled | WF_Focusable;
     wg.state = 0;
+    wg.style_id = style_id;
+    wg.shape = 0;
     wg.on_click = nullptr;
     wg.on_draw = nullptr;
     cursor_pos[id] = static_cast<uint8_t>(std::strlen(wg.text));
     std::memcpy(pad[id], theme.textfield_pad, sizeof(pad[id]));
+    measure_dirty = true;
     return id;
 }
 
 inline uint16_t Manager::checkbox(float x, float y, const char* text,
                                   uint32_t on_c, uint32_t off_c, uint32_t fg,
                                   bool initial, void (*cb)(uint16_t),
-                                  uint16_t parent) noexcept {
+                                  uint16_t parent, uint8_t style_id) noexcept {
     uint16_t id = alloc();
     if (id == UINT16_MAX) return id;
     auto& wg = pool[id];
@@ -525,22 +680,30 @@ inline uint16_t Manager::checkbox(float x, float y, const char* text,
     wg.scale = 1.0f;
     wg.bg_color = initial ? on_c : off_c;
     wg.text_color = fg;
+    wg.press_scale = 1.0f;
+    wg.press_scale_target = 1.0f;
+    wg.anim_t = 0.0f;
+    wg.thumb_pos = 0.0f;
+    wg.hover_factor = 0.0f;
     std::strncpy(wg.text, text, sizeof(wg.text) - 1);
     wg.text[sizeof(wg.text) - 1] = '\0';
     wg.parent = parent;
     wg.type = (uint8_t)WidgetType::Checkbox;
     wg.flags = WF_Visible | WF_Enabled | WF_Focusable;
     wg.state = initial ? 1 : 0;
+    wg.style_id = style_id;
+    wg.shape = 0;
     wg.on_click = cb;
     wg.on_draw = nullptr;
     on_color[id] = on_c;
     off_color[id] = off_c;
     std::memcpy(pad[id], theme.checkbox_pad, sizeof(pad[id]));
+    measure_dirty = true;
     return id;
 }
 
 inline uint16_t Manager::image(float x, float y, float w, float h,
-                                uint16_t parent) noexcept {
+                                uint16_t parent, uint8_t style_id) noexcept {
     uint16_t id = alloc();
     if (id == UINT16_MAX) return id;
     auto& wg = pool[id];
@@ -548,13 +711,21 @@ inline uint16_t Manager::image(float x, float y, float w, float h,
     wg.scale = 1.0f;
     wg.bg_color = 0xFFFFFFFF;  // white tint = show texture as-is
     wg.text_color = 0;
+    wg.press_scale = 1.0f;
+    wg.press_scale_target = 1.0f;
+    wg.anim_t = 0.0f;
+    wg.thumb_pos = 0.0f;
+    wg.hover_factor = 0.0f;
     wg.text[0] = '\0';
     wg.parent = parent;
     wg.type = (uint8_t)WidgetType::Image;
     wg.flags = WF_Visible | WF_Enabled;
     wg.state = 0;
+    wg.style_id = style_id;
+    wg.shape = 0;
     wg.on_click = nullptr;
     wg.on_draw = nullptr;
+    measure_dirty = true;
     return id;
 }
 
@@ -604,7 +775,35 @@ inline void Manager::set_layout(uint16_t id, uint8_t type, uint8_t padding, uint
     layout_spacing[id] = spacing;
 }
 
+// Main/cross alignment for layout containers (0=Start, 1=Center, 2=End).
+// Default 0/0 reproduces the legacy pile-from-padding behavior.
+inline void Manager::set_layout_align(uint16_t id, uint8_t main_align, uint8_t cross_align) noexcept {
+    if (id >= MAX) return;
+    if (main_align > 2) main_align = 0;
+    if (cross_align > 2) cross_align = 0;
+    layout_align[id] = static_cast<uint8_t>((cross_align << 2) | main_align);
+}
+
+// Percent size: 0 = absolute w/h (legacy), else % of container inner size.
+// Percent of a root widget (no container) is treated as absolute.
+inline void Manager::set_size_pct(uint16_t id, uint8_t w_pct, uint8_t h_pct) noexcept {
+    if (id >= MAX) return;
+    size_pct_w[id] = (w_pct > 100) ? 100 : w_pct;
+    size_pct_h[id] = (h_pct > 100) ? 100 : h_pct;
+}
+
+// Outer margin [top, right, bottom, left] applied in layout flow.
+inline void Manager::set_margin(uint16_t id, int8_t top, int8_t right, int8_t bottom, int8_t left) noexcept {
+    if (id >= MAX) return;
+    margin[id][0] = top;
+    margin[id][1] = right;
+    margin[id][2] = bottom;
+    margin[id][3] = left;
+}
+
 inline void Manager::measure(Renderer& r) noexcept {
+    if (!measure_dirty) return;
+    measure_dirty = false;
     for (uint16_t i = 0; i < count; ++i) {
         auto& w = pool[i];
         if (!(w.flags & WF_Visible)) continue;

@@ -1,0 +1,64 @@
+// Shader Lab — editable fragment seed (dissolve).
+// Hot-reload: save this file while mm_06_shader_lab runs (mode LAB, key D0)
+// and the pipeline rebuilds within ~0.25s. Compile errors keep the old
+// pipeline alive — check the console for "FS COMPILE ERROR".
+//
+// Rules:
+//   - Entry MUST stay named `lab_fragment_main` (example looks it up).
+//   - VSOutput MUST match sprite_vertex_msl (position/uv/color).
+//   - Params block MUST stay named `LabParams` with [[buffer(2)]] binding
+//     (Up/Down = progress, Left/Right = edge_width).
+//   - Metal only. Vulkan/SPIR-V path intentionally not wired (Sprint 8+).
+
+#include <metal_stdlib>
+using namespace metal;
+
+struct VSOutput {
+    float4 position [[position]];
+    float2 uv;
+    float4 color;
+};
+
+struct LabParams {
+    float  progress;    // 0.0 = fully visible, 1.0 = fully dissolved
+    float  edge_width;  // glow edge width, e.g. 0.05
+    float4 edge_color;  // glow color (e.g. orange for fire)
+};
+
+// Hash-based noise (no texture needed)
+float hash(float2 p) {
+    p = fract(p * float2(127.1, 311.7));
+    p += dot(p, p + 19.19);
+    return fract(p.x * p.y);
+}
+
+float noise(float2 p) {
+    float2 i = floor(p);
+    float2 f = fract(p);
+    float2 u = f * f * (3.0 - 2.0 * f);
+    return mix(
+        mix(hash(i + float2(0,0)), hash(i + float2(1,0)), u.x),
+        mix(hash(i + float2(0,1)), hash(i + float2(1,1)), u.x),
+        u.y
+    );
+}
+
+fragment float4 lab_fragment_main(
+    VSOutput            input [[stage_in]],
+    texture2d<float>    tex   [[texture(0)]],
+    sampler             samp  [[sampler(0)]],
+    constant LabParams& p     [[buffer(2)]]
+) {
+    float4 base = tex.sample(samp, input.uv) * input.color;
+
+    float n = noise(input.uv * 8.0);  // dissolve pattern scale
+
+    if (n < p.progress) discard_fragment();
+
+    // Edge glow
+    float edge = smoothstep(p.progress, p.progress + p.edge_width, n);
+    float3 col = mix(p.edge_color.rgb, base.rgb, edge);
+    float  a   = mix(p.edge_color.a,  base.a,   edge);
+
+    return float4(col, a);
+}

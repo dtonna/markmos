@@ -9,9 +9,10 @@
 #include <cstdint>
 #include <cstring>
 
-static constexpr uint16_t MAX_GLYPHS_EN = 256;
-static constexpr uint16_t MAX_GLYPHS_TH = 128;
-static constexpr uint16_t MAX_GLYPH_BUF = 1024;
+static constexpr uint16_t MAX_GLYPHS_EN  = 256;
+static constexpr uint16_t MAX_GLYPHS_TH  = 128;
+static constexpr uint16_t MAX_GLYPHS_SYM = 16;
+static constexpr uint16_t MAX_GLYPH_BUF  = 1024;
 static constexpr uint8_t  SDF_RANGE     = 4;
 
 struct GlyphInfo {
@@ -26,6 +27,7 @@ struct BitmapFont {
     TextureHandle atlas;
     GlyphInfo     glyphs[MAX_GLYPHS_EN];
     GlyphInfo     glyphs_th[MAX_GLYPHS_TH];
+    GlyphInfo     glyphs_sym[MAX_GLYPHS_SYM];
     uint8_t       line_height;
     uint8_t       base_size;
     uint16_t      atlas_w, atlas_h;
@@ -36,6 +38,7 @@ struct BitmapFont {
         line_height = static_cast<uint8_t>(size * 1.2f);
         memset(glyphs, 0, sizeof(glyphs));
         memset(glyphs_th, 0, sizeof(glyphs_th));
+        memset(glyphs_sym, 0, sizeof(glyphs_sym));
     }
 
     const GlyphInfo *get_glyph(uint32_t codepoint) const noexcept {
@@ -44,6 +47,15 @@ struct BitmapFont {
         }
         if (codepoint >= 0x0E01 && codepoint < 0x0E01 + MAX_GLYPHS_TH) {
             return &glyphs_th[codepoint - 0x0E01];
+        }
+        if (codepoint >= 0x2660 && codepoint < 0x2668) {
+            return &glyphs_sym[codepoint - 0x2660];
+        }
+        if (codepoint == 0x238C) {
+            if (glyphs_sym[8].w > 0 && glyphs_sym[8].h > 0) {
+                return &glyphs_sym[8];
+            }
+            return nullptr;
         }
         return nullptr;
     }
@@ -153,6 +165,14 @@ struct TextRenderer {
             }
 
             if (cp >= MAX_GLYPHS_EN) {
+                const GlyphInfo *g = bitmap_font->get_glyph(cp);
+                if (!g) {
+                    continue;
+                }
+                float gx = cursor_x + g->bearing_x;
+                float gy = y + g->bearing_y;
+                batch->add(gx, gy, static_cast<float>(g->w), static_cast<float>(g->h), 0.0f, color, layer);
+                cursor_x += g->advance;
                 continue;
             }
             const GlyphInfo *g = bitmap_font->get_glyph(static_cast<uint8_t>(cp));

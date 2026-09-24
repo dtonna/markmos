@@ -1,0 +1,48 @@
+// Shader Lab — normal mode D7: procedural normal texture.
+// Hot-reload: save this file while the lab runs in proc mode (key 7).
+// The normal comes from [[texture(1)]] — a 128x128 sine-heightfield normal
+// map generated on the CPU at init (smooth bumps, compare with the hard
+// beveled-tile look of D6 derive). Same lighting math as lab_derive.
+//
+// Binding note (Metal backend quirk): logical index 2 maps to physical
+// slot 1, so the host binds this texture with bind_fragment_texture(h, 2).
+// Logical index 1 aliases slot 0 — never use it for a second texture.
+//
+// Rules: entry `lab_proc_main`, VSOutput = sprite vertex, params
+// `LabNormalParams` (two float4s) at [[buffer(2)]]. Metal only.
+
+#include <metal_stdlib>
+using namespace metal;
+
+struct VSOutput {
+    float4 position [[position]];
+    float2 uv;
+    float4 color;
+};
+
+struct LabNormalParams {
+    float4 light_dir;  // xyz = direction TO light, w = intensity
+    float4 misc;       // x = ambient, y = spec strength, z = unused here, w = spare
+};
+
+fragment float4 lab_proc_main(
+    VSOutput                 input [[stage_in]],
+    texture2d<float>         albedo [[texture(0)]],
+    texture2d<float>         nrm    [[texture(1)]],
+    sampler                  samp  [[sampler(0)]],
+    sampler                  samp1 [[sampler(1)]],
+    constant LabNormalParams& p    [[buffer(2)]]
+) {
+    float3 n = normalize(nrm.sample(samp1, input.uv).rgb * 2.0 - 1.0);
+
+    float3 ldir = normalize(p.light_dir.xyz);
+    float4 base = albedo.sample(samp, input.uv) * input.color;
+
+    float diff = max(dot(n, ldir), 0.0) * p.light_dir.w;
+
+    float3 h = normalize(ldir + float3(0.0, 0.0, 1.0));
+    float spec = pow(max(dot(n, h), 0.0), 32.0) * p.misc.y;
+
+    float3 col = base.rgb * (p.misc.x + diff) + spec;
+    return float4(col, base.a);
+}

@@ -4,6 +4,7 @@
 #pragma once
 #include "../core/mm_expected.hpp"
 #include "../core/mm_handle.hpp"
+#include "../core/mm_log.hpp"
 #include "../core/mm_slotmap.hpp"
 #include "mm_rhi_concept.hpp"
 #include <cstddef>
@@ -45,17 +46,31 @@ struct MetalSampler {
 };
 
 struct MetalBackend {
-    MTL::Device               *device        = nullptr;
-    MTL::CommandQueue         *cmd_queue     = nullptr;
-    MTL::CommandBuffer        *cmd_buf       = nullptr;
-    MTL::RenderCommandEncoder *encoder       = nullptr;
-    CA::MetalLayer            *layer         = nullptr;
-    CA::MetalDrawable         *drawable      = nullptr;
-    MTL::Texture              *depth_tex     = nullptr;
-    MTL::BinaryArchive        *archive       = nullptr;
+    MTL::Device               *device                 = nullptr;
+    MTL::CommandQueue         *cmd_queue              = nullptr;
+    MTL::CommandBuffer        *cmd_buf                = nullptr;
+    MTL::RenderCommandEncoder *encoder                = nullptr;
+    MTL::RenderPassDescriptor *render_pass_desc       = nullptr;
+    CA::MetalLayer            *layer                  = nullptr;
+    CA::MetalDrawable         *drawable               = nullptr;
+    MTL::Texture              *depth_tex              = nullptr;
+    MTL::BinaryArchive        *archive                = nullptr;
 
-    MTL::Buffer *volatile current_ib         = nullptr;
-    MTL::IndexType           current_ib_type = MTL::IndexTypeUInt16;
+    MTL::Buffer *volatile current_ib                  = nullptr;
+    MTL::IndexType           current_ib_type          = MTL::IndexTypeUInt16;
+
+    const MTL::Buffer       *last_vertex_ubo[8]       = {};
+    uint64_t                 last_vertex_ubo_off[8]   = {};
+    const MTL::Buffer       *last_fragment_ubo[8]     = {};
+    uint64_t                 last_fragment_ubo_off[8] = {};
+
+    bool                     has_scissor              = false;
+    MTL::ScissorRect         last_scissor{};
+
+    const MTL::SamplerState *last_fragment_sampler[8] = {};
+    const MTL::Buffer       *last_vertex_buf[8]       = {};
+    uint64_t                 last_vertex_buf_off[8]   = {};
+    const MTL::Texture      *last_fragment_tex[8]     = {};
 
     Slotmap<MetalBuffer>     buffers;
     Slotmap<MetalTexture>    textures;
@@ -94,6 +109,33 @@ struct MetalBackend {
     }
 
     void shutdown() noexcept {
+        {
+            auto it = buffers.iter();
+            while (auto *b = it.next()) {
+                b->buffer->release();
+            }
+        }
+        {
+            auto it = textures.iter();
+            while (auto *t = it.next()) {
+                t->texture->release();
+            }
+        }
+        {
+            auto it = pipelines.iter();
+            while (auto *p = it.next()) {
+                p->pipeline->release();
+                if (p->depth_state) {
+                    p->depth_state->release();
+                }
+            }
+        }
+        {
+            auto it = samplers.iter();
+            while (auto *s = it.next()) {
+                s->sampler->release();
+            }
+        }
         if (encoder) {
             encoder->endEncoding();
             encoder = nullptr;
@@ -185,7 +227,9 @@ struct MetalBackend {
             return make_unexpected(RHIError::ShaderCompileFail);
         }
         NS::String *vs_entry = NS::String::string(pdesc.vertex_shader.entry, NS::UTF8StringEncoding);
-        rpd->setVertexFunction(vs_lib->newFunction(vs_entry));
+        auto       *vs_fn    = vs_lib->newFunction(vs_entry);
+        rpd->setVertexFunction(vs_fn);
+        vs_fn->release();
         vs_lib->release();
 
         // Fragment shader
@@ -206,10 +250,37 @@ struct MetalBackend {
                     write(2, buf, (size_t)n);
                 }
             }
+            vs_fn->release();
+            rpd->release();
             return make_unexpected(RHIError::ShaderCompileFail);
         }
         NS::String *fs_entry = NS::String::string(pdesc.fragment_shader.entry, NS::UTF8StringEncoding);
-        rpd->setFragmentFunction(fs_lib->newFunction(fs_entry));
+
+        // Function constants for Metal specialization
+        MTL::FunctionConstantValues *fcv = MTL::FunctionConstantValues::alloc()->init();
+        for (uint8_t i = 0; i < pdesc.function_constant_count; ++i) {
+            bool val = pdesc.function_constants[i].value;
+            fcv->setConstantValue(&val, MTL::DataTypeBool, pdesc.function_constants[i].index);
+        }
+        auto       *fs_fn    = fs_lib->newFunction(fs_entry, fcv, &err);
+        if (!fs_fn) {
+            if (err) {
+                const char *emsg = err->localizedDescription()->utf8String();
+                {
+                    char buf[4096];
+                    int  n = snprintf(buf, sizeof(buf), "FS SPECIALIZATION ERROR (entry=%s): %s\n", pdesc.fragment_shader.entry, emsg ? emsg : "???");
+                    write(2, buf, (size_t)n);
+                }
+            }
+            fcv->release();
+            fs_lib->release();
+            vs_fn->release();
+            rpd->release();
+            return make_unexpected(RHIError::ShaderCompileFail);
+        }
+        fcv->release();
+        rpd->setFragmentFunction(fs_fn);
+        fs_fn->release();
         fs_lib->release();
 
         // Vertex descriptor from vertex_attrs
@@ -227,10 +298,10 @@ struct MetalBackend {
         }
         if (pdesc.vertex_attr_count > 0) {
             vd->layouts()->object(buf_idx)->setStride(max_stride);
-            vd->layouts()->object(buf_idx)->setStepFunction(
-                pdesc.is_instance ? MTL::VertexStepFunctionPerInstance : MTL::VertexStepFunctionPerVertex);
+            vd->layouts()->object(buf_idx)->setStepFunction(pdesc.is_instance ? MTL::VertexStepFunctionPerInstance : MTL::VertexStepFunctionPerVertex);
         }
         rpd->setVertexDescriptor(vd);
+        vd->release();
 
         // Color attachments
         for (uint8_t i = 0; i < pdesc.color_count; ++i) {
@@ -294,6 +365,8 @@ struct MetalBackend {
                     write(2, buf, (size_t)n);
                 }
             }
+            vs_fn->release();
+            fs_fn->release();
             return make_unexpected(RHIError::PipelineCompileFail);
         }
 
@@ -388,19 +461,30 @@ struct MetalBackend {
         if (!drawable || !cmd_buf) {
             return make_unexpected(RHIError::DeviceLost);
         }
-        MTL::RenderPassDescriptor *render_pass_desc = MTL::RenderPassDescriptor::renderPassDescriptor();
-        auto                       ca               = render_pass_desc->colorAttachments()->object(0);
+        render_pass_desc = MTL::RenderPassDescriptor::RenderPassDescriptor::alloc()->init();
+        auto ca          = render_pass_desc->colorAttachments()->object(0);
         ca->setTexture(drawable->texture());
         ca->setLoadAction(pass.color_load == LoadOp::Clear ? MTL::LoadActionClear : MTL::LoadActionLoad);
         ca->setStoreAction(MTL::StoreActionStore);
         ca->setClearColor(MTL::ClearColor::Make(pass.clear_color[0], pass.clear_color[1], pass.clear_color[2], pass.clear_color[3]));
 
         encoder = cmd_buf->renderCommandEncoder(render_pass_desc);
-        // rpd->release();  // Release descriptor after use
 
         if (!encoder) {
+            render_pass_desc->release();
+            render_pass_desc = nullptr;
             return make_unexpected(RHIError::BackendError);
         }
+
+        std::memset(last_vertex_ubo, 0, sizeof(last_vertex_ubo));
+        std::memset(last_vertex_ubo_off, 0, sizeof(last_vertex_ubo_off));
+        std::memset(last_fragment_ubo, 0, sizeof(last_fragment_ubo));
+        std::memset(last_fragment_ubo_off, 0, sizeof(last_fragment_ubo_off));
+        std::memset(last_fragment_sampler, 0, sizeof(last_fragment_sampler));
+        std::memset(last_vertex_buf, 0, sizeof(last_vertex_buf));
+        std::memset(last_vertex_buf_off, 0, sizeof(last_vertex_buf_off));
+        std::memset(last_fragment_tex, 0, sizeof(last_fragment_tex));
+        has_scissor     = false;
 
         current_ib      = nullptr;
         current_ib_type = MTL::IndexTypeUInt16;
@@ -411,6 +495,10 @@ struct MetalBackend {
         if (encoder) {
             encoder->endEncoding();
             encoder = nullptr;
+        }
+        if (render_pass_desc) {
+            render_pass_desc->release();
+            render_pass_desc = nullptr;
         }
         return {};
     }
@@ -434,6 +522,13 @@ struct MetalBackend {
             if (buf) {
                 uint32_t idx = bindings ? bindings[i] : i;
                 uint64_t off = offsets ? offsets[i] : 0;
+                if (idx < 8 && last_vertex_buf[idx] == buf->buffer && last_vertex_buf_off[idx] == off) {
+                    continue;
+                }
+                if (idx < 8) {
+                    last_vertex_buf[idx]     = buf->buffer;
+                    last_vertex_buf_off[idx] = off;
+                }
                 encoder->setVertexBuffer(buf->buffer, off, idx);
             }
         }
@@ -455,12 +550,29 @@ struct MetalBackend {
 
     Expected<void, RHIError> bind_uniform_buffer(BufferHandle handle, uint32_t index) noexcept {
         auto *buf = buffers.get(handle.handle);
-        if (buf) {
-            // Logical 0 -> Buffer 1
-            uint32_t physical_idx = index + 1;
-            encoder->setVertexBuffer(buf->buffer, 0, physical_idx);
-            encoder->setFragmentBuffer(buf->buffer, 0, physical_idx);
+        if (!buf) {
+            return make_unexpected(RHIError::InvalidHandle);
         }
+
+        uint32_t physical_idx = index + 1;
+        if (physical_idx >= 8) {
+            return make_unexpected(RHIError::InvalidHandle);
+        }
+
+        const uint64_t offset = 0;
+
+        if (last_vertex_ubo[physical_idx] != buf->buffer || last_vertex_ubo_off[physical_idx] != offset) {
+            encoder->setVertexBuffer(buf->buffer, offset, physical_idx);
+            last_vertex_ubo[physical_idx]     = buf->buffer;
+            last_vertex_ubo_off[physical_idx] = offset;
+        }
+
+        if (last_fragment_ubo[physical_idx] != buf->buffer || last_fragment_ubo_off[physical_idx] != offset) {
+            encoder->setFragmentBuffer(buf->buffer, offset, physical_idx);
+            last_fragment_ubo[physical_idx]     = buf->buffer;
+            last_fragment_ubo_off[physical_idx] = offset;
+        }
+
         return {};
     }
 
@@ -484,8 +596,13 @@ struct MetalBackend {
         if (!tex) {
             return make_unexpected(RHIError::InvalidHandle);
         }
-        // Logical 1 -> Texture 0
         uint32_t physical_idx = (index > 0) ? (index - 1) : 0;
+        if (physical_idx < 8 && last_fragment_tex[physical_idx] == tex->texture) {
+            return {};
+        }
+        if (physical_idx < 8) {
+            last_fragment_tex[physical_idx] = tex->texture;
+        }
         encoder->setFragmentTexture(tex->texture, physical_idx);
         return {};
     }
@@ -495,8 +612,13 @@ struct MetalBackend {
         if (!samp) {
             return make_unexpected(RHIError::InvalidHandle);
         }
-        // Logical 1 -> Sampler 0
         uint32_t physical_idx = (index > 0) ? (index - 1) : 0;
+        if (physical_idx < 8 && last_fragment_sampler[physical_idx] == samp->sampler) {
+            return {};
+        }
+        if (physical_idx < 8) {
+            last_fragment_sampler[physical_idx] = samp->sampler;
+        }
         encoder->setFragmentSamplerState(samp->sampler, physical_idx);
         return {};
     }
@@ -507,7 +629,14 @@ struct MetalBackend {
         rect.y      = static_cast<NS::UInteger>(y);
         rect.width  = static_cast<NS::UInteger>(w);
         rect.height = static_cast<NS::UInteger>(h);
+
+        if (has_scissor && rect.x == last_scissor.x && rect.y == last_scissor.y && rect.width == last_scissor.width && rect.height == last_scissor.height) {
+            return {};
+        }
+
         encoder->setScissorRect(rect);
+        last_scissor = rect;
+        has_scissor  = true;
         return {};
     }
 
@@ -582,7 +711,7 @@ struct MetalBackend {
     static MTL::VertexFormat to_metal_vertex_format(PixelFormat fmt) noexcept {
         switch (fmt) {
         case PixelFormat::R8G8B8A8_UNORM:
-            return MTL::VertexFormatUChar4Normalized;
+            return MTL::VertexFormatUChar4Normalized_BGRA;
         case PixelFormat::R16G16_FLOAT:
             return MTL::VertexFormatHalf2;
         case PixelFormat::R32G32_FLOAT:

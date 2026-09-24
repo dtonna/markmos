@@ -30,21 +30,26 @@ static_assert(std::is_trivially_copyable_v<SlotHandle>);
 template <typename Tag> struct TypedHandle {
     SlotHandle                   handle = SlotHandle::invalid();
 
-    static constexpr TypedHandle invalid() noexcept { return {}; }
+    static constexpr TypedHandle invalid() noexcept {
+        TypedHandle h{};
+        h.handle = SlotHandle::invalid();
+        return h;
+    }
 
-    constexpr bool               is_valid() const noexcept { return handle.is_valid(); }
+    constexpr bool        is_valid() const noexcept { return handle.is_valid(); }
 
-    constexpr explicit           operator bool() const noexcept { return is_valid(); }
+    constexpr explicit    operator bool() const noexcept { return is_valid(); }
 
-    friend constexpr bool        operator==(TypedHandle a, TypedHandle b) noexcept = default;
+    friend constexpr bool operator==(TypedHandle a, TypedHandle b) noexcept = default;
 };
 
 static_assert(sizeof(TypedHandle<void>) == sizeof(SlotHandle));
 
-using BufferHandle   = TypedHandle<class BufferTag>;
-using TextureHandle  = TypedHandle<class TextureTag>;
-using PipelineHandle = TypedHandle<class PipelineTag>;
-using SamplerHandle  = TypedHandle<class SamplerTag>;
-using MeshHandle     = TypedHandle<class MeshTag>;
-using MaterialHandle = TypedHandle<class MaterialTag>;
-using TweenHandle    = TypedHandle<class TweenTag>;
+using BufferHandle    = TypedHandle<class BufferTag>;
+using TextureHandle   = TypedHandle<class TextureTag>;
+using PipelineHandle  = TypedHandle<class PipelineTag>;
+using SamplerHandle   = TypedHandle<class SamplerTag>;
+using MeshHandle      = TypedHandle<class MeshTag>;
+using MaterialHandle  = TypedHandle<class MaterialTag>;
+using TweenHandle     = TypedHandle<class TweenTag>;
+using AnimationHandle = TypedHandle<class AnimationTag>;

@@ -525,8 +525,9 @@ renderer.upload_camera();
 ### 4.7 การใช้ Material / Technique
 
 ```cpp
-// ใช้ built-in materials
-renderer.flush_sprites(batch, renderer.builtin_materials[(int)MaterialType::Additive]);
+// ใช้ Material กับ flush (ผูก pipeline + texture + sampler เอง)
+Material mat = {renderer.sprite_additive_pipeline, renderer.white_tex, renderer.default_sampler};
+renderer.flush_sprites(batch, mat);
 
 // สร้าง Material เอง
 Material mat;
