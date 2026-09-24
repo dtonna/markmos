@@ -1,0 +1,69 @@
+// Shader Lab — plastic mode (P): glossy plastic card look.
+// Hot-reload: save this file while the lab runs in plastic mode (key P).
+// Uses lab_card.png (albedo) + lab_card_normal.png — same assets as D9.
+//
+// Look: wrapped soft diffuse (no harsh shadows) + tight glossy highlight
+// + fresnel-weighted clearcoat lobe (plastic top layer) + cool rim sheen.
+// Tune clearcoat/fresnel/wrap/shine live via the `plastic` vector below
+// (also driven by the host params — host wins on reload of params only).
+//
+// Rules:
+//   - Entry MUST stay named `lab_plastic_main` (looked up by name).
+//   - VSOutput MUST match sprite_vertex_msl (position/uv/color).
+//   - Params MUST be `LabPlasticParams` at [[buffer(2)]]: three float4s.
+//     (Metal packs vectors at 16-byte boundaries — float4 members ONLY.)
+//   - Metal only.
+
+#include <metal_stdlib>
+using namespace metal;
+
+struct VSOutput {
+    float4 position [[position]];
+    float2 uv;
+    float4 color;
+};
+
+struct LabPlasticParams {
+    float4 light_dir;  // xyz = direction TO light, w = intensity
+    float4 misc;       // x = ambient, y = spec strength, z = unused, w = spare
+    float4 plastic;    // x = clearcoat, y = fresnel strength, z = wrap 0..1, w = shininess
+};
+
+fragment float4 lab_plastic_main(
+    VSOutput                 input [[stage_in]],
+    texture2d<float>         albedo [[texture(0)]],
+    texture2d<float>         nrm    [[texture(1)]],
+    sampler                  samp  [[sampler(0)]],
+    sampler                  samp1 [[sampler(1)]],
+    constant LabPlasticParams& p   [[buffer(2)]]
+) {
+    float3 n = normalize(nrm.sample(samp1, input.uv).rgb * 2.0 - 1.0);
+
+    // Card/view space == tangent space for flat XY sprites.
+    // Normal map is tangent-space (+Y up) — no TBN needed (no 3D rotation).
+    float3 ldir = normalize(p.light_dir.xyz);
+    float4 base = albedo.sample(samp, input.uv) * input.color;
+    float3 v = float3(0.0, 0.0, 1.0); // viewer looks down +z
+
+    float intensity = max(p.light_dir.w, 0.0);
+
+    // Wrapped diffuse — plastic never goes fully black in shadow.
+    float wrap = clamp(p.plastic.z, 0.0, 1.0);
+    float d = clamp((dot(n, ldir) + wrap) / (1.0 + wrap), 0.0, 1.0);
+    d *= intensity;
+
+    // Glossy highlight (broad) + clearcoat lobe (tight, top layer).
+    float3 h = normalize(ldir + v);
+    float ndh = max(dot(n, h), 0.0);
+    float shine = max(p.plastic.w, 8.0);
+    float gloss = pow(ndh, shine) * p.misc.y * intensity;
+    float coat = pow(ndh, shine * 5.0) * p.plastic.x * intensity;
+
+    // Stylized Fresnel rim — cool sheen at grazing angles.
+    float fres = pow(1.0 - max(dot(n, v), 0.0), 5.0);
+    float3 rim_color = float3(0.65, 0.8, 1.0);
+    float3 rim = rim_color * fres * p.plastic.y * (0.3 + 0.7 * coat);
+
+    float3 col = base.rgb * (p.misc.x + d) + (gloss + coat) + rim;
+    return float4(col, base.a);
+}

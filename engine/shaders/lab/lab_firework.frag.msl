@@ -1,0 +1,86 @@
+// Shader Lab — firework sky (W): night-sky backdrop + burst flash.
+// Hot-reload: save this file while rockets/sparks are alive (key W).
+// The host draws this fullscreen quad ONLY while the show is active
+// (a rocket/spark lives or the flash/sky alpha is visible), so the lab
+// scene behind is untouched when idle. Rockets + sparks themselves are
+// CPU particles through the embedded additive glow pipeline — this file
+// owns the sky gradient, stars, and the warm burst flash.
+//
+// Tune live:
+//   - Edit below: sky top/bottom colors, star density/threshold, flash
+//     color + radius falloff, vignette strength.
+//   - Host drives time, flash uv + intensity (exp decay), and sky alpha
+//     (fades in while the show is alive, out after).
+//
+// Rules:
+//   - Entry MUST stay named `lab_firework_main` (looked up by name).
+//   - VSOutput MUST match sprite_vertex_msl (position/uv/color).
+//   - Params MUST be `LabFireworkParams` at [[buffer(2)]]: three float4s.
+//     (Metal packs vectors at 16-byte boundaries — float4 members ONLY.)
+//   - Metal only. Non-Metal builds still get CPU sparks, without this sky.
+
+#include <metal_stdlib>
+using namespace metal;
+
+struct VSOutput {
+    float4 position [[position]];
+    float2 uv;
+    float4 color;
+};
+
+struct LabFireworkParams {
+    float4 timing; // x = time (s), y = star twinkle speed, z/w = spare
+    float4 flash;  // x/y = burst uv, z = intensity (0..1, host-decayed), w = radius (uv)
+    float4 misc;   // x = view aspect (w/h), y = star density, z = vignette, w = sky alpha
+};
+
+float fw_hash(float2 cell) {
+    return fract(sin(dot(cell, float2(12.9898, 78.233))) * 43758.5453);
+}
+
+fragment float4 lab_firework_main(
+    VSOutput                  input [[stage_in]],
+    texture2d<float>          albedo [[texture(0)]],
+    sampler                   samp  [[sampler(0)]],
+    constant LabFireworkParams& p   [[buffer(2)]]
+) {
+    float aspect = max(p.misc.x, 1e-3);
+    float sky_a = clamp(p.misc.w, 0.0, 1.0);
+
+    // Night gradient: deep navy up top, near-black at the bottom.
+    float3 top_col = float3(0.015, 0.03, 0.09);
+    float3 bot_col = float3(0.0, 0.0, 0.015);
+    float3 col = mix(bot_col, top_col, input.uv.y);
+
+    // Stars: aspect-correct grid, sparse hash gate, twinkle with time.
+    float2 grid = float2(input.uv.x * aspect, input.uv.y) * 90.0;
+    float2 cell = floor(grid);
+    float h = fw_hash(cell);
+    float star_gate = step(1.0 - 0.03 * max(p.misc.y, 0.0), h);
+    float2 center = fract(grid) - 0.5;
+    float d = length(center);
+    float aa = max(fwidth(d), 1e-3);
+    float dot_star = 1.0 - smoothstep(0.06, 0.06 + aa, d);
+    float tw = 0.5 + 0.5 * sin(p.timing.x * max(p.timing.y, 0.1) + h * 40.0);
+    float star = star_gate * dot_star * (0.35 + 0.65 * tw);
+    col += float3(0.8, 0.85, 1.0) * star;
+
+    // Burst flash: warm core + wide faint halo, aspect-correct distance.
+    float2 fuv = float2(input.uv.x * aspect, input.uv.y);
+    float2 fpos = float2(p.flash.x * aspect, p.flash.y);
+    float fd = distance(fuv, fpos);
+    float r = max(p.flash.w, 1e-3);
+    float core = exp(-fd * fd / (r * r));
+    float halo = exp(-fd * 2.5) * 0.35;
+    float fi = clamp(p.flash.z, 0.0, 1.0);
+    float3 flash_col = float3(1.0, 0.82, 0.55) * core + float3(1.0, 0.6, 0.3) * halo;
+    col += flash_col * fi;
+
+    // Gentle vignette so the burst reads against the lab scene.
+    float2 vc = (input.uv - 0.5) * float2(aspect, 1.0);
+    float vig = 1.0 - clamp(dot(vc, vc) * p.misc.z, 0.0, 0.6);
+    col *= vig;
+
+    float a = clamp(max(sky_a, fi * (core + halo)), 0.0, 1.0) * input.color.a;
+    return float4(col, a);
+}

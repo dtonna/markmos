@@ -7,10 +7,13 @@
 #include "../core/mm_log.hpp"
 #include "../core/mm_tracy.hpp"
 #include "../game/mm_particle_pool.hpp"
+#include "../math/mm_color.h"
+#include "../math/mm_math.h"
 #include "../math/mm_mat4.h"
 #include "../rhi/mm_rhi_concept.hpp"
 #include "mm_font_atlas.hpp"
 #include "mm_font_data.hpp"
+#include "mm_font_sym_data.hpp"
 #include "mm_material.hpp"
 #include "mm_render_graph.hpp"
 #include "mm_shader_registry.hpp"
@@ -58,8 +61,42 @@ struct Renderer {
     PipelineHandle            sprite_opaque_pipeline{};
     PipelineHandle            sdf_pipeline{};
     PipelineHandle            particle_pipeline{};
+    PipelineHandle            rounded_sprite_pipeline{};
+    PipelineHandle            rounded_sprite_glow_pipeline{};
+    PipelineHandle            rounded_sprite_border_pipeline{};
+    PipelineHandle            sprite_outline_pipeline{};
+    PipelineHandle            clip_rect_pipeline{};
+    PipelineHandle            dissolve_pipeline{};
+    PipelineHandle            grayscale_pipeline{};
+    PipelineHandle            button_pipeline{};
+    PipelineHandle            blur_pipeline{};
+    PipelineHandle            color_grade_pipeline{};
+    PipelineHandle            normal_derive_pipeline{};
+    PipelineHandle            normal_map_pipeline{};
+    PipelineHandle            cartoon_pipeline{};
+    PipelineHandle            plastic_pipeline{};
+    PipelineHandle            glow_pulse_pipeline{};
+    PipelineHandle            gold_border_pipeline{};
+    PipelineHandle            gold_stay_pipeline{};
 
-    Material                  materials_[static_cast<uint8_t>(MaterialType::COUNT)];
+    BufferHandle              button_ubo{}; // ButtonParams UBO
+    BufferHandle              rounded_params_ubo{};
+    BufferHandle              rounded_params_glow_ubo{};
+    BufferHandle              blur_params_ubo{};
+    BufferHandle              color_grade_ubo{};
+    // Lab-port UBOs: one buffer PER FLUSH FUNCTION, not per struct.
+    // update_buffer() memcpys immediately while draws execute later at
+    // submit(), so sharing one buffer across flushes would let the last
+    // update win for every draw in the frame.
+    BufferHandle              normal_derive_ubo{};
+    BufferHandle              normal_map_ubo{};
+    BufferHandle              cartoon_ubo{};
+    BufferHandle              plastic_ubo{};
+    BufferHandle              glow_pulse_ubo{};
+    BufferHandle              gold_border_ubo{};
+    BufferHandle              gold_stay_ubo{};
+
+    Material                  materials[static_cast<uint8_t>(e_material_type::COUNT)];
 
     BufferHandle              camera_ubo{};
     BufferHandle              sprite_vb{};
@@ -85,6 +122,67 @@ struct Renderer {
 
     static constexpr size_t   COMMAND_STORAGE_BYTES = sizeof(Command) * MAX_COMMANDS;
     static_assert((COMMAND_STORAGE_BYTES % 64) == 0, "Command storage must be a multiple of cache-line alignment");
+
+    struct RoundedParams {
+        float time;             // render time in seconds
+        float glow_intensity;   // 0 = off, 1.5 = selected, 2.5 = hint
+        float glow_width;       // SDF distance units (0.05–0.15)
+        float glow_pulse_freq;  // rad/s (precomputed: speed_Hz * 2π), 0 = static
+        float sdf_aa_scale;     // AA scale factor (default 1.0, like button.frag)
+        float _pad0;
+        float _pad1;
+        float _pad2;
+        float glow_color[4];    // RGBA
+    };
+    static_assert(sizeof(RoundedParams) == sizeof(float) * 12, "RoundedParams must be three float4");
+
+    struct BlurParams {
+        float direction_x;   // 1.0 = horizontal, 0.0 = vertical
+        float direction_y;   // 0.0 = horizontal, 1.0 = vertical
+        float radius;        // blur strength in pixels
+        float weights[7];    // Gaussian weights (7 taps = 15 samples with center)
+        float _pad[2];       // pad to 48 bytes (3 float4)
+    };
+    static_assert(sizeof(BlurParams) == sizeof(float) * 12, "BlurParams must be three float4");
+
+    struct ColorGrade {
+        float brightness;   // 0..2, default 1.0
+        float contrast;     // 0..2, default 1.0
+        float saturation;   // 0..2, default 1.0
+        float hue_matrix[9]; // 3x3 column-major hue rotation matrix
+        float _pad[4];      // pad to 64 bytes (4 float4)
+    };
+    static_assert(sizeof(ColorGrade) == sizeof(float) * 16, "ColorGrade must be four float4");
+
+    // ─── Lab-port param blocks (all float4 members: Metal 16-byte packing) ──
+    struct NormalParams {
+        float light_dir[4]; // xyz = direction TO light, w = intensity
+        float misc[4];      // x = ambient, y = spec strength, z = height_scale, w = spare
+    };
+    static_assert(sizeof(NormalParams) == sizeof(float) * 8, "NormalParams must be two float4");
+
+    struct CartoonParams {
+        float light_dir[4]; // xyz = direction TO light, w = intensity
+        float misc[4];      // x = ambient, y = spec on/off, z = height_scale, w = spare
+        float toon[4];      // x = bands (2..5), y = ink threshold, z = ink strength, w = spare
+    };
+    static_assert(sizeof(CartoonParams) == sizeof(float) * 12, "CartoonParams must be three float4");
+
+    struct PlasticParams {
+        float light_dir[4]; // xyz = direction TO light, w = intensity
+        float misc[4];      // x = ambient, y = spec strength, z = unused, w = spare
+        float plastic[4];   // x = clearcoat, y = fresnel strength, z = wrap 0..1, w = shininess
+    };
+    static_assert(sizeof(PlasticParams) == sizeof(float) * 12, "PlasticParams must be three float4");
+
+    struct GlowParams {
+        float timing[4]; // x = time (s), y = duration/speed, z = expand/width, w = ring width/spare
+        float glow[4];   // rgba glow color
+        float misc[4];   // x = card aspect (w/h), y = intensity, z = quad scale k, w = spare
+    };
+    static_assert(sizeof(GlowParams) == sizeof(float) * 12, "GlowParams must be three float4");
+
+    float      render_time = 0.0f;
 
     uint32_t   width, height;
     float      inv_width, inv_height;
@@ -128,6 +226,23 @@ struct Renderer {
         destroy_safe(sprite_opaque_pipeline, [&](auto &h) { backend->destroy_pipeline(h); });
         destroy_safe(sdf_pipeline, [&](auto &h) { backend->destroy_pipeline(h); });
         destroy_safe(particle_pipeline, [&](auto &h) { backend->destroy_pipeline(h); });
+        destroy_safe(rounded_sprite_pipeline, [&](auto &h) { backend->destroy_pipeline(h); });
+        destroy_safe(rounded_sprite_glow_pipeline, [&](auto &h) { backend->destroy_pipeline(h); });
+        destroy_safe(rounded_sprite_border_pipeline, [&](auto &h) { backend->destroy_pipeline(h); });
+        destroy_safe(sprite_outline_pipeline, [&](auto &h) { backend->destroy_pipeline(h); });
+        destroy_safe(clip_rect_pipeline, [&](auto &h) { backend->destroy_pipeline(h); });
+        destroy_safe(dissolve_pipeline, [&](auto &h) { backend->destroy_pipeline(h); });
+        destroy_safe(grayscale_pipeline, [&](auto &h) { backend->destroy_pipeline(h); });
+        destroy_safe(button_pipeline, [&](auto &h) { backend->destroy_pipeline(h); });
+        destroy_safe(blur_pipeline, [&](auto &h) { backend->destroy_pipeline(h); });
+        destroy_safe(color_grade_pipeline, [&](auto &h) { backend->destroy_pipeline(h); });
+        destroy_safe(normal_derive_pipeline, [&](auto &h) { backend->destroy_pipeline(h); });
+        destroy_safe(normal_map_pipeline, [&](auto &h) { backend->destroy_pipeline(h); });
+        destroy_safe(cartoon_pipeline, [&](auto &h) { backend->destroy_pipeline(h); });
+        destroy_safe(plastic_pipeline, [&](auto &h) { backend->destroy_pipeline(h); });
+        destroy_safe(glow_pulse_pipeline, [&](auto &h) { backend->destroy_pipeline(h); });
+        destroy_safe(gold_border_pipeline, [&](auto &h) { backend->destroy_pipeline(h); });
+        destroy_safe(gold_stay_pipeline, [&](auto &h) { backend->destroy_pipeline(h); });
         destroy_safe(camera_ubo, [&](auto &h) { backend->destroy_buffer(h); });
         destroy_safe(sprite_vb, [&](auto &h) { backend->destroy_buffer(h); });
         destroy_safe(sprite_ib, [&](auto &h) { backend->destroy_buffer(h); });
@@ -139,6 +254,18 @@ struct Renderer {
         destroy_safe(text_ib, [&](auto &h) { backend->destroy_buffer(h); });
         destroy_safe(white_tex, [&](auto &h) { backend->destroy_texture(h); });
         destroy_safe(default_sampler, [&](auto &h) { backend->destroy_sampler(h); });
+        destroy_safe(button_ubo, [&](auto &h) { backend->destroy_buffer(h); });
+        destroy_safe(rounded_params_ubo, [&](auto &h) { backend->destroy_buffer(h); });
+        destroy_safe(rounded_params_glow_ubo, [&](auto &h) { backend->destroy_buffer(h); });
+        destroy_safe(blur_params_ubo, [&](auto &h) { backend->destroy_buffer(h); });
+        destroy_safe(color_grade_ubo, [&](auto &h) { backend->destroy_buffer(h); });
+        destroy_safe(normal_derive_ubo, [&](auto &h) { backend->destroy_buffer(h); });
+        destroy_safe(normal_map_ubo, [&](auto &h) { backend->destroy_buffer(h); });
+        destroy_safe(cartoon_ubo, [&](auto &h) { backend->destroy_buffer(h); });
+        destroy_safe(plastic_ubo, [&](auto &h) { backend->destroy_buffer(h); });
+        destroy_safe(glow_pulse_ubo, [&](auto &h) { backend->destroy_buffer(h); });
+        destroy_safe(gold_border_ubo, [&](auto &h) { backend->destroy_buffer(h); });
+        destroy_safe(gold_stay_ubo, [&](auto &h) { backend->destroy_buffer(h); });
 
         delete[] command_storage_0;
         delete[] command_storage_1;
@@ -165,10 +292,107 @@ struct Renderer {
         auto ubo             = backend->create_buffer(ubo_desc);
         if (!ubo) {
             MM_ERROR("Renderer::init() - Failed to create UBO");
+            destroy_resources();
             return make_unexpected(ubo.error());
         }
         camera_ubo    = *ubo;
         ubo_alignment = 256;
+
+        BufferDesc rounded_params_desc{};
+        rounded_params_desc.type        = BufferType::Uniform;
+        rounded_params_desc.size        = sizeof(RoundedParams);
+        rounded_params_desc.cpu_visible = true;
+        auto rounded_params             = backend->create_buffer(rounded_params_desc);
+        if (!rounded_params) {
+            MM_ERROR("Renderer::init() - Failed to create RoundedParams UBO");
+            destroy_resources();
+            return make_unexpected(rounded_params.error());
+        }
+        rounded_params_ubo                = *rounded_params;
+        RoundedParams rounded_params_data = {0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, {0.0f, 0.0f, 0.0f, 0.0f}};
+        (void)backend->update_buffer(rounded_params_ubo, &rounded_params_data, 0, sizeof(rounded_params_data));
+
+        // Glow UBO (same struct, separate buffer for separate pipeline)
+        BufferDesc glow_params_desc{};
+        glow_params_desc.type        = BufferType::Uniform;
+        glow_params_desc.size        = sizeof(RoundedParams);
+        glow_params_desc.cpu_visible = true;
+        auto glow_params             = backend->create_buffer(glow_params_desc);
+        if (!glow_params) {
+            MM_ERROR("Renderer::init() - Failed to create RoundedParams glow UBO");
+            destroy_resources();
+            return make_unexpected(glow_params.error());
+        }
+        rounded_params_glow_ubo = *glow_params;
+        (void)backend->update_buffer(rounded_params_glow_ubo, &rounded_params_data, 0, sizeof(rounded_params_data));
+
+        // Blur UBO
+        BufferDesc blur_params_desc{};
+        blur_params_desc.type        = BufferType::Uniform;
+        blur_params_desc.size        = sizeof(BlurParams);
+        blur_params_desc.cpu_visible = true;
+        auto blur_params             = backend->create_buffer(blur_params_desc);
+        if (!blur_params) {
+            MM_ERROR("Renderer::init() - Failed to create BlurParams UBO");
+            destroy_resources();
+            return make_unexpected(blur_params.error());
+        }
+        blur_params_ubo = *blur_params;
+        // 15-tap Gaussian weights (sigma=2.5, normalized)
+        BlurParams blur_params_data = {1.0f, 0.0f, 4.0f,
+            {0.132981f, 0.114226f, 0.087775f, 0.059634f, 0.035841f, 0.018954f, 0.008829f},
+            {0.0f, 0.0f}};
+        (void)backend->update_buffer(blur_params_ubo, &blur_params_data, 0, sizeof(blur_params_data));
+
+        // Color Grade UBO
+        BufferDesc cg_params_desc{};
+        cg_params_desc.type        = BufferType::Uniform;
+        cg_params_desc.size        = sizeof(ColorGrade);
+        cg_params_desc.cpu_visible = true;
+        auto cg_params             = backend->create_buffer(cg_params_desc);
+        if (!cg_params) {
+            MM_ERROR("Renderer::init() - Failed to create ColorGrade UBO");
+            destroy_resources();
+            return make_unexpected(cg_params.error());
+        }
+        color_grade_ubo = *cg_params;
+        // Identity matrix for no hue shift
+        ColorGrade cg_params_data = {1.0f, 1.0f, 1.0f,
+            {1.0f, 0.0f, 0.0f,  0.0f, 1.0f, 0.0f,  0.0f, 0.0f, 1.0f},
+            {0.0f, 0.0f, 0.0f, 0.0f}};
+        (void)backend->update_buffer(color_grade_ubo, &cg_params_data, 0, sizeof(cg_params_data));
+
+        // Lab-port UBOs: one buffer per flush function (see member comment).
+        auto create_param_ubo = [&](size_t size, const char *name, BufferHandle &out, const void *init_data) noexcept -> bool {
+            BufferDesc d{};
+            d.type        = BufferType::Uniform;
+            d.size        = static_cast<uint32_t>(size);
+            d.cpu_visible = true;
+            auto res      = backend->create_buffer(d);
+            if (!res) {
+                MM_ERROR("Renderer::init() - Failed to create %s UBO", name);
+                destroy_resources();
+                return false;
+            }
+            out = *res;
+            (void)backend->update_buffer(out, init_data, 0, static_cast<uint32_t>(size));
+            return true;
+        };
+        NormalParams  lab_nd0 = {{0.0f, 0.0f, 1.0f, 1.0f}, {0.25f, 0.5f, 2.0f, 0.0f}};
+        CartoonParams lab_ct0 = {{0.0f, 0.0f, 1.0f, 1.0f}, {0.25f, 0.5f, 2.0f, 0.0f}, {3.0f, 0.35f, 0.85f, 0.0f}};
+        PlasticParams lab_pl0 = {{0.0f, 0.0f, 1.0f, 1.0f}, {0.25f, 0.5f, 0.0f, 0.0f}, {0.6f, 0.5f, 0.4f, 120.0f}};
+        GlowParams    lab_gl0 = {{0.0f, 1.0f, 0.12f, 0.025f}, {0.0f, 0.8f, 0.82f, 0.9f}, {0.6887f, 1.5f, 1.5f, 0.0f}};
+        bool lab_ubos_ok = true;
+        lab_ubos_ok      = create_param_ubo(sizeof(NormalParams), "NormalParams(derive)", normal_derive_ubo, &lab_nd0) && lab_ubos_ok;
+        lab_ubos_ok      = create_param_ubo(sizeof(NormalParams), "NormalParams(map)", normal_map_ubo, &lab_nd0) && lab_ubos_ok;
+        lab_ubos_ok      = create_param_ubo(sizeof(CartoonParams), "CartoonParams", cartoon_ubo, &lab_ct0) && lab_ubos_ok;
+        lab_ubos_ok      = create_param_ubo(sizeof(PlasticParams), "PlasticParams", plastic_ubo, &lab_pl0) && lab_ubos_ok;
+        lab_ubos_ok      = create_param_ubo(sizeof(GlowParams), "GlowParams(pulse)", glow_pulse_ubo, &lab_gl0) && lab_ubos_ok;
+        lab_ubos_ok      = create_param_ubo(sizeof(GlowParams), "GlowParams(border)", gold_border_ubo, &lab_gl0) && lab_ubos_ok;
+        lab_ubos_ok      = create_param_ubo(sizeof(GlowParams), "GlowParams(stay)", gold_stay_ubo, &lab_gl0) && lab_ubos_ok;
+        if (!lab_ubos_ok) {
+            return make_unexpected(RHIError::OutOfMemory);
+        }
 
         BufferDesc vb_desc{};
         vb_desc.type        = BufferType::Vertex;
@@ -178,6 +402,7 @@ struct Renderer {
         auto vb             = backend->create_buffer(vb_desc);
         if (!vb) {
             MM_ERROR("Renderer::init() - Failed to create Sprite VB");
+            destroy_resources();
             return make_unexpected(vb.error());
         }
         sprite_vb = *vb;
@@ -190,6 +415,7 @@ struct Renderer {
         auto ib             = backend->create_buffer(ib_desc);
         if (!ib) {
             MM_ERROR("Renderer::init() - Failed to create Sprite IB");
+            destroy_resources();
             return make_unexpected(ib.error());
         }
         sprite_ib = *ib;
@@ -202,6 +428,7 @@ struct Renderer {
         auto pib             = backend->create_buffer(pib_desc);
         if (!pib) {
             MM_ERROR("Renderer::init() - Failed to create Particle IB");
+            destroy_resources();
             return make_unexpected(pib.error());
         }
         particle_ib = *pib;
@@ -214,12 +441,13 @@ struct Renderer {
         auto atlas_ubo             = backend->create_buffer(atlas_ubo_desc);
         if (!atlas_ubo) {
             MM_ERROR("Renderer::init() - Failed to create Particle Atlas UBO");
+            destroy_resources();
             return make_unexpected(atlas_ubo.error());
         }
         particle_atlas_ubo = *atlas_ubo;
         {
             float atlas_data[4] = {1.0f, 1.0f, 1.0f, 1.0f};
-            backend->update_buffer(particle_atlas_ubo, atlas_data, 0, sizeof(atlas_data));
+            (void)backend->update_buffer(particle_atlas_ubo, atlas_data, 0, sizeof(atlas_data));
         }
 
         // Default 1x1 white texture for sprite rendering
@@ -233,11 +461,12 @@ struct Renderer {
         auto wt                     = backend->create_texture(white_tex_desc);
         if (!wt) {
             MM_ERROR("Renderer::init() - Failed to create white texture");
+            destroy_resources();
             return make_unexpected(wt.error());
         }
         white_tex            = *wt;
         uint32_t white_pixel = 0xFFFFFFFF;
-        backend->update_texture(white_tex, &white_pixel, 0, 0, 1, 1, 0, 0);
+        (void)backend->update_texture(white_tex, &white_pixel, 0, 0, 1, 1, 0, 0);
 
         SamplerDesc samp_desc{};
         samp_desc.min_filter     = SamplerFilter::Linear;
@@ -248,6 +477,7 @@ struct Renderer {
         auto samp                = backend->create_sampler(samp_desc);
         if (!samp) {
             MM_ERROR("Renderer::init() - Failed to create default sampler");
+            destroy_resources();
             return make_unexpected(samp.error());
         }
         default_sampler = *samp;
@@ -276,6 +506,32 @@ struct Renderer {
             }
         }
 
+        // ── Suit symbols (♠ U+2660, ♥ U+2665, ♦ U+2666, ♣ U+2663) ──────────
+        // Bake BEFORE texture upload so pixel data reaches GPU
+        stbtt_bakedchar sym_cd[MAX_GLYPHS_SYM];
+        memset(sym_cd, 0, sizeof(sym_cd));
+        int sym_next_y = ascii_next_y;
+        if (g_noto_symbols_ttf_len > 0) {
+            constexpr int K_SUIT_START = 0x2660;
+            constexpr int K_SUIT_COUNT = 8;
+            int           ret          = fa.bake_range(g_noto_symbols_ttf, 48.0f, K_SUIT_START, K_SUIT_COUNT, sym_next_y, sym_cd);
+            if (ret < 0) {
+                for (int cp = K_SUIT_START; cp < K_SUIT_START + K_SUIT_COUNT; ++cp) {
+                    int r = fa.bake_range(g_noto_symbols_ttf, 48.0f, cp, 1, sym_next_y, &sym_cd[cp - K_SUIT_START]);
+                    if (r > 0) {
+                        sym_next_y = r;
+                    }
+                }
+            } else {
+                sym_next_y = ret;
+            }
+            // Bake ⎌ (U+238C, undo symbol) at slot 8 from Noto Sans Symbols (v1)
+            if (g_noto_symbols1_ttf_len > 0) {
+                (void)fa.bake_range(g_noto_symbols1_ttf, 48.0f, 0x238C, 1, sym_next_y, &sym_cd[8]);
+            }
+        }
+
+        // ── Create GPU texture (contains ASCII + Thai + suits) ──────────────
         TextureDesc font_tex_desc{};
         font_tex_desc.type         = TextureType::Tex2D;
         font_tex_desc.format       = PixelFormat::R8_UNORM;
@@ -285,10 +541,11 @@ struct Renderer {
         font_tex_desc.array_layers = 1;
         auto ft                    = backend->create_texture(font_tex_desc);
         if (!ft) {
+            destroy_resources();
             return make_unexpected(ft.error());
         }
         font_tex = *ft;
-        backend->update_texture(font_tex, fa.pixels, 0, 0, FONT_ATLAS_W, FONT_ATLAS_H, 0, 0);
+        (void)backend->update_texture(font_tex, fa.pixels, 0, 0, FONT_ATLAS_W, FONT_ATLAS_H, 0, 0);
 
         SamplerDesc font_samp_desc{};
         font_samp_desc.min_filter     = SamplerFilter::Linear;
@@ -298,6 +555,7 @@ struct Renderer {
         font_samp_desc.max_anisotropy = 1.0f;
         auto fs                       = backend->create_sampler(font_samp_desc);
         if (!fs) {
+            destroy_resources();
             return make_unexpected(fs.error());
         }
         font_sampler = *fs;
@@ -322,6 +580,17 @@ struct Renderer {
         for (int i = 0; i < MAX_GLYPHS_TH; ++i) {
             auto &g     = default_font.glyphs_th[i];
             auto &bc    = th_cd[i];
+            g.u         = static_cast<uint16_t>(bc.x0);
+            g.v         = static_cast<uint16_t>(bc.y0);
+            g.w         = static_cast<uint16_t>(bc.x1 - bc.x0);
+            g.h         = static_cast<uint16_t>(bc.y1 - bc.y0);
+            g.bearing_x = static_cast<int8_t>(bc.xoff);
+            g.bearing_y = static_cast<int8_t>(bc.yoff);
+            g.advance   = static_cast<uint8_t>(bc.xadvance);
+        }
+        for (int i = 0; i < MAX_GLYPHS_SYM; ++i) {
+            auto &g     = default_font.glyphs_sym[i];
+            auto &bc    = sym_cd[i];
             g.u         = static_cast<uint16_t>(bc.x0);
             g.v         = static_cast<uint16_t>(bc.y0);
             g.w         = static_cast<uint16_t>(bc.x1 - bc.x0);
@@ -362,6 +631,7 @@ struct Renderer {
         text_vb_desc.cpu_visible = true;
         auto tvb                 = backend->create_buffer(text_vb_desc);
         if (!tvb) {
+            destroy_resources();
             return make_unexpected(tvb.error());
         }
         text_vb = *tvb;
@@ -373,6 +643,7 @@ struct Renderer {
         text_ib_desc.cpu_visible = true;
         auto tib                 = backend->create_buffer(text_ib_desc);
         if (!tib) {
+            destroy_resources();
             return make_unexpected(tib.error());
         }
         text_ib = *tib;
@@ -386,6 +657,7 @@ struct Renderer {
                 int  n = snprintf(buf, sizeof(buf), "create_default_pipelines FAILED: err=%d\n", (int)sp.error());
                 write(2, buf, (size_t)n);
             }
+            destroy_resources();
             return make_unexpected(sp.error());
         }
 
@@ -394,6 +666,19 @@ struct Renderer {
             int  n = snprintf(buf, sizeof(buf), "create_default_pipelines OK: sprite=%u sdf=%u\n", sprite_pipeline.handle.id, sdf_pipeline.handle.id);
             write(2, buf, (size_t)n);
         }
+
+        // ButtonParams UBO
+        BufferDesc bubo_desc{};
+        bubo_desc.type        = BufferType::Uniform;
+        bubo_desc.size        = sizeof(ButtonParams);
+        bubo_desc.cpu_visible = true;
+        auto bubo             = backend->create_buffer(bubo_desc);
+        if (!bubo) {
+            destroy_resources();
+            return make_unexpected(bubo.error());
+        }
+        button_ubo = *bubo;
+
         return {};
     }
 
@@ -404,15 +689,9 @@ struct Renderer {
         m.store_column_major(view_proj);
     }
 
-    void upload_camera() noexcept {
-        backend->update_buffer(camera_ubo, view_proj, 0, sizeof(view_proj));
-        // Debug: log camera matrix first few values
-        // MM_LOG("CAMERA: view_proj[0]=%.4f [1]=%.4f [4]=%.4f [5]=%.4f [12]=%.4f [13]=%.4f", view_proj[0], view_proj[1], view_proj[4], view_proj[5],
-        //        view_proj[12], view_proj[13]);
-        // for (int i = 0; i < 16; i++) {
-        //     MM_LOG("view_proj[%d]=%.4f", i, view_proj[i]);
-        // }
-    }
+    void                     upload_camera() noexcept { (void)backend->update_buffer(camera_ubo, view_proj, 0, sizeof(view_proj)); }
+    void                     advance_time(float dt) noexcept { render_time += dt; }
+    void                     set_time(float t) noexcept { render_time = t; }
 
     Expected<void, RHIError> begin_frame() noexcept {
         flush_text();
@@ -451,12 +730,30 @@ struct Renderer {
         }
 #endif
 
+        // State tracking for redundant-bind suppression (Metal validation)
+        PipelineHandle last_pipeline{};
+        BufferHandle   last_vb{};
+        uint32_t       last_vb_off = UINT32_MAX;
+        uint32_t       last_vb_str = UINT32_MAX;
+        BufferHandle   last_ib{};
+        IndexType      last_ib_type = static_cast<IndexType>(0xFF);
+        uint32_t       last_ib_off  = UINT32_MAX;
+        TextureHandle  last_tex[4]  = {};
+        SamplerHandle  last_sam[4]  = {};
+        BufferHandle   last_ubo[4]  = {};
+        int16_t        last_sx = -1, last_sy = -1;
+        uint16_t       last_sw = 0, last_sh = 0;
+
         for (uint32_t i = 0; i < graph.command_count; ++i) {
             auto &cmd = graph.commands[i];
             switch (cmd.type) {
             case CmdType::BindPipeline: {
                 auto h = cmd.data.bind_pipeline.pipeline;
                 // MM_LOG("SUBMIT: BindPipeline handle.id=%u gen=%u", h.handle.id, h.handle.gen);
+                if (h.handle.id == last_pipeline.handle.id && h.handle.gen == last_pipeline.handle.gen) {
+                    break;
+                }
+                last_pipeline = h;
 #if defined(ENGINE_ENABLE_ASSERT)
                 auto *pl = backend->pipelines.get(h.handle);
                 if (!pl) {
@@ -465,56 +762,117 @@ struct Renderer {
                     fprintf(stderr, "BINDPIPELINE NIL: handle.id=%u gen=%u pl=%p\n", h.handle.id, h.handle.gen, (void *)pl);
                 }
 #endif
-                backend->bind_pipeline(h);
+                (void)backend->bind_pipeline(h);
                 break;
             }
             case CmdType::BindVertexBuffer: {
                 auto    &vb      = cmd.data.bind_vb;
                 uint32_t binding = vb.binding;
-                backend->bind_vertex_buffers(&vb.buffer, 1, &vb.offset, &vb.stride, &binding);
+                if (vb.buffer.handle.id == last_vb.handle.id && vb.buffer.handle.gen == last_vb.handle.gen && vb.offset == last_vb_off &&
+                    vb.stride == last_vb_str) {
+                    break;
+                }
+                last_vb     = vb.buffer;
+                last_vb_off = (uint32_t)vb.offset;
+                last_vb_str = (uint32_t)vb.stride;
+                (void)backend->bind_vertex_buffers(&vb.buffer, 1, &vb.offset, &vb.stride, &binding);
                 break;
             }
             case CmdType::BindIndexBuffer: {
                 auto &ib = cmd.data.bind_ib;
-                backend->bind_index_buffer(ib.buffer, ib.type, ib.offset);
+                if (ib.buffer.handle.id == last_ib.handle.id && ib.buffer.handle.gen == last_ib.handle.gen && ib.offset == last_ib_off &&
+                    ib.type == last_ib_type) {
+                    break;
+                }
+                last_ib      = ib.buffer;
+                last_ib_type = ib.type;
+                last_ib_off  = (uint32_t)ib.offset;
+                (void)backend->bind_index_buffer(ib.buffer, ib.type, ib.offset);
                 break;
             }
             case CmdType::BindFragmentTexture: {
                 auto &ft = cmd.data.bind_frag_tex;
-                backend->bind_fragment_texture(ft.texture, ft.index);
+                if (ft.index < 4 && ft.texture.handle.id == last_tex[ft.index].handle.id && ft.texture.handle.gen == last_tex[ft.index].handle.gen) {
+                    break;
+                }
+                if (ft.index < 4) {
+                    last_tex[ft.index] = ft.texture;
+                }
+                (void)backend->bind_fragment_texture(ft.texture, ft.index);
                 break;
             }
             case CmdType::BindFragmentSampler: {
                 auto &fs = cmd.data.bind_frag_samp;
-                backend->bind_fragment_sampler(fs.sampler, fs.index);
+                if (fs.index < 4 && fs.sampler.handle.id == last_sam[fs.index].handle.id && fs.sampler.handle.gen == last_sam[fs.index].handle.gen) {
+                    break;
+                }
+                if (fs.index < 4) {
+                    last_sam[fs.index] = fs.sampler;
+                }
+                (void)backend->bind_fragment_sampler(fs.sampler, fs.index);
                 break;
             }
             case CmdType::BindUniformBuffer: {
                 auto &ubo = cmd.data.bind_ubo;
-                backend->bind_uniform_buffer(ubo.buffer, ubo.binding);
+                if (ubo.binding < 4 && ubo.buffer.handle.id == last_ubo[ubo.binding].handle.id && ubo.buffer.handle.gen == last_ubo[ubo.binding].handle.gen) {
+                    break;
+                }
+                if (ubo.binding < 4) {
+                    last_ubo[ubo.binding] = ubo.buffer;
+                }
+                (void)backend->bind_uniform_buffer(ubo.buffer, ubo.binding);
                 break;
             }
             case CmdType::Draw: {
                 auto &d = cmd.data.draw;
-                backend->draw(d.vertex_count, d.instance_count, d.first_vertex, d.first_instance);
+                (void)backend->draw(d.vertex_count, d.instance_count, d.first_vertex, d.first_instance);
                 break;
             }
             case CmdType::DrawIndexed: {
                 auto &di = cmd.data.draw_indexed;
-                backend->draw_indexed(di.index_count, di.instance_count, di.first_index, di.vertex_offset);
+                (void)backend->draw_indexed(di.index_count, di.instance_count, di.first_index, di.vertex_offset);
                 break;
             }
-            case CmdType::BeginPass:
-                backend->begin_pass(cmd.data.begin_pass.pass);
+            case CmdType::BeginPass: {
+                // Reset redundant-bind tracking at pass boundary
+                last_pipeline = {};
+                last_vb       = {};
+                last_vb_off   = UINT32_MAX;
+                last_vb_str   = UINT32_MAX;
+                last_ib       = {};
+                last_ib_type  = static_cast<IndexType>(0xFF);
+                last_ib_off   = UINT32_MAX;
+                for (auto &t : last_tex) {
+                    t = {};
+                }
+                for (auto &s : last_sam) {
+                    s = {};
+                }
+                for (auto &u : last_ubo) {
+                    u = {};
+                }
+                last_sx = -1;
+                last_sy = -1;
+                last_sw = 0;
+                last_sh = 0;
+                (void)backend->begin_pass(cmd.data.begin_pass.pass);
                 break;
+            }
             case CmdType::EndPass:
-                backend->end_pass();
+                (void)backend->end_pass();
                 break;
             case CmdType::SetViewport:
                 break;
             case CmdType::SetScissor: {
                 auto &s = cmd.data.set_scissor;
-                backend->set_scissor(s.x, s.y, s.w, s.h);
+                if (s.x == last_sx && s.y == last_sy && s.w == last_sw && s.h == last_sh) {
+                    break;
+                }
+                last_sx = s.x;
+                last_sy = s.y;
+                last_sw = s.w;
+                last_sh = s.h;
+                (void)backend->set_scissor(s.x, s.y, s.w, s.h);
                 break;
             }
             default:
@@ -532,7 +890,8 @@ struct Renderer {
   private:
     // Internal: vertex generation + draw, parameterized by pipeline/texture/sampler
     // Groups sprites by per-sprite tex_id, resolving registered textures from the batch.
-    void flush_sprites_impl(SpriteBatch &batch, PipelineHandle pipeline, TextureHandle fallback_tex, SamplerHandle sampler) noexcept {
+    void flush_sprites_impl(SpriteBatch &batch, PipelineHandle pipeline, TextureHandle fallback_tex, SamplerHandle sampler,
+                            BufferHandle params_ubo = {}) noexcept {
         ZoneScoped;
         if (batch.count == 0) {
             return;
@@ -605,12 +964,14 @@ struct Renderer {
                     continue;
                 }
 
-                float    sx  = batch.world_x[i];
-                float    sy  = batch.world_y[i];
-                float    scx = batch.scale_x[i] * 0.5f;
-                float    scy = batch.scale_y[i] * 0.5f;
-                float    rot = batch.rotation[i];
-                uint32_t col = batch.color[i];
+                float    sx         = batch.world_x[i];
+                float    sy         = batch.world_y[i];
+                float    scx        = batch.scale_x[i] * 0.5f;
+                float    scy        = batch.scale_y[i] * 0.5f;
+                float    rot        = batch.rotation[i];
+                float    bw         = batch.border_w[i];
+                uint32_t col        = batch.color[i];
+                uint32_t border_col = batch.border_color[i];
 
                 float    u0 = 0.0f, v0 = 0.0f, u1 = 1.0f, v1 = 1.0f;
                 if (batch.atlas_w[i] > 0 && batch.atlas_h[i] > 0 && batch.atlas_tex_w > 0 && batch.atlas_tex_h > 0) {
@@ -620,24 +981,32 @@ struct Renderer {
                     v1 = static_cast<float>(batch.atlas_y[i] + batch.atlas_h[i]) / batch.atlas_tex_h;
                 }
 
-                float    c       = std::cos(rot);
-                float    s       = std::sin(rot);
+                float    c         = std::cos(rot);
+                float    s         = std::sin(rot);
 
-                float    cx[4]   = {-scx, scx, -scx, scx};
-                float    cy[4]   = {-scy, -scy, scy, scy};
-                float    uv_u[4] = {u0, u1, u0, u1};
-                float    uv_v[4] = {v0, v0, v1, v1};
+                float    cx[4]     = {-scx, scx, -scx, scx};
+                float    cy[4]     = {-scy, -scy, scy, scy};
+                float    uv_u[4]   = {u0, u1, u0, u1};
+                float    uv_v[4]   = {v0, v0, v1, v1};
 
-                uint32_t base    = vert_count;
+                uint32_t base      = vert_count;
+                float    cr        = batch.corner_r[i];
+                float    l_scale   = (scx > 0.0f) ? 0.5f / scx : 0.0f;
+                float    l_scale_y = (scy > 0.0f) ? 0.5f / scy : 0.0f;
                 for (int j = 0; j < 4; ++j) {
-                    float rx = cx[j] * c - cy[j] * s;
-                    float ry = cx[j] * s + cy[j] * c;
-                    auto &v  = verts[vert_count++];
-                    v.x      = SpriteBatch::float_to_f16(sx + rx);
-                    v.y      = SpriteBatch::float_to_f16(sy + ry);
-                    v.u      = SpriteBatch::float_to_f16(uv_u[j]);
-                    v.v      = SpriteBatch::float_to_f16(uv_v[j]);
-                    v.color  = col;
+                    float rx       = cx[j] * c - cy[j] * s;
+                    float ry       = cx[j] * s + cy[j] * c;
+                    auto &v        = verts[vert_count++];
+                    v.x            = SpriteBatch::float_to_f16(sx + rx);
+                    v.y            = SpriteBatch::float_to_f16(sy + ry);
+                    v.u            = SpriteBatch::float_to_f16(uv_u[j]);
+                    v.v            = SpriteBatch::float_to_f16(uv_v[j]);
+                    v.color        = col;
+                    v.local_x      = SpriteBatch::float_to_f16(cx[j] * l_scale);
+                    v.local_y      = SpriteBatch::float_to_f16(cy[j] * l_scale_y);
+                    v.radius       = SpriteBatch::float_to_f16(cr);
+                    v.border_w     = SpriteBatch::float_to_f16(bw);
+                    v.border_color = border_col;
                 }
 
                 indices[idx_count++] = static_cast<uint16_t>(base);
@@ -655,56 +1024,22 @@ struct Renderer {
             uint32_t vb_byte_offset = sprite_vertex_count * sizeof(SpriteVertex);
             uint32_t ib_byte_offset = sprite_index_count * sizeof(uint16_t);
 
-            // Debug: log first sprite vertex data
-            if (vert_count > 0) {
-                SpriteVertex &v0    = verts[0];
-                float         f16_x = 0.0f, f16_y = 0.0f, f16_u = 0.0f, f16_v = 0.0f;
-                // Approximate f16 decode for logging
-                auto          f16_to_approx = [](uint16_t h) -> float {
-                    uint32_t sign = (h >> 15) ? 0x80000000 : 0;
-                    int      exp  = (h >> 10) & 0x1F;
-                    uint32_t mant = h & 0x3FF;
-                    if (exp == 0) { // subnormal or zero
-                        if (mant == 0) {
-                            return 0.0f;
-                        }
-                        exp = -14;
-                    } else {
-                        mant |= 0x400;
-                        exp  -= 15;
-                    }
-                    uint32_t f = sign | ((exp + 127) << 23) | (mant << 13);
-                    float    result;
-                    memcpy(&result, &f, sizeof(result));
-                    return result;
-                };
-                f16_x        = f16_to_approx(v0.x);
-                f16_y        = f16_to_approx(v0.y);
-                f16_u        = f16_to_approx(v0.u);
-                f16_v        = f16_to_approx(v0.v);
-                uint32_t col = v0.color;
-                uint8_t  r = col & 0xFF, g = (col >> 8) & 0xFF, b = (col >> 16) & 0xFF, a = (col >> 24) & 0xFF;
-            }
-
-            backend->update_buffer(sprite_vb, verts, vb_byte_offset, vert_count * sizeof(SpriteVertex));
-            backend->update_buffer(sprite_ib, indices, ib_byte_offset, idx_count * sizeof(uint16_t));
-
-            // Debug: log first few indices
-            // if (idx_count > 0) {
-            //     uint16_t first_idx  = indices[0];
-            //     uint16_t second_idx = indices[1];
-            //     uint16_t third_idx  = indices[2];
-            //     MM_LOG("FLUSH_SPRITE: indices[0-2]=%u,%u,%u idx_count=%u", first_idx, second_idx, third_idx, idx_count);
-            // }
+            (void)backend->update_buffer(sprite_vb, verts, vb_byte_offset, vert_count * sizeof(SpriteVertex));
+            (void)backend->update_buffer(sprite_ib, indices, ib_byte_offset, idx_count * sizeof(uint16_t));
 
             SortKey key{0, 0, 0, 1.0f};
+
+            // Invariant state: bind once at offset 0, use draw params for per-group offset
             graph.bind_pipeline(pipeline, key);
-            graph.bind_vertex_buffer(sprite_vb, 0, vb_byte_offset, sizeof(SpriteVertex), key);
-            graph.bind_uniform_buffer(camera_ubo, 0, key); // Logical Slot 0: UBO
-            graph.bind_index_buffer(sprite_ib, IndexType::Uint16, ib_byte_offset, key);
-            graph.bind_fragment_texture(tex, 1, key);     // Logical Slot 1: Sampler
-            graph.bind_fragment_sampler(sampler, 1, key); // Logical Slot 1: Sampler
-            graph.draw_indexed(key, idx_count, 1, 0, 0);
+            graph.bind_vertex_buffer(sprite_vb, 0, 0, sizeof(SpriteVertex), key);
+            graph.bind_uniform_buffer(camera_ubo, 0, key);
+            graph.bind_index_buffer(sprite_ib, IndexType::Uint16, 0, key);
+            graph.bind_fragment_sampler(sampler, 0, key);
+            graph.bind_fragment_texture(tex, 0, key);
+            if (params_ubo.is_valid()) {
+                graph.bind_uniform_buffer(params_ubo, 1, key);
+            }
+            graph.draw_indexed(key, idx_count, 1, sprite_index_count, static_cast<int32_t>(sprite_vertex_count));
 
             sprite_vertex_count += vert_count;
             sprite_index_count  += idx_count;
@@ -714,6 +1049,126 @@ struct Renderer {
   public:
     // Default flush with sprite pipeline + white texture
     void flush_sprites(SpriteBatch &batch) noexcept { flush_sprites_impl(batch, sprite_pipeline, white_tex, default_sampler); }
+
+    // Flush with rounded sprite pipeline
+    void flush_rounded_sprites(SpriteBatch &batch) noexcept {
+        if (rounded_params_ubo) {
+            RoundedParams p = {render_time, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, {0.0f, 0.0f, 0.0f, 0.0f}};
+            (void)backend->update_buffer(rounded_params_ubo, &p, 0, sizeof(p));
+        }
+        flush_sprites_impl(batch, rounded_sprite_pipeline, white_tex, default_sampler, rounded_params_ubo);
+    }
+
+    // Flush with rounded sprite glow pipeline
+    void flush_rounded_sprites_glow(SpriteBatch &batch, float intensity, float glow_w, float pulse_speed_hz, uint32_t glow_color) noexcept {
+        if (rounded_params_glow_ubo) {
+            mm_math::color gc = mm_math::color::from_u32_argb(glow_color); // 0xAARRGGBB
+            float          c[4] = {gc.r, gc.g, gc.b, gc.a};
+            float         pulse_freq = pulse_speed_hz * mm_math::MM_TWO_PI;
+            RoundedParams p          = {render_time, intensity, glow_w, pulse_freq, 1.0f, 0.0f, 0.0f, 0.0f, {c[0], c[1], c[2], c[3]}};
+            (void)backend->update_buffer(rounded_params_glow_ubo, &p, 0, sizeof(p));
+        }
+        flush_sprites_impl(batch, rounded_sprite_glow_pipeline, white_tex, default_sampler, rounded_params_glow_ubo);
+    }
+
+    // ─── Lab-port flushes (additive; existing flushes untouched) ────
+    // Second texture (normal map) binds at logical slot 2, which lands on
+    // [[texture(1)]] (Metal backend quirk: index 1 aliases slot 0, so slot 2
+    // is the only safe second slot). Same SortKey as the impl below, so
+    // these binds execute first and persist (the impl never touches slot 2).
+    void flush_sprites_2tex(SpriteBatch &batch, PipelineHandle pipeline, TextureHandle fallback_tex, TextureHandle second_tex,
+                            SamplerHandle sampler, BufferHandle params_ubo) noexcept {
+        SortKey key{0, 0, 0, 1.0f};
+        graph.bind_fragment_texture(second_tex, 2, key);
+        graph.bind_fragment_sampler(sampler, 2, key);
+        flush_sprites_impl(batch, pipeline, fallback_tex, sampler, params_ubo);
+    }
+
+    static void unpack_rgba(uint32_t color, float out_c[4]) noexcept {
+        mm_math::color c = mm_math::color::from_u32_argb(color); // 0xAARRGGBB
+        out_c[0] = c.r;
+        out_c[1] = c.g;
+        out_c[2] = c.b;
+        out_c[3] = c.a;
+    }
+
+    // Sobel normal from albedo + Blinn-Phong (lab D6).
+    void flush_normal_derive(SpriteBatch &batch, TextureHandle texture, SamplerHandle sampler, float lx, float ly, float lz, float intensity,
+                             float ambient, float spec, float hscale) noexcept {
+        if (normal_derive_ubo) {
+            NormalParams p = {{lx, ly, lz, intensity}, {ambient, spec, hscale, 0.0f}};
+            (void)backend->update_buffer(normal_derive_ubo, &p, 0, sizeof(p));
+        }
+        flush_sprites_impl(batch, normal_derive_pipeline, texture, sampler, normal_derive_ubo);
+    }
+
+    // Normal-mapped lighting (lab D7/D8/D9). Metal-ready; Vulkan-deferred
+    // (backend binds a single fragment texture per pipeline today).
+    void flush_normal_map(SpriteBatch &batch, TextureHandle albedo_tex, TextureHandle normal_tex, SamplerHandle sampler, float lx, float ly,
+                          float lz, float intensity, float ambient, float spec) noexcept {
+        if (normal_map_ubo) {
+            NormalParams p = {{lx, ly, lz, intensity}, {ambient, spec, 0.0f, 0.0f}};
+            (void)backend->update_buffer(normal_map_ubo, &p, 0, sizeof(p));
+        }
+        flush_sprites_2tex(batch, normal_map_pipeline, albedo_tex, normal_tex, sampler, normal_map_ubo);
+    }
+
+    // Toon bands + ink edges (lab C).
+    void flush_cartoon(SpriteBatch &batch, TextureHandle texture, SamplerHandle sampler, float lx, float ly, float lz, float intensity,
+                       float ambient, float spec, float hscale, float bands, float ink_thresh, float ink_strength) noexcept {
+        if (cartoon_ubo) {
+            CartoonParams p = {{lx, ly, lz, intensity}, {ambient, spec, hscale, 0.0f}, {bands, ink_thresh, ink_strength, 0.0f}};
+            (void)backend->update_buffer(cartoon_ubo, &p, 0, sizeof(p));
+        }
+        flush_sprites_impl(batch, cartoon_pipeline, texture, sampler, cartoon_ubo);
+    }
+
+    // Glossy plastic (lab P). Same Vulkan single-texture limitation as normal_map.
+    void flush_plastic(SpriteBatch &batch, TextureHandle albedo_tex, TextureHandle normal_tex, SamplerHandle sampler, float lx, float ly, float lz,
+                       float intensity, float ambient, float spec, float clearcoat, float fresnel, float wrap, float shine) noexcept {
+        if (plastic_ubo) {
+            PlasticParams p = {{lx, ly, lz, intensity}, {ambient, spec, 0.0f, 0.0f}, {clearcoat, fresnel, wrap, shine}};
+            (void)backend->update_buffer(plastic_ubo, &p, 0, sizeof(p));
+        }
+        flush_sprites_2tex(batch, plastic_pipeline, albedo_tex, normal_tex, sampler, plastic_ubo);
+    }
+
+    // Expanding + fading ring (lab G). Host draws quads k× larger than the
+    // card so the ring has margin to travel in; time comes from render_time.
+    void flush_glow_pulse(SpriteBatch &batch, TextureHandle texture, SamplerHandle sampler, float duration, float expand, float ring_w,
+                          uint32_t glow_color, float aspect, float intensity, float quad_k) noexcept {
+        if (glow_pulse_ubo) {
+            float      c[4];
+            unpack_rgba(glow_color, c);
+            GlowParams p = {{render_time, duration, expand, ring_w}, {c[0], c[1], c[2], c[3]}, {aspect, intensity, quad_k, 0.0f}};
+            (void)backend->update_buffer(glow_pulse_ubo, &p, 0, sizeof(p));
+        }
+        flush_sprites_impl(batch, glow_pulse_pipeline, texture, sampler, glow_pulse_ubo);
+    }
+
+    // Static band + breathe (lab Y). timing.y = pulse speed in Hz.
+    void flush_gold_border(SpriteBatch &batch, TextureHandle texture, SamplerHandle sampler, float speed_hz, float band_w, uint32_t glow_color,
+                           float aspect, float intensity, float quad_k) noexcept {
+        if (gold_border_ubo) {
+            float      c[4];
+            unpack_rgba(glow_color, c);
+            GlowParams p = {{render_time, speed_hz, band_w, 0.0f}, {c[0], c[1], c[2], c[3]}, {aspect, intensity, quad_k, 0.0f}};
+            (void)backend->update_buffer(gold_border_ubo, &p, 0, sizeof(p));
+        }
+        flush_sprites_impl(batch, gold_border_pipeline, texture, sampler, gold_border_ubo);
+    }
+
+    // Persistent base + gentle pulse (lab S). Same params as gold_border.
+    void flush_gold_stay(SpriteBatch &batch, TextureHandle texture, SamplerHandle sampler, float speed_hz, float band_w, uint32_t glow_color,
+                         float aspect, float intensity, float quad_k) noexcept {
+        if (gold_stay_ubo) {
+            float      c[4];
+            unpack_rgba(glow_color, c);
+            GlowParams p = {{render_time, speed_hz, band_w, 0.0f}, {c[0], c[1], c[2], c[3]}, {aspect, intensity, quad_k, 0.0f}};
+            (void)backend->update_buffer(gold_stay_ubo, &p, 0, sizeof(p));
+        }
+        flush_sprites_impl(batch, gold_stay_pipeline, texture, sampler, gold_stay_ubo);
+    }
 
     // Flush with a specific texture (e.g. from a sprite atlas)
     void flush_sprites(SpriteBatch &batch, TextureHandle texture, SamplerHandle sampler) noexcept {
@@ -726,6 +1181,40 @@ struct Renderer {
     // Flush with a Technique (uses the first pass)
     void flush_sprites(SpriteBatch &batch, const Technique &tech) noexcept { flush_sprites(batch, tech.current_pass()); }
 
+    // Flush with button pipeline, writing ButtonParams to button_ubo
+    void flush_buttons(SpriteBatch &batch, const ButtonParams &params) noexcept {
+        (void)backend->update_buffer(button_ubo, &params, 0, sizeof(ButtonParams));
+        flush_sprites_impl(batch, button_pipeline, white_tex, default_sampler, button_ubo);
+    }
+
+    // Flush blur (single-pass 15-tap Gaussian; for two-pass use flush_blur_horizontal + flush_blur_vertical)
+    void flush_blur(SpriteBatch &batch, TextureHandle texture, SamplerHandle sampler, bool horizontal = true, float radius = 4.0f) noexcept {
+        if (blur_params_ubo) {
+            BlurParams p = {horizontal ? 1.0f : 0.0f, horizontal ? 0.0f : 1.0f, radius,
+                {0.132981f, 0.114226f, 0.087775f, 0.059634f, 0.035841f, 0.018954f, 0.008829f},
+                {0.0f, 0.0f}};
+            (void)backend->update_buffer(blur_params_ubo, &p, 0, sizeof(p));
+        }
+        flush_sprites_impl(batch, blur_pipeline, texture, sampler, blur_params_ubo);
+    }
+
+    // Flush color grade (brightness, contrast, saturation, hue shift)
+    void flush_color_grade(SpriteBatch &batch, TextureHandle texture, SamplerHandle sampler,
+                           float brightness = 1.0f, float contrast = 1.0f, float saturation = 1.0f, float hue_shift = 0.0f) noexcept {
+        if (color_grade_ubo) {
+            // Compute hue rotation matrix (column-major)
+            float c = cosf(hue_shift);
+            float s = sinf(hue_shift);
+            ColorGrade p = {brightness, contrast, saturation,
+                {0.299f + 0.701f*c - 0.168f*s,  0.587f - 0.587f*c - 0.330f*s,  0.114f - 0.114f*c + 0.497f*s,
+                 0.299f - 0.299f*c + 0.328f*s,  0.587f + 0.413f*c + 0.035f*s,  0.114f - 0.114f*c - 0.328f*s,
+                 0.299f - 0.299f*c - 0.328f*s,  0.587f - 0.587f*c + 0.035f*s,  0.114f + 0.886f*c + 0.203f*s},
+                {0.0f, 0.0f, 0.0f, 0.0f}};
+            (void)backend->update_buffer(color_grade_ubo, &p, 0, sizeof(p));
+        }
+        flush_sprites_impl(batch, color_grade_pipeline, texture, sampler, color_grade_ubo);
+    }
+
     // Flush particles — instanced draw from ParticlePool SoA data
     // Shader expects: [[buffer(1)]] instance data, [[buffer(2)]] camera, [[buffer(3)]] atlas
     void flush_particles(ParticlePool &pool, SortKey key = {}) noexcept {
@@ -736,10 +1225,10 @@ struct Renderer {
 
         // Pack SoA → contiguous instance buffer (4 × float4 = 64 bytes/particle)
         struct ParticleInstance {
-            float px, py, _pad0, scale;          // offset +0: float4(pos.xy, 0, scale)
-            float r, g, b, atlas_id;             // offset +16: float4(color.rgb, atlas)
-            float rotation, alpha, _pad1, _pad2; // offset +32: float2(rot, alpha)
-            float _pad3[4];                      // offset +48: unused (4th float4)
+            float px, py, pad0, scale;         // offset +0: float4(pos.xy, 0, scale)
+            float r, g, b, atlas_id;           // offset +16: float4(color.rgb, atlas)
+            float rotation, alpha, pad1, pad2; // offset +32: float2(rot, alpha)
+            float pad3[4];                     // offset +48: unused (4th float4)
         };
         static_assert(sizeof(ParticleInstance) == 64, "ParticleInstance must be 64 bytes");
 
@@ -752,10 +1241,11 @@ struct Renderer {
             float life_ratio = pool.life_max[i] > 0.0f ? pool.life[i] / pool.life_max[i] : 1.0f;
             float alpha      = life_ratio < 0.0f ? 0.0f : (life_ratio > 1.0f ? 1.0f : life_ratio);
 
-            // pool.color[i] = 0xAABBGGRR; update() writes alpha to byte 3
-            float r          = ((pool.color[i] >> 16) & 0xFF) / 255.0f;
-            float g          = ((pool.color[i] >> 8) & 0xFF) / 255.0f;
-            float b          = ((pool.color[i]) & 0xFF) / 255.0f;
+            // pool.color[i] = 0xAARRGGBB; update() writes alpha to byte 3
+            mm_math::color pc = mm_math::color::from_u32_argb(pool.color[i]);
+            float r           = pc.r;
+            float g           = pc.g;
+            float b           = pc.b;
 
             instances[i]     = {pool.px[i],
                                 pool.py[i],
@@ -778,7 +1268,7 @@ struct Renderer {
         // MM_LOG("FLUSH_PARTICLES: count=%u byte_offset=%u size=%lu", count, byte_offset, sizeof(ParticleInstance));
         (void)backend->update_buffer(particle_ib, instances, byte_offset, count * sizeof(ParticleInstance));
 
-        auto &mat = materials_[static_cast<uint8_t>(MaterialType::Particle)];
+        auto &mat = materials[static_cast<uint8_t>(e_material_type::PARTICLE)];
         graph.bind_pipeline(mat.pipeline, key);
         graph.bind_vertex_buffer(particle_ib, 1, byte_offset, sizeof(ParticleInstance), key);
         graph.bind_uniform_buffer(camera_ubo, 1, key);         // Camera -> [[buffer(2)]] / Binding 1
@@ -837,9 +1327,9 @@ struct Renderer {
         desc.depth_write            = false;
 
         desc.vertex_attr_count      = 3;
-        desc.vertex_attrs[0]        = {0, PixelFormat::R16G16_FLOAT, 0, 12};
-        desc.vertex_attrs[1]        = {1, PixelFormat::R16G16_FLOAT, 4, 12};
-        desc.vertex_attrs[2]        = {2, PixelFormat::R8G8B8A8_UNORM, 8, 12};
+        desc.vertex_attrs[0]        = {0, PixelFormat::R16G16_FLOAT, 0, sizeof(SpriteVertex)};
+        desc.vertex_attrs[1]        = {1, PixelFormat::R16G16_FLOAT, 4, sizeof(SpriteVertex)};
+        desc.vertex_attrs[2]        = {2, PixelFormat::R8G8B8A8_UNORM, 8, sizeof(SpriteVertex)};
 
         desc.descriptor_count       = 2;
         desc.descriptor_bindings[0] = {1, DescriptorType::UniformBuffer, 1, 1};        // Slot 1: Camera
@@ -856,6 +1346,7 @@ struct Renderer {
 
         auto res             = backend->create_pipeline(desc);
         if (!res) {
+            destroy_resources();
             return make_unexpected(res.error());
         }
         sprite_pipeline       = *res;
@@ -866,6 +1357,7 @@ struct Renderer {
         add_desc.dst_blend    = BlendFactor::One;
         auto add_res          = backend->create_pipeline(add_desc);
         if (!add_res) {
+            destroy_resources();
             return make_unexpected(add_res.error());
         }
         sprite_additive_pipeline = *add_res;
@@ -876,6 +1368,7 @@ struct Renderer {
         mul_desc.dst_blend       = BlendFactor::SrcColor;
         auto mul_res             = backend->create_pipeline(mul_desc);
         if (!mul_res) {
+            destroy_resources();
             return make_unexpected(mul_res.error());
         }
         sprite_multiply_pipeline = *mul_res;
@@ -886,6 +1379,7 @@ struct Renderer {
         opq_desc.dst_blend       = BlendFactor::Zero;
         auto opq_res             = backend->create_pipeline(opq_desc);
         if (!opq_res) {
+            destroy_resources();
             return make_unexpected(opq_res.error());
         }
         sprite_opaque_pipeline = *opq_res;
@@ -896,19 +1390,18 @@ struct Renderer {
         sdf_desc.vertex_shader     = shader::sdf_vertex();
         sdf_desc.fragment_shader   = shader::sdf_fragment();
         sdf_desc.vertex_attr_count = 3;
-        sdf_desc.vertex_attrs[0]   = {0, PixelFormat::R16G16_FLOAT, 0, 12};
-        sdf_desc.vertex_attrs[1]   = {1, PixelFormat::R16G16_FLOAT, 4, 12};
-        sdf_desc.vertex_attrs[2]   = {2, PixelFormat::R8G8B8A8_UNORM, 8, 12};
+        sdf_desc.vertex_attrs[0]   = {0, PixelFormat::R16G16_FLOAT, 0, sizeof(SpriteVertex)};
+        sdf_desc.vertex_attrs[1]   = {1, PixelFormat::R16G16_FLOAT, 4, sizeof(SpriteVertex)};
+        sdf_desc.vertex_attrs[2]   = {2, PixelFormat::R8G8B8A8_UNORM, 8, sizeof(SpriteVertex)};
 
         auto res2                  = backend->create_pipeline(sdf_desc);
         if (!res2) {
+            destroy_resources();
             return make_unexpected(res2.error());
         }
-        sdf_pipeline = *res2;
+        sdf_pipeline                         = *res2;
 
-        MM_LOG("create_default_pipelines: sprite_pipeline=%u sdf_pipeline=%u", sprite_pipeline.handle.id, sdf_pipeline.handle.id);
         // Particle pipeline
-        MM_LOG("create_default_pipelines: about to create particle_pipeline\n");
         PipelineDesc particle_desc           = desc;
         particle_desc.is_instance            = true;
         particle_desc.vertex_shader          = shader::particle_vertex();
@@ -925,24 +1418,333 @@ struct Renderer {
         auto res3                            = backend->create_pipeline(particle_desc);
         if (!res3) {
             MM_ERROR("create_default_pipelines: failed to create particle pipeline");
+            destroy_resources();
             return make_unexpected(res3.error());
         }
-        particle_pipeline = *res3;
-        MM_LOG("create_default_pipelines: particle_pipeline=%u", particle_pipeline.handle.id);
+        particle_pipeline                   = *res3;
+
+        // Rounded sprite pipeline (base: no glow, no border - uses function constants)
+        PipelineDesc rounded_desc           = desc;
+        rounded_desc.vertex_shader          = shader::rounded_sprite_vertex();
+        rounded_desc.fragment_shader        = shader::rounded_sprite_fragment();
+        rounded_desc.descriptor_count       = 3;
+        rounded_desc.descriptor_bindings[2] = {2, DescriptorType::UniformBuffer, 2, 1};
+        rounded_desc.vertex_attr_count      = 6;
+        rounded_desc.vertex_attrs[0]        = {0, PixelFormat::R16G16_FLOAT, 0, sizeof(SpriteVertex)};
+        rounded_desc.vertex_attrs[1]        = {1, PixelFormat::R16G16_FLOAT, 4, sizeof(SpriteVertex)};
+        rounded_desc.vertex_attrs[2]        = {2, PixelFormat::R8G8B8A8_UNORM, 8, sizeof(SpriteVertex)};
+        rounded_desc.vertex_attrs[3]        = {3, PixelFormat::R16G16_FLOAT, 12, sizeof(SpriteVertex)};
+        rounded_desc.vertex_attrs[4]        = {4, PixelFormat::R16G16_FLOAT, 16, sizeof(SpriteVertex)};
+        rounded_desc.vertex_attrs[5]        = {5, PixelFormat::R8G8B8A8_UNORM, 20, sizeof(SpriteVertex)};
+        // Function constants: HAS_GLOW=0 (index 0), HAS_BORDER=0 (index 1)
+        rounded_desc.function_constant_count = 2;
+        rounded_desc.function_constants[0] = {0, false}; // HAS_GLOW
+        rounded_desc.function_constants[1] = {1, false}; // HAS_BORDER
+
+        auto rounded_res                    = backend->create_pipeline(rounded_desc);
+        if (!rounded_res) {
+            MM_ERROR("create_default_pipelines: failed to create rounded sprite pipeline");
+            destroy_resources();
+            return make_unexpected(rounded_res.error());
+        }
+        rounded_sprite_pipeline = *rounded_res;
+        MM_LOG("create_default_pipelines: rounded_sprite_pipeline=%u", rounded_sprite_pipeline.handle.id);
+
+        // Glow variant pipeline (HAS_GLOW=1, HAS_BORDER=0)
+        {
+            PipelineDesc glow_desc = rounded_desc;
+            glow_desc.function_constants[0] = {0, true};  // HAS_GLOW
+            glow_desc.function_constants[1] = {1, false}; // HAS_BORDER
+            auto         glow_res  = backend->create_pipeline(glow_desc);
+            if (!glow_res) {
+                MM_ERROR("create_default_pipelines: failed to create rounded sprite glow pipeline");
+                destroy_resources();
+                return make_unexpected(glow_res.error());
+            }
+            rounded_sprite_glow_pipeline = *glow_res;
+            MM_LOG("create_default_pipelines: rounded_sprite_glow_pipeline=%u", rounded_sprite_glow_pipeline.handle.id);
+        }
+
+        // Border variant pipeline (HAS_GLOW=0, HAS_BORDER=1)
+        {
+            PipelineDesc border_desc = rounded_desc;
+            border_desc.function_constants[0] = {0, false}; // HAS_GLOW
+            border_desc.function_constants[1] = {1, true};  // HAS_BORDER
+            auto         border_res  = backend->create_pipeline(border_desc);
+            if (!border_res) {
+                MM_ERROR("create_default_pipelines: failed to create rounded sprite border pipeline");
+                destroy_resources();
+                return make_unexpected(border_res.error());
+            }
+            rounded_sprite_border_pipeline = *border_res;
+            MM_LOG("create_default_pipelines: rounded_sprite_border_pipeline=%u", rounded_sprite_border_pipeline.handle.id);
+        }
+
+        // ─── Sprite-based variant pipelines (same vertex format, custom fragment)
+        // Sprite outline pipeline
+        {
+            PipelineDesc pd           = desc;
+            pd.vertex_shader          = shader::sprite_vertex();
+            pd.fragment_shader        = shader::sprite_outline_fragment();
+            pd.descriptor_count       = 3;
+            pd.descriptor_bindings[2] = {2, DescriptorType::UniformBuffer, 2, 1};
+            auto ol_res               = backend->create_pipeline(pd);
+            if (!ol_res) {
+                MM_ERROR("create_default_pipelines: failed to create sprite_outline_pipeline");
+                destroy_resources();
+                return make_unexpected(ol_res.error());
+            }
+            sprite_outline_pipeline = *ol_res;
+            MM_LOG("create_default_pipelines: sprite_outline_pipeline=%u", sprite_outline_pipeline.handle.id);
+        }
+
+        // Clip rect pipeline
+        {
+            PipelineDesc pd           = desc;
+            pd.vertex_shader          = shader::sprite_vertex();
+            pd.fragment_shader        = shader::clip_rect_fragment();
+            pd.descriptor_count       = 3;
+            pd.descriptor_bindings[2] = {2, DescriptorType::UniformBuffer, 2, 1};
+            auto cr_res               = backend->create_pipeline(pd);
+            if (!cr_res) {
+                MM_ERROR("create_default_pipelines: failed to create clip_rect_pipeline");
+                destroy_resources();
+                return make_unexpected(cr_res.error());
+            }
+            clip_rect_pipeline = *cr_res;
+            MM_LOG("create_default_pipelines: clip_rect_pipeline=%u", clip_rect_pipeline.handle.id);
+        }
+
+        // Dissolve pipeline
+        {
+            PipelineDesc pd           = desc;
+            pd.vertex_shader          = shader::sprite_vertex();
+            pd.fragment_shader        = shader::dissolve_fragment();
+            pd.descriptor_count       = 3;
+            pd.descriptor_bindings[2] = {2, DescriptorType::UniformBuffer, 2, 1};
+            auto ds_res               = backend->create_pipeline(pd);
+            if (!ds_res) {
+                MM_ERROR("create_default_pipelines: failed to create dissolve_pipeline");
+                destroy_resources();
+                return make_unexpected(ds_res.error());
+            }
+            dissolve_pipeline = *ds_res;
+            MM_LOG("create_default_pipelines: dissolve_pipeline=%u", dissolve_pipeline.handle.id);
+        }
+
+        // Grayscale pipeline
+        {
+            PipelineDesc pd           = desc;
+            pd.vertex_shader          = shader::sprite_vertex();
+            pd.fragment_shader        = shader::grayscale_fragment();
+            pd.descriptor_count       = 3;
+            pd.descriptor_bindings[2] = {2, DescriptorType::UniformBuffer, 2, 1};
+            auto gy_res               = backend->create_pipeline(pd);
+            if (!gy_res) {
+                MM_ERROR("create_default_pipelines: failed to create grayscale_pipeline");
+                destroy_resources();
+                return make_unexpected(gy_res.error());
+            }
+            grayscale_pipeline = *gy_res;
+            MM_LOG("create_default_pipelines: grayscale_pipeline=%u", grayscale_pipeline.handle.id);
+        }
+
+        // Button pipeline (rounded_sprite vertex + button fragment with aspect-correct SDF)
+        {
+            PipelineDesc pd           = rounded_desc;
+            pd.fragment_shader        = shader::button_fragment();
+            pd.descriptor_count       = 3;
+            pd.descriptor_bindings[2] = {2, DescriptorType::UniformBuffer, 2, 1};
+            auto bt_res               = backend->create_pipeline(pd);
+            if (!bt_res) {
+                MM_ERROR("create_default_pipelines: failed to create button_pipeline");
+                destroy_resources();
+                return make_unexpected(bt_res.error());
+            }
+            button_pipeline = *bt_res;
+            MM_LOG("create_default_pipelines: button_pipeline=%u", button_pipeline.handle.id);
+        }
+
+        // ─── Lab-port pipelines (sprite vertex + custom fragment) ────
+        // Second texture (normal map) uses descriptor binding 1, bound by
+        // the host at logical slot 2 (Metal quirk: index 1 aliases slot 0).
+        // NOTE: the Vulkan backend binds a single fragment texture per
+        // pipeline today, so NORMAL_MAP/PLASTIC are Metal-ready and
+        // Vulkan-deferred (their SPV still compiles; do not use on Vulkan).
+        {
+            PipelineDesc pd           = desc;
+            pd.vertex_shader          = shader::sprite_vertex();
+            pd.fragment_shader        = shader::normal_derive_fragment();
+            pd.descriptor_count       = 3;
+            pd.descriptor_bindings[2] = {2, DescriptorType::UniformBuffer, 2, 1};
+            auto nd_res             = backend->create_pipeline(pd);
+            if (!nd_res) {
+                MM_ERROR("create_default_pipelines: failed to create normal_derive_pipeline");
+                destroy_resources();
+                return make_unexpected(nd_res.error());
+            }
+            normal_derive_pipeline = *nd_res;
+            MM_LOG("create_default_pipelines: normal_derive_pipeline=%u", normal_derive_pipeline.handle.id);
+        }
+        {
+            PipelineDesc pd           = desc;
+            pd.vertex_shader          = shader::sprite_vertex();
+            pd.fragment_shader        = shader::normal_map_fragment();
+            pd.descriptor_count       = 4;
+            pd.descriptor_bindings[2] = {2, DescriptorType::UniformBuffer, 2, 1};
+            pd.descriptor_bindings[3] = {1, DescriptorType::CombinedImageSampler, 2, 1};
+            auto nm_res             = backend->create_pipeline(pd);
+            if (!nm_res) {
+                MM_ERROR("create_default_pipelines: failed to create normal_map_pipeline");
+                destroy_resources();
+                return make_unexpected(nm_res.error());
+            }
+            normal_map_pipeline = *nm_res;
+            MM_LOG("create_default_pipelines: normal_map_pipeline=%u", normal_map_pipeline.handle.id);
+        }
+        {
+            PipelineDesc pd           = desc;
+            pd.vertex_shader          = shader::sprite_vertex();
+            pd.fragment_shader        = shader::cartoon_fragment();
+            pd.descriptor_count       = 3;
+            pd.descriptor_bindings[2] = {2, DescriptorType::UniformBuffer, 2, 1};
+            auto ct_res             = backend->create_pipeline(pd);
+            if (!ct_res) {
+                MM_ERROR("create_default_pipelines: failed to create cartoon_pipeline");
+                destroy_resources();
+                return make_unexpected(ct_res.error());
+            }
+            cartoon_pipeline = *ct_res;
+            MM_LOG("create_default_pipelines: cartoon_pipeline=%u", cartoon_pipeline.handle.id);
+        }
+        {
+            PipelineDesc pd           = desc;
+            pd.vertex_shader          = shader::sprite_vertex();
+            pd.fragment_shader        = shader::plastic_fragment();
+            pd.descriptor_count       = 4;
+            pd.descriptor_bindings[2] = {2, DescriptorType::UniformBuffer, 2, 1};
+            pd.descriptor_bindings[3] = {1, DescriptorType::CombinedImageSampler, 2, 1};
+            auto pl_res             = backend->create_pipeline(pd);
+            if (!pl_res) {
+                MM_ERROR("create_default_pipelines: failed to create plastic_pipeline");
+                destroy_resources();
+                return make_unexpected(pl_res.error());
+            }
+            plastic_pipeline = *pl_res;
+            MM_LOG("create_default_pipelines: plastic_pipeline=%u", plastic_pipeline.handle.id);
+        }
+        {
+            PipelineDesc pd           = desc;
+            pd.vertex_shader          = shader::sprite_vertex();
+            pd.fragment_shader        = shader::glow_pulse_fragment();
+            pd.descriptor_count       = 3;
+            pd.descriptor_bindings[2] = {2, DescriptorType::UniformBuffer, 2, 1};
+            auto gp_res             = backend->create_pipeline(pd);
+            if (!gp_res) {
+                MM_ERROR("create_default_pipelines: failed to create glow_pulse_pipeline");
+                destroy_resources();
+                return make_unexpected(gp_res.error());
+            }
+            glow_pulse_pipeline = *gp_res;
+            MM_LOG("create_default_pipelines: glow_pulse_pipeline=%u", glow_pulse_pipeline.handle.id);
+        }
+        {
+            PipelineDesc pd           = desc;
+            pd.vertex_shader          = shader::sprite_vertex();
+            pd.fragment_shader        = shader::gold_border_fragment();
+            pd.descriptor_count       = 3;
+            pd.descriptor_bindings[2] = {2, DescriptorType::UniformBuffer, 2, 1};
+            auto gb_res             = backend->create_pipeline(pd);
+            if (!gb_res) {
+                MM_ERROR("create_default_pipelines: failed to create gold_border_pipeline");
+                destroy_resources();
+                return make_unexpected(gb_res.error());
+            }
+            gold_border_pipeline = *gb_res;
+            MM_LOG("create_default_pipelines: gold_border_pipeline=%u", gold_border_pipeline.handle.id);
+        }
+        {
+            PipelineDesc pd           = desc;
+            pd.vertex_shader          = shader::sprite_vertex();
+            pd.fragment_shader        = shader::gold_stay_fragment();
+            pd.descriptor_count       = 3;
+            pd.descriptor_bindings[2] = {2, DescriptorType::UniformBuffer, 2, 1};
+            auto gs_res             = backend->create_pipeline(pd);
+            if (!gs_res) {
+                MM_ERROR("create_default_pipelines: failed to create gold_stay_pipeline");
+                destroy_resources();
+                return make_unexpected(gs_res.error());
+            }
+            gold_stay_pipeline = *gs_res;
+            MM_LOG("create_default_pipelines: gold_stay_pipeline=%u", gold_stay_pipeline.handle.id);
+        }
+
+        // ─── Post-process pipelines (screen_quad vertex, no vertex attributes)
+        {
+            PipelineDesc ppd{};
+            ppd.prim_type              = PrimitiveType::Triangle;
+            ppd.cull_mode              = CullMode::None;
+            ppd.src_blend              = BlendFactor::One;
+            ppd.dst_blend              = BlendFactor::Zero;
+            ppd.blend_op               = BlendOp::Add;
+            ppd.color_count            = 1;
+            ppd.color_formats[0]       = PixelFormat::B8G8R8A8_SRGB;
+            ppd.depth_format           = static_cast<PixelFormat>(0);
+            ppd.depth_test             = false;
+            ppd.depth_write            = false;
+            ppd.vertex_attr_count      = 0;
+            ppd.descriptor_count       = 2;
+            ppd.descriptor_bindings[0] = {0, DescriptorType::CombinedImageSampler, 2, 1};
+            ppd.descriptor_bindings[1] = {2, DescriptorType::UniformBuffer, 2, 1};
+
+            ppd.vertex_shader          = shader::screen_quad_vertex();
+            ppd.fragment_shader        = shader::blur_fragment();
+            auto blur_res              = backend->create_pipeline(ppd);
+            if (!blur_res) {
+                MM_ERROR("create_default_pipelines: failed to create blur_pipeline");
+                destroy_resources();
+                return make_unexpected(blur_res.error());
+            }
+            blur_pipeline = *blur_res;
+            MM_LOG("create_default_pipelines: blur_pipeline=%u", blur_pipeline.handle.id);
+
+            ppd.fragment_shader = shader::color_grade_fragment();
+            auto cg_res         = backend->create_pipeline(ppd);
+            if (!cg_res) {
+                MM_ERROR("create_default_pipelines: failed to create color_grade_pipeline");
+                destroy_resources();
+                return make_unexpected(cg_res.error());
+            }
+            color_grade_pipeline = *cg_res;
+            MM_LOG("create_default_pipelines: color_grade_pipeline=%u", color_grade_pipeline.handle.id);
+        }
 
         // Build built-in materials
-        materials_[static_cast<uint8_t>(MaterialType::SpriteAlpha)]    = {sprite_pipeline, white_tex, default_sampler};
-        materials_[static_cast<uint8_t>(MaterialType::SpriteAdditive)] = {sprite_additive_pipeline, white_tex, default_sampler};
-        materials_[static_cast<uint8_t>(MaterialType::SpriteMultiply)] = {sprite_multiply_pipeline, white_tex, default_sampler};
-        materials_[static_cast<uint8_t>(MaterialType::SpriteOpaque)]   = {sprite_opaque_pipeline, white_tex, default_sampler};
-        materials_[static_cast<uint8_t>(MaterialType::SDF)]            = {sdf_pipeline, font_tex, font_sampler};
-        materials_[static_cast<uint8_t>(MaterialType::Particle)]       = {particle_pipeline, white_tex, default_sampler};
+        materials[static_cast<uint8_t>(e_material_type::SPRITEALPHA)]    = {sprite_pipeline, white_tex, default_sampler};
+        materials[static_cast<uint8_t>(e_material_type::SPRITEADDITIVE)] = {sprite_additive_pipeline, white_tex, default_sampler};
+        materials[static_cast<uint8_t>(e_material_type::SPRITEMULTIPLY)] = {sprite_multiply_pipeline, white_tex, default_sampler};
+        materials[static_cast<uint8_t>(e_material_type::SPRITEOPAQUE)]   = {sprite_opaque_pipeline, white_tex, default_sampler};
+        materials[static_cast<uint8_t>(e_material_type::SDF)]            = {sdf_pipeline, font_tex, font_sampler};
+        materials[static_cast<uint8_t>(e_material_type::PARTICLE)]       = {particle_pipeline, white_tex, default_sampler};
+        materials[static_cast<uint8_t>(e_material_type::ROUNDEDSPRITE)]  = {rounded_sprite_pipeline, white_tex, default_sampler};
+        materials[static_cast<uint8_t>(e_material_type::SPRITEOUTLINE)]  = {sprite_outline_pipeline, white_tex, default_sampler};
+        materials[static_cast<uint8_t>(e_material_type::CLIPRECT)]       = {clip_rect_pipeline, white_tex, default_sampler};
+        materials[static_cast<uint8_t>(e_material_type::DISSOLVE)]       = {dissolve_pipeline, white_tex, default_sampler};
+        materials[static_cast<uint8_t>(e_material_type::GRAYSCALE)]      = {grayscale_pipeline, white_tex, default_sampler};
+        materials[static_cast<uint8_t>(e_material_type::SDFBUTTON)]      = {button_pipeline, white_tex, default_sampler};
+        materials[static_cast<uint8_t>(e_material_type::NORMALDERIVE)]   = {normal_derive_pipeline, white_tex, default_sampler};
+        materials[static_cast<uint8_t>(e_material_type::NORMALMAP)]      = {normal_map_pipeline, white_tex, default_sampler};
+        materials[static_cast<uint8_t>(e_material_type::CARTOON)]        = {cartoon_pipeline, white_tex, default_sampler};
+        materials[static_cast<uint8_t>(e_material_type::PLASTIC)]        = {plastic_pipeline, white_tex, default_sampler};
+        materials[static_cast<uint8_t>(e_material_type::GLOWPULSE)]      = {glow_pulse_pipeline, white_tex, default_sampler};
+        materials[static_cast<uint8_t>(e_material_type::GOLDBORDER)]     = {gold_border_pipeline, white_tex, default_sampler};
+        materials[static_cast<uint8_t>(e_material_type::GOLDSTAY)]       = {gold_stay_pipeline, white_tex, default_sampler};
 
         return {};
     }
 
     // ─── Material accessors ─────────────────────────────────────
-    const Material &material(MaterialType type) const noexcept { return materials_[static_cast<uint8_t>(type)]; }
+    const Material &material(e_material_type type) const noexcept { return materials[static_cast<uint8_t>(type)]; }
 
     Material        make_material(PipelineHandle pipeline, TextureHandle texture, SamplerHandle sampler) const noexcept { return {pipeline, texture, sampler}; }
 
@@ -960,7 +1762,7 @@ struct Renderer {
         float       y                   = 0.0f;
         uint32_t    prev_consonant      = 0;
 
-        auto        is_thai_vowel_front = [](uint32_t c) -> bool { return (c >= 0x0E40 && c <= 0x0E44); };
+        // auto        is_thai_vowel_front = [](uint32_t c) -> bool { return (c >= 0x0E40 && c <= 0x0E44); };
         auto        is_thai_vowel_above = [](uint32_t c) -> bool { return (c == 0x0E31) || (c >= 0x0E34 && c <= 0x0E37) || (c == 0x0E4D); };
         auto        is_thai_vowel_below = [](uint32_t c) -> bool { return (c >= 0x0E38 && c <= 0x0E39); };
         auto        is_thai_tone_mark   = [](uint32_t c) -> bool { return (c >= 0x0E48 && c <= 0x0E4B); };
@@ -992,7 +1794,7 @@ struct Renderer {
 
             const GlyphInfo *g = nullptr;
             if (cp >= 0x0E01 && cp <= 0x0E5B) {
-                int idx = cp - 0x0E01;
+                int idx = (int)(cp - 0x0E01);
                 if (idx >= 0 && idx < MAX_GLYPHS_TH) {
                     auto &th_g = font.glyphs_th[idx];
                     if (th_g.w > 0) {
@@ -1221,20 +2023,22 @@ struct Renderer {
             return;
         }
 
-        uint32_t vb_byte_offset = text_vertex_count * sizeof(SpriteVertex);
-        uint32_t ib_byte_offset = text_index_count * sizeof(uint16_t);
+        uint32_t cur_vert_off   = text_vertex_count;
+        uint32_t cur_idx_off    = text_index_count;
+        uint32_t vb_byte_offset = cur_vert_off * sizeof(SpriteVertex);
+        uint32_t ib_byte_offset = cur_idx_off * sizeof(uint16_t);
 
-        backend->update_buffer(text_vb, verts, vb_byte_offset, vert_count * sizeof(SpriteVertex));
-        backend->update_buffer(text_ib, indices, ib_byte_offset, idx_count * sizeof(uint16_t));
+        (void)backend->update_buffer(text_vb, verts, vb_byte_offset, vert_count * sizeof(SpriteVertex));
+        (void)backend->update_buffer(text_ib, indices, ib_byte_offset, idx_count * sizeof(uint16_t));
 
         SortKey key{1, 0, 0, 1.0f};
         graph.bind_pipeline(sdf_pipeline, key);
-        graph.bind_vertex_buffer(text_vb, 0, vb_byte_offset, sizeof(SpriteVertex), key);
+        graph.bind_vertex_buffer(text_vb, 0, 0, sizeof(SpriteVertex), key);
         graph.bind_uniform_buffer(camera_ubo, 0, key); // Logical Slot 0: UBO
-        graph.bind_index_buffer(text_ib, IndexType::Uint16, ib_byte_offset, key);
-        graph.bind_fragment_texture(font_tex, 1, key);     // Logical Slot 1: Sampler
-        graph.bind_fragment_sampler(font_sampler, 1, key); // Logical Slot 1: Sampler
-        graph.draw_indexed(key, idx_count, 1, 0, 0);
+        graph.bind_index_buffer(text_ib, IndexType::Uint16, 0, key);
+        graph.bind_fragment_texture(font_tex, 0, key);     // Logical Slot 0: Texture
+        graph.bind_fragment_sampler(font_sampler, 0, key); // Logical Slot 0: Sampler
+        graph.draw_indexed(key, idx_count, 1, cur_idx_off, static_cast<int32_t>(cur_vert_off));
 
         text_vertex_count += vert_count;
         text_index_count  += idx_count;

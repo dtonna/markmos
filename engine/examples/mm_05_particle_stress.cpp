@@ -8,6 +8,7 @@
 #include "../game/mm_particle_pool.hpp"
 #include "../game/mm_camera_trauma.hpp"
 #include "../core/mm_arena.hpp"
+#include "../math/mm_color.h"
 #include "../render/mm_shader_registry.hpp"
 #include "../rhi/mm_rhi_concept.hpp"
 #include "../app/mm_app.hpp"
@@ -252,11 +253,12 @@ static void game_frame(void*, float dt, InputState&) {
         inst.py = g_particles.py[i];
         inst.scale = g_particles.scale[i];
 
-        // Unpack RGBA8 → float4
+        // Unpack packed engine color (0xAARRGGBB) → float4
         uint32_t c = g_particles.color[i];
-        inst.r = static_cast<float>((c >> 16) & 0xFF) / 255.0f;
-        inst.g = static_cast<float>((c >> 8) & 0xFF) / 255.0f;
-        inst.b = static_cast<float>(c & 0xFF) / 255.0f;
+        mm_math::color pc = mm_math::color::from_u32_argb(c);
+        inst.r = pc.r;
+        inst.g = pc.g;
+        inst.b = pc.b;
         inst.atlas = 0.0f;  // atlas tile 0
         inst.rotation = g_particles.rotation[i];
         // Alpha from life ratio

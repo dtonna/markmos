@@ -176,6 +176,8 @@ set(ENGINE_SOURCES
     render/mm_font_atlas.cpp
     render/mm_font_data.hpp
     render/mm_font_data.cpp
+    render/mm_font_sym_data.hpp
+    render/mm_font_sym_data.cpp
     render/mm_font_ttf_data.hpp
     render/mm_renderer.hpp
     render/mm_material.hpp
@@ -482,6 +484,12 @@ if(BUILD_TESTS)
     )
     target_link_libraries(backend_concept_tests PRIVATE markmos)
     add_test(NAME backend_concept_tests COMMAND backend_concept_tests)
+    add_executable(layout_tests tests/layout_tests.cpp)
+    target_link_libraries(layout_tests PRIVATE markmos)
+    add_test(NAME layout_tests COMMAND layout_tests)
+    add_executable(ember_tests tests/ember_tests.cpp)
+    target_link_libraries(ember_tests PRIVATE markmos)
+    add_test(NAME ember_tests COMMAND ember_tests)
 endif()
 
 # ─── Dependency Summary ─────────────────────────────────────────

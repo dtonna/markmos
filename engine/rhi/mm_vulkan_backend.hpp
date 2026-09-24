@@ -118,16 +118,13 @@ struct VulkanBackend {
         }
         // Step 1: vkb::InstanceBuilder — no manual vkCreateInstance
         vkb::InstanceBuilder inst_builder;
-        inst_builder.set_app_name("Markmos")
-                            .set_engine_name("Markmos Engine")
-                            .require_api_version(1, 2, 0);
+        inst_builder.set_app_name("Markmos").set_engine_name("Markmos Engine").require_api_version(1, 2, 0);
 
-#if !defined(NDEBUG) && !defined(VK_USE_PLATFORM_ANDROID_KHR)
+#    if !defined(NDEBUG) && !defined(VK_USE_PLATFORM_ANDROID_KHR)
         // Validation layers are often missing on Android devices, causing instance creation to fail.
         // We only enable them on desktop/other platforms for now.
-        inst_builder.request_validation_layers()
-                    .use_default_debug_messenger();
-#endif
+        inst_builder.request_validation_layers().use_default_debug_messenger();
+#    endif
 
         auto inst_ret = inst_builder.build();
         if (!inst_ret) {
@@ -139,9 +136,7 @@ struct VulkanBackend {
         if (!inst_ret) {
             // If it still fails, try one last time with absolutely no extras
             vkb::InstanceBuilder simple_builder;
-            inst_ret = simple_builder.set_app_name("Markmos")
-                                     .require_api_version(1, 0, 0)
-                                     .build();
+            inst_ret = simple_builder.set_app_name("Markmos").require_api_version(1, 0, 0).build();
         }
 
         if (!inst_ret) {
@@ -162,6 +157,7 @@ struct VulkanBackend {
             sci.window = static_cast<ANativeWindow *>(window_handle);
             if (vkCreateAndroidSurfaceKHR(instance, &sci, nullptr, &surface) != VK_SUCCESS) {
                 MM_ERROR("vkCreateAndroidSurfaceKHR failed");
+                vkb::destroy_instance(vkb_instance);
                 return make_unexpected(RHIError::BackendError);
             }
             MM_LOG("Android Surface created: %p", surface);
@@ -184,6 +180,16 @@ struct VulkanBackend {
         vkb::PhysicalDevice physical_device = phys_dev_ret.value();
         phys_device                         = physical_device.physical_device;
         MM_LOG("Physical device selected: %s", physical_device.name.c_str());
+
+        // Vertex colors ride on B8G8R8A8_UNORM (see to_vk_vertex_format) —
+        // warn (don't fail) if the device can't bind it as a vertex format.
+        {
+            VkFormatProperties fp{};
+            vkGetPhysicalDeviceFormatProperties(phys_device, VK_FORMAT_B8G8R8A8_UNORM, &fp);
+            if ((fp.bufferFeatures & VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT) == 0) {
+                MM_ERROR("B8G8R8A8_UNORM lacks VERTEX_BUFFER support — vertex colors will render R/B-swapped");
+            }
+        }
 
         // Step 4: vkb::DeviceBuilder — no manual vkCreateDevice
         MM_LOG("Creating Logical Device");
@@ -221,6 +227,8 @@ struct VulkanBackend {
         auto gq = vkb_device.get_queue(vkb::QueueType::graphics);
         auto pq = vkb_device.get_queue(vkb::QueueType::present);
         if (!gq || !pq) {
+            vkb::destroy_device(vkb_device);
+            vkb::destroy_instance(vkb_instance);
             return make_unexpected(RHIError::BackendError);
         }
         graphics_queue  = gq.value();
@@ -239,6 +247,8 @@ struct VulkanBackend {
                             .build();
         if (!swap_ret) {
             MM_ERROR("Failed to create swapchain: %s", swap_ret.error().message().c_str());
+            vkb::destroy_device(vkb_device);
+            vkb::destroy_instance(vkb_instance);
             return make_unexpected(RHIError::BackendError);
         }
         vkb_swapchain = swap_ret.value();
@@ -282,6 +292,16 @@ struct VulkanBackend {
         VkResult vma_res            = vmaCreateAllocator(&alloc_info, &allocator);
         if (vma_res != VK_SUCCESS) {
             MM_ERROR("Failed to create VMA allocator, result: %d", (int)vma_res);
+            for (auto v : swap_views) {
+                vkDestroyImageView(device, v, nullptr);
+            }
+            swap_views.clear();
+            vkb::destroy_swapchain(vkb_swapchain);
+            vkb::destroy_device(vkb_device);
+            if (surface) {
+                vkDestroySurfaceKHR(instance, surface, nullptr);
+            }
+            vkb::destroy_instance(vkb_instance);
             return make_unexpected(RHIError::BackendError);
         }
         MM_LOG("VMA allocator created");
@@ -319,6 +339,23 @@ struct VulkanBackend {
 
         if (!vkCmdBeginRenderingKHR || !vkCmdEndRenderingKHR) {
             MM_ERROR("Failed to load vkCmdBeginRenderingKHR or vkCmdEndRenderingKHR");
+            for (auto v : swap_views) {
+                vkDestroyImageView(device, v, nullptr);
+            }
+            swap_views.clear();
+            vkb::destroy_swapchain(vkb_swapchain);
+            vkb::destroy_device(vkb_device);
+            if (surface) {
+                vkDestroySurfaceKHR(instance, surface, nullptr);
+            }
+            vkb::destroy_instance(vkb_instance);
+            vkDestroyCommandPool(device, cmd_pool, nullptr);
+            vkDestroyFence(device, frame_fence, nullptr);
+            vkDestroySemaphore(device, acquire_sem, nullptr);
+            vkDestroySemaphore(device, release_sem, nullptr);
+            vkb::destroy_device(vkb_device);
+            vkb::destroy_instance(vkb_instance);
+
             return make_unexpected(RHIError::BackendError);
         }
 
@@ -347,6 +384,43 @@ struct VulkanBackend {
     void shutdown() noexcept {
         vkDeviceWaitIdle(device);
 
+        // Destroy all remaining resources in slotmaps first
+        {
+            auto it = buffers.iter();
+            while (auto *b = it.next()) {
+                vmaDestroyBuffer(allocator, b->buffer, b->alloc);
+            }
+        }
+
+        {
+            auto it = textures.iter();
+            while (auto *t = it.next()) {
+                vkDestroyImageView(device, t->view, nullptr);
+                vmaDestroyImage(allocator, t->image, t->alloc);
+            }
+        }
+
+        {
+            auto it = pipelines.iter();
+            while (auto *p = it.next()) {
+                if (p->desc_set) {
+                    vkFreeDescriptorSets(device, desc_pool, 1, &p->desc_set);
+                }
+                if (p->desc_set_layout) {
+                    vkDestroyDescriptorSetLayout(device, p->desc_set_layout, nullptr);
+                }
+                vkDestroyPipeline(device, p->pipeline, nullptr);
+                vkDestroyPipelineLayout(device, p->layout, nullptr);
+            }
+        }
+
+        {
+            auto it = samplers.iter();
+            while (auto *s = it.next()) {
+                vkDestroySampler(device, s->sampler, nullptr);
+            }
+        }
+
         vkDestroyFence(device, frame_fence, nullptr);
         frame_fence = VK_NULL_HANDLE;
         vkDestroySemaphore(device, acquire_sem, nullptr);
@@ -374,17 +448,16 @@ struct VulkanBackend {
         vkb::destroy_device(vkb_device);
         vkb::destroy_instance(vkb_instance);
 
-        instance   = VK_NULL_HANDLE;
-        device     = VK_NULL_HANDLE;
-        phys_device = VK_NULL_HANDLE;
+        instance       = VK_NULL_HANDLE;
+        device         = VK_NULL_HANDLE;
+        phys_device    = VK_NULL_HANDLE;
         graphics_queue = VK_NULL_HANDLE;
-        present_queue = VK_NULL_HANDLE;
-        swapchain  = VK_NULL_HANDLE;
-        cmd_buf    = VK_NULL_HANDLE;
-        vkb_swapchain = {};
-        vkb_device    = {};
-        vkb_instance  = {};
-
+        present_queue  = VK_NULL_HANDLE;
+        swapchain      = VK_NULL_HANDLE;
+        cmd_buf        = VK_NULL_HANDLE;
+        vkb_swapchain  = {};
+        vkb_device     = {};
+        vkb_instance   = {};
     }
 
     Expected<BufferHandle, RHIError> create_buffer(const BufferDesc &desc) noexcept {
@@ -510,8 +583,10 @@ struct VulkanBackend {
         info.compareOp     = to_vk_compare(desc.compare);
 
         VkSampler sampler;
-        // MM_LOG("create_sampler: calling vkCreateSampler");
-        vkCreateSampler(device, &info, nullptr, &sampler);
+        if (vkCreateSampler(device, &info, nullptr, &sampler) != VK_SUCCESS) {
+            MM_ERROR("create_sampler: vkCreateSampler failed");
+            return make_unexpected(RHIError::BackendError);
+        }
 
         VulkanSampler vs{sampler};
         SlotHandle    sh = samplers.emplace(vs);
@@ -734,6 +809,9 @@ struct VulkanBackend {
 
         if (res != VK_SUCCESS) {
             MM_ERROR("create_pipeline: vkCreateGraphicsPipelines failed with result %d", (int)res);
+            if (desc_set_layout) {
+                vkDestroyDescriptorSetLayout(device, desc_set_layout, nullptr);
+            }
             vkDestroyPipelineLayout(device, pipeline_layout, nullptr);
             return make_unexpected(RHIError::PipelineCompileFail);
         }
@@ -748,7 +826,12 @@ struct VulkanBackend {
             dsai.descriptorPool     = desc_pool;
             dsai.descriptorSetCount = 1;
             dsai.pSetLayouts        = &desc_set_layout;
-            vkAllocateDescriptorSets(device, &dsai, &desc_set);
+            if (vkAllocateDescriptorSets(device, &dsai, &desc_set) != VK_SUCCESS) {
+                MM_ERROR("create_pipeline: vkAllocateDescriptorSets failed");
+                vkDestroyPipelineLayout(device, pipeline_layout, nullptr);
+                vkDestroyPipeline(device, pipeline, nullptr);
+                return make_unexpected(RHIError::BackendError);
+            }
         }
 
         VulkanPipeline vp{};
@@ -794,6 +877,8 @@ struct VulkanBackend {
         if (p) {
             if (p->desc_set) {
                 vkFreeDescriptorSets(device, desc_pool, 1, &p->desc_set);
+            }
+            if (p->desc_set_layout) {
                 vkDestroyDescriptorSetLayout(device, p->desc_set_layout, nullptr);
             }
             vkDestroyPipeline(device, p->pipeline, nullptr);
@@ -808,10 +893,17 @@ struct VulkanBackend {
             return make_unexpected(RHIError::InvalidHandle);
         }
 
-        void *mapped;
-        vmaMapMemory(allocator, buf->alloc, &mapped);
-        memcpy(static_cast<uint8_t *>(mapped) + offset, data, size);
-        vmaUnmapMemory(allocator, buf->alloc);
+        VmaAllocationInfo info;
+        vmaGetAllocationInfo(allocator, buf->alloc, &info);
+
+        if (info.pMappedData) {
+            memcpy(static_cast<uint8_t *>(info.pMappedData) + offset, data, size);
+        } else {
+            void *mapped;
+            vmaMapMemory(allocator, buf->alloc, &mapped);
+            memcpy(static_cast<uint8_t *>(mapped) + offset, data, size);
+            vmaUnmapMemory(allocator, buf->alloc);
+        }
         return {};
     }
 
@@ -845,7 +937,7 @@ struct VulkanBackend {
             return make_unexpected(RHIError::OutOfMemory);
         }
 
-        MM_LOG("update_texture: copying pixels to staging");
+        // MM_LOG("update_texture: copying pixels to staging");
         memcpy(staging_info.pMappedData, data, static_cast<size_t>(image_size));
 
         // One-shot command buffer for transfer
@@ -975,29 +1067,32 @@ struct VulkanBackend {
     void resize() noexcept {
         vkDeviceWaitIdle(device);
 
-        // Destroy old swapchain image views
+        // Rebuild swapchain ก่อน (pass old swapchain)
+        vkb::SwapchainBuilder swap_builder(vkb_device, surface);
+        auto                  swap_ret = swap_builder.set_desired_format({VK_FORMAT_B8G8R8A8_SRGB, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR})
+                            .set_desired_present_mode(VK_PRESENT_MODE_FIFO_KHR)
+                            .set_old_swapchain(vkb_swapchain)
+                            .build();
+
+        if (!swap_ret) {
+            MM_ERROR("resize: swapchain recreation failed, keeping existing swapchain");
+            return; // ไม่ destroy อะไรเลย — swapchain เดิมยังใช้ได้
+        }
+
+        // สำเร็จ — destroy old views แล้วค่อย swap
         for (auto v : swap_views) {
             vkDestroyImageView(device, v, nullptr);
         }
         swap_views.clear();
         swap_images.clear();
 
-        // Rebuild swapchain (pass old swapchain for seamless recreation)
-        vkb::SwapchainBuilder swap_builder(vkb_device, surface);
-        auto                  swap_ret = swap_builder.set_desired_format({VK_FORMAT_B8G8R8A8_SRGB, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR})
-                            .set_desired_present_mode(VK_PRESENT_MODE_FIFO_KHR)
-                            .set_old_swapchain(vkb_swapchain)
-                            .build();
-        if (swap_ret) {
-            vkb::destroy_swapchain(vkb_swapchain);
-            vkb_swapchain = swap_ret.value();
-            swapchain     = vkb_swapchain.swapchain;
-            swap_extent   = vkb_swapchain.extent;
-            swap_format   = vkb_swapchain.image_format;
-
-            swap_images   = vkb_swapchain.get_images().value();
-            swap_views    = vkb_swapchain.get_image_views().value();
-        }
+        vkb::destroy_swapchain(vkb_swapchain);
+        vkb_swapchain = swap_ret.value();
+        swapchain     = vkb_swapchain.swapchain;
+        swap_extent   = vkb_swapchain.extent;
+        swap_format   = vkb_swapchain.image_format;
+        swap_images   = vkb_swapchain.get_images().value();
+        swap_views    = vkb_swapchain.get_image_views().value();
     }
 
     Expected<void, RHIError> end_frame() noexcept {
@@ -1198,22 +1293,12 @@ struct VulkanBackend {
     Expected<void, RHIError> draw(uint32_t vertex_count, uint32_t instance_count, uint32_t first_vertex, uint32_t first_instance) noexcept {
         flush_descriptors();
         vkCmdDraw(cmd_buf, vertex_count, instance_count, first_vertex, first_instance);
-        // static uint32_t draw_count = 0;
-        // if (++draw_count % 100 == 1) {
-        //     MM_LOG("VulkanBackend::draw() count=%u verts=%u", draw_count, vertex_count);
-        // }
         return {};
     }
 
     Expected<void, RHIError> draw_indexed(uint32_t index_count, uint32_t instance_count, uint32_t first_index, int32_t vertex_offset = 0) noexcept {
         flush_descriptors();
         vkCmdDrawIndexed(cmd_buf, index_count, instance_count, first_index, vertex_offset, 0);
-        static uint32_t idx_draw_count = 0;
-        // ++idx_draw_count;
-        // if (idx_draw_count % 100 == 1 || idx_draw_count <= 10) {
-        //     MM_LOG("VulkanBackend::draw_indexed() count=%u indices=%u instance_count=%u first_index=%u vertex_offset=%d cur_pipeline=%u", idx_draw_count,
-        //            index_count, instance_count, first_index, vertex_offset, current_pipeline_handle.handle.id);
-        // }
         return {};
     }
 
@@ -1272,7 +1357,7 @@ struct VulkanBackend {
         case PixelFormat::R8_UNORM:
             return VK_FORMAT_R8_UNORM;
         case PixelFormat::R8G8B8A8_UNORM:
-            return VK_FORMAT_R8G8B8A8_UNORM;
+            return VK_FORMAT_A8B8G8R8_UNORM_PACK32;
         case PixelFormat::R8G8B8A8_SRGB:
             return VK_FORMAT_R8G8B8A8_SRGB;
         case PixelFormat::B8G8R8A8_UNORM:
@@ -1295,7 +1380,11 @@ struct VulkanBackend {
     static VkFormat to_vk_vertex_format(PixelFormat fmt) noexcept {
         switch (fmt) {
         case PixelFormat::R8G8B8A8_UNORM:
-            return VK_FORMAT_R8G8B8A8_UNORM;
+            // Engine vertex colors are packed 0xAARRGGBB u32s (NOT raw RGBA
+            // bytes) — swizzle to BGRA for Metal parity (Metal maps this to
+            // UChar4Normalized_BGRA). Applies to SpriteVertex color +
+            // border_color; float vertex data never uses this format.
+            return VK_FORMAT_B8G8R8A8_UNORM;
         case PixelFormat::R16G16B16A16_FLOAT:
             return VK_FORMAT_R16G16B16A16_SFLOAT;
         case PixelFormat::R32G32B32A32_FLOAT:

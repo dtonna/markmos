@@ -15,6 +15,7 @@
 namespace ui {
 
 void Manager::handle(const InputState &input) noexcept {
+    rebuild_abs_cache();
     clicked = UINT16_MAX;
 
     // ── TextField editing input ────────────────────────────────
@@ -249,13 +250,74 @@ void Manager::handle(const InputState &input) noexcept {
 }
 
 void Manager::layout_children(uint16_t parent_id) noexcept {
-    uint8_t type = layout_type[parent_id];
-    uint8_t lpad = layout_pad[parent_id];
-    uint8_t gap  = layout_spacing[parent_id];
+    if (parent_id >= MAX) {
+        return;
+    }
+    if (layout_type[parent_id] == 1) {
+        layout_children_axis<0>(parent_id);
+    } else if (layout_type[parent_id] == 2) {
+        layout_children_axis<1>(parent_id);
+    }
+}
 
-    float   cx   = static_cast<float>(lpad);
-    float   cy   = static_cast<float>(lpad);
+// Flow-layout kernel, Axis 0 = horizontal (HBox), 1 = vertical (VBox).
+// Template so the axis choice folds at compile time (zero-cost vs branches).
+// Two passes: measure total extent, then place with alignment.
+// Legacy equivalence: with align=Start/Start, pct=0, margin=0 the output is
+// bit-identical to the old sequential pile-from-padding pass.
+template <uint8_t Axis> void Manager::layout_children_axis(uint16_t parent_id) noexcept {
+    auto &parent = pool[parent_id];
+    float lpad   = static_cast<float>(layout_pad[parent_id]);
+    float gap    = static_cast<float>(layout_spacing[parent_id]);
+    uint8_t pack = layout_align[parent_id];
+    uint8_t main_align  = pack & 0x3;
+    uint8_t cross_align = (pack >> 2) & 0x3;
+    if (main_align > 2) {
+        main_align = 0;
+    }
+    if (cross_align > 2) {
+        cross_align = 0;
+    }
 
+    float parent_main  = (Axis == 0) ? parent.w : parent.h;
+    float parent_cross = (Axis == 0) ? parent.h : parent.w;
+    float inner_main   = parent_main - 2.0f * lpad;
+    float inner_cross  = parent_cross - 2.0f * lpad;
+    if (inner_main < 0.0f) {
+        inner_main = 0.0f;
+    }
+    if (inner_cross < 0.0f) {
+        inner_cross = 0.0f;
+    }
+
+    auto main_size = [&](uint16_t id) noexcept -> float {
+        uint8_t pct = (Axis == 0) ? size_pct_w[id] : size_pct_h[id];
+        float   abs = (Axis == 0) ? pool[id].w : pool[id].h;
+        return (pct == 0) ? abs : inner_main * (static_cast<float>(pct) / 100.0f);
+    };
+    auto cross_size = [&](uint16_t id) noexcept -> float {
+        uint8_t pct = (Axis == 0) ? size_pct_h[id] : size_pct_w[id];
+        float   abs = (Axis == 0) ? pool[id].h : pool[id].w;
+        return (pct == 0) ? abs : inner_cross * (static_cast<float>(pct) / 100.0f);
+    };
+    // Margin indices: HBox main = left[3]/right[1], cross = top[0]/bottom[2];
+    // VBox swaps the roles.
+    auto m_before_main = [&](uint16_t id) noexcept -> float {
+        return static_cast<float>((Axis == 0) ? margin[id][3] : margin[id][0]);
+    };
+    auto m_after_main = [&](uint16_t id) noexcept -> float {
+        return static_cast<float>((Axis == 0) ? margin[id][1] : margin[id][2]);
+    };
+    auto m_before_cross = [&](uint16_t id) noexcept -> float {
+        return static_cast<float>((Axis == 0) ? margin[id][0] : margin[id][3]);
+    };
+    auto m_after_cross = [&](uint16_t id) noexcept -> float {
+        return static_cast<float>((Axis == 0) ? margin[id][2] : margin[id][1]);
+    };
+
+    // Pass 1: total main-axis extent.
+    float    total = 0.0f;
+    uint16_t n     = 0;
     for (uint16_t i = 0; i < count; ++i) {
         if (pool[i].parent != parent_id) {
             continue;
@@ -263,22 +325,70 @@ void Manager::layout_children(uint16_t parent_id) noexcept {
         if (!(pool[i].flags & WF_Visible)) {
             continue;
         }
+        total += m_before_main(i) + main_size(i) + m_after_main(i);
+        ++n;
+    }
+    if (n > 1) {
+        total += gap * static_cast<float>(n - 1);
+    }
 
+    // Pass 2: place with main-axis alignment (overflow falls back to Start).
+    float start = lpad;
+    if (main_align == 1) {
+        start += (inner_main - total) * 0.5f;
+    } else if (main_align == 2) {
+        start += inner_main - total;
+    }
+    if (start < lpad) {
+        start = lpad;
+    }
+    float cursor = start;
+    bool  first  = true;
+    for (uint16_t i = 0; i < count; ++i) {
+        if (pool[i].parent != parent_id) {
+            continue;
+        }
+        if (!(pool[i].flags & WF_Visible)) {
+            continue;
+        }
         auto &child = pool[i];
-
-        if (type == 1) { // HBox
-            child.x = cx;
-            child.y = static_cast<float>(lpad);
-            if (child.w > 0.0f) {
-                cx += child.w + gap;
+        if (!first) {
+            cursor += gap;
+        }
+        first = false;
+        cursor += m_before_main(i);
+        float c_main  = main_size(i);
+        float c_cross = cross_size(i);
+        float c_total_cross = m_before_cross(i) + c_cross + m_after_cross(i);
+        float cross_off = 0.0f;
+        if (cross_align == 1) {
+            cross_off = (inner_cross - c_total_cross) * 0.5f;
+        } else if (cross_align == 2) {
+            cross_off = inner_cross - c_total_cross;
+        }
+        if (cross_off < 0.0f) {
+            cross_off = 0.0f;
+        }
+        if constexpr (Axis == 0) {
+            child.x = cursor;
+            child.y = lpad + m_before_cross(i) + cross_off;
+            if (size_pct_w[i] != 0) {
+                child.w = c_main;
             }
-        } else if (type == 2) { // VBox
-            child.x = static_cast<float>(lpad);
-            child.y = cy;
-            if (child.h > 0.0f) {
-                cy += child.h + gap;
+            if (size_pct_h[i] != 0) {
+                child.h = c_cross;
+            }
+        } else {
+            child.y = cursor;
+            child.x = lpad + m_before_cross(i) + cross_off;
+            if (size_pct_h[i] != 0) {
+                child.h = c_main;
+            }
+            if (size_pct_w[i] != 0) {
+                child.w = c_cross;
             }
         }
+        cursor += c_main + m_after_main(i);
 
         if (layout_type[i] != 0) {
             layout_children(i);
@@ -286,8 +396,37 @@ void Manager::layout_children(uint16_t parent_id) noexcept {
     }
 }
 
+template void Manager::layout_children_axis<0>(uint16_t) noexcept;
+template void Manager::layout_children_axis<1>(uint16_t) noexcept;
+
+// Layout a subtree: containers get laid out (recursing into nested ones),
+// plain widgets only forward the search to their children. This fixes
+// containers nested under non-layout parents (previously never laid out);
+// root-level containers behave exactly as before.
+void Manager::layout_subtree(uint16_t id) noexcept {
+    if (id >= MAX) {
+        return;
+    }
+    if (!(pool[id].flags & WF_Visible)) {
+        return;
+    }
+    if (layout_type[id] != 0) {
+        layout_children(id);
+        return;
+    }
+    for (uint16_t i = 0; i < count; ++i) {
+        if (pool[i].parent == id) {
+            layout_subtree(i);
+        }
+    }
+}
+
 void Manager::layout(Renderer &r) noexcept {
-    measure(r);
+    if (measure_dirty) {
+        measure(r);
+        measure_dirty = false;
+    }
+    abs_cache_dirty = true;
     for (uint16_t i = 0; i < count; ++i) {
         if (pool[i].parent != UINT16_MAX) {
             continue;
@@ -295,10 +434,7 @@ void Manager::layout(Renderer &r) noexcept {
         if (!(pool[i].flags & WF_Visible)) {
             continue;
         }
-        if (layout_type[i] == 0) {
-            continue;
-        }
-        layout_children(i);
+        layout_subtree(i);
     }
 }
 
@@ -317,11 +453,52 @@ static void draw_line(SpriteBatch &batch, float x1, float y1, float x2, float y2
 }
 
 void Manager::render(Renderer &r, SpriteBatch &batch, float dt) noexcept {
-    measure(r);
+    rebuild_abs_cache();
+
+    if (measure_dirty) {
+        measure(r);
+        measure_dirty = false;
+    }
     batch.reset();
 
-    uint16_t        fw          = static_cast<uint16_t>(r.width);
-    uint16_t        fh          = static_cast<uint16_t>(r.height);
+    uint16_t fw = static_cast<uint16_t>(r.width);
+    uint16_t fh = static_cast<uint16_t>(r.height);
+
+    // ── Animation update ─────────────────────────────────────────
+    {
+        const float anim_speed = 10.0f;
+        float t_lerp = 1.0f - std::exp(-anim_speed * dt);
+        for (uint16_t i = 0; i < count; ++i) {
+            auto &w = pool[i];
+            if (!(w.flags & WF_Visible)) continue;
+            if (w.type == (uint8_t)WidgetType::Button ||
+                w.type == (uint8_t)WidgetType::Toggle ||
+                w.type == (uint8_t)WidgetType::Checkbox) {
+                if (!(w.flags & WF_Enabled)) {
+                    w.press_scale_target = 1.0f;
+                } else if (w.state == (uint8_t)BtnState::Pressed) {
+                    w.press_scale_target = 0.85f;
+                } else {
+                    w.press_scale_target = 1.0f;
+                }
+                w.press_scale += (w.press_scale_target - w.press_scale) * t_lerp;
+                if (w.type == (uint8_t)WidgetType::Toggle) {
+                    float target = w.state ? 1.0f : 0.0f;
+                    w.thumb_pos += (target - w.thumb_pos) * t_lerp;
+                }
+                if (w.type == (uint8_t)WidgetType::Button) {
+                    float target = ((w.flags & WF_Enabled) && w.state == (uint8_t)BtnState::Hover) ? 1.0f : 0.0f;
+                    w.hover_factor += (target - w.hover_factor) * t_lerp;
+                }
+            } else {
+                w.press_scale = 1.0f;
+            }
+            if (w.type == (uint8_t)WidgetType::Panel && w.anim_t < 1.0f) {
+                w.anim_t += dt * anim_speed;
+                if (w.anim_t > 1.0f) w.anim_t = 1.0f;
+            }
+        }
+    }
 
     // ── Pass 1: background rectangles ───────────────────────────
     // Flush per material-group for widgets with custom shader overrides
@@ -339,9 +516,12 @@ void Manager::render(Renderer &r, SpriteBatch &batch, float dt) noexcept {
         if (w.type == (uint8_t)WidgetType::Label) {
             continue;
         }
+        if (w.type == (uint8_t)WidgetType::Checkbox) {
+            continue; // drawn in pass 1.75 (rounded shader)
+        }
 
-        float           ax  = abs_x(i);
-        float           ay  = abs_y(i);
+        float ax = abs_x(i);
+        float ay = abs_y(i);
 
         // Resolve per-widget material override
         const Material *mat = widget_material[i].pipeline.is_valid() ? &widget_material[i] : nullptr;
@@ -376,18 +556,49 @@ void Manager::render(Renderer &r, SpriteBatch &batch, float dt) noexcept {
                 color = ui_darken(color, 80);
             } else if (w.state == (uint8_t)BtnState::Pressed) {
                 color = ui_darken(color, 50);
-            } else if (w.state == (uint8_t)BtnState::Hover) {
-                color = ui_lighten(color, 30);
+            } else {
+                color = ui_lerp_color(color, ui_lighten(color, 30), w.hover_factor);
             }
         }
+
+        // Panel fade-in: modulate alpha by anim_t
+        if (w.type == (uint8_t)WidgetType::Panel && w.anim_t < 1.0f) {
+            mm_math::color pc = mm_math::color::from_u32_argb(color); // 0xAARRGGBB
+            color = pc.with_alpha(pc.a * w.anim_t).to_u32_argb();
+        }
+
+        // Look up style for shape/radius/border
+        const WidgetStyle &sty = styles[w.style_id];
+        ShapeType eff_shape = static_cast<ShapeType>(w.shape);
+        if (eff_shape == ShapeType::Default) {
+            eff_shape = sty.shape;
+        }
+        if (eff_shape == ShapeType::Custom) {
+            if (has_batch) {
+                if (current_mat) {
+                    r.flush_sprites(batch, *current_mat);
+                } else {
+                    r.flush_sprites(batch, r.white_tex, r.default_sampler);
+                }
+                batch.reset();
+                has_batch  = false;
+                current_mat = nullptr;
+            }
+            continue;
+        }
+
+        float    ps     = w.press_scale;
+        float    radius = sty.corner_r;
+        float    bw     = sty.border_width;
+        uint32_t bcol   = sty.border_color;
 
         // Toggle draws a track half the height, not a full rect
         if (w.type == (uint8_t)WidgetType::Toggle) {
             float track_h = w.h * 0.5f;
             float track_y = ay + (w.h - track_h) * 0.5f;
-            batch.add(ax + w.w * 0.5f, track_y + track_h * 0.5f, w.w, track_h, 0.0f, color, 0);
+            batch.add(ax + w.w * 0.5f, track_y + track_h * 0.5f, w.w * ps, track_h * ps, 0.0f, color, 0, 0, radius, bw, bcol);
         } else {
-            batch.add(ax + w.w * 0.5f, ay + w.h * 0.5f, w.w, w.h, 0.0f, color, 0);
+            batch.add(ax + w.w * 0.5f, ay + w.h * 0.5f, w.w * ps, w.h * ps, 0.0f, color, 0, 0, radius, bw, bcol);
         }
 
         has_batch = true;
@@ -441,7 +652,33 @@ void Manager::render(Renderer &r, SpriteBatch &batch, float dt) noexcept {
     r.set_scissor(0, 0, fw, fh);
     batch.reset();
 
-    // ── Pass 2: toggles, sliders, checkboxes, cursor, callbacks ──
+    // ── Pass 1.75: checkbox rounded rects (batched, single flush) ──
+    {
+        bool has_rounded = false;
+        for (uint16_t i = 0; i < count; ++i) {
+            auto &w = pool[i];
+            if (!(w.flags & WF_Visible)) continue;
+            if (w.type != (uint8_t)WidgetType::Checkbox) continue;
+
+            float ax = abs_x(i);
+            float ay = abs_y(i);
+            float ps = w.press_scale;
+            float s  = 28.0f * ps;
+            float norm_radius = 4.0f / 28.0f;
+            float norm_border = 2.0f / 28.0f;
+            uint32_t fill_col  = w.state ? on_color[i] : off_color[i];
+            uint32_t border_col = w.state ? ui_lighten(on_color[i], 20) : theme.checkbox_border;
+
+            batch.add(ax + 28.0f * 0.5f, ay + 28.0f * 0.5f, s, s, 0.0f, fill_col, 0, 0, norm_radius, norm_border, border_col);
+            has_rounded = true;
+        }
+        if (has_rounded) {
+            r.flush_rounded_sprites(batch);
+            batch.reset();
+        }
+    }
+
+    // ── Pass 2: toggles, sliders, checkmarks, cursor, callbacks ──
     float cursor_blink  = std::fmod(cursor_timer, 0.5f) < 0.25f ? 1.0f : 0.0f;
     cursor_timer       += dt;
 
@@ -465,10 +702,12 @@ void Manager::render(Renderer &r, SpriteBatch &batch, float dt) noexcept {
         if (w.type == (uint8_t)WidgetType::Toggle) {
             float    track_h     = w.h * 0.5f;
             float    track_y     = ay + (w.h - track_h) * 0.5f;
-            float    thumb_size  = track_h * 0.75f;
-            float    margin      = (track_h - thumb_size) * 0.5f;
-            float    thumb_lx    = w.state ? ax + w.w - thumb_size - margin : ax + margin;
-            float    thumb_ly    = track_y + margin;
+            float    ps          = w.press_scale;
+            float    base_thumb  = track_h * 0.75f;
+            float    thumb_size  = base_thumb * ps;
+            float    track_margin = (track_h - base_thumb) * 0.5f;
+            float    thumb_lx    = ax + track_margin + (w.w - thumb_size - 2.0f * track_margin) * w.thumb_pos;
+            float    thumb_ly    = track_y + track_margin;
             uint32_t thumb_color = (i == focus_id || i == hot) ? theme.toggle_thumb_hot : theme.toggle_thumb;
             if (!(w.flags & WF_Enabled)) {
                 thumb_color = ui_darken(thumb_color, 80);
@@ -499,45 +738,42 @@ void Manager::render(Renderer &r, SpriteBatch &batch, float dt) noexcept {
             batch.add(thumb_lx + thumb_w * 0.5f, thumb_cy, thumb_w, thumb_h, 0.0f, thumb_color, 0);
         }
 
-        // ── Checkbox box + checkmark ─────────────────────────────
-        if (w.type == (uint8_t)WidgetType::Checkbox) {
-            float    s           = 28.0f;
-            float    bx          = ax;
-            float    by          = ay;
-            uint32_t check_color = w.state ? on_color[i] : off_color[i];
-            uint32_t border_col  = w.state ? ui_lighten(on_color[i], 20) : theme.checkbox_border;
-
-            // Border (4 thin quads)
-            float    bw          = 2.0f;
-            batch.add(bx + s * 0.5f, by + bw * 0.5f, s, bw, 0.0f, border_col, 0);
-            batch.add(bx + s * 0.5f, by + s - bw * 0.5f, s, bw, 0.0f, border_col, 0);
-            batch.add(bx + bw * 0.5f, by + (s - bw * 2.0f) * 0.5f + bw, bw, s - bw * 2.0f, 0.0f, border_col, 0);
-            batch.add(bx + s - bw * 0.5f, by + (s - bw * 2.0f) * 0.5f + bw, bw, s - bw * 2.0f, 0.0f, border_col, 0);
-
-            if (w.state) {
-                float inner_s = s - 4.0f;
-                batch.add(bx + 2.0f + inner_s * 0.5f, by + 2.0f + inner_s * 0.5f, inner_s, inner_s, 0.0f, check_color, 0);
-                // Check mark ✓
-                float x1 = bx + 6.0f, y1 = by + 16.0f;
-                float x2 = bx + 11.0f, y2 = by + 22.0f;
-                float x3 = bx + 23.0f, y3 = by + 7.0f;
-                draw_line(batch, x1, y1, x2, y2, 2.5f, theme.checkbox_check);
-                draw_line(batch, x2, y2, x3, y3, 2.5f, theme.checkbox_check);
-            }
+        // ── Checkmark (box already drawn in pass 1.75) ───────────
+        if (w.type == (uint8_t)WidgetType::Checkbox && w.state) {
+            float ps      = w.press_scale;
+            float ccx     = ax + 14.0f;
+            float ccy     = ay + 14.0f;
+            float x1 = ccx + (-8.0f) * ps, y1 = ccy + 2.0f  * ps;
+            float x2 = ccx + (-3.0f) * ps, y2 = ccy + 8.0f  * ps;
+            float x3 = ccx + 9.0f  * ps, y3 = ccy + (-7.0f) * ps;
+            draw_line(batch, x1, y1, x2, y2, 2.5f * ps, theme.checkbox_check);
+            draw_line(batch, x2, y2, x3, y3, 2.5f * ps, theme.checkbox_check);
         }
 
         // ── TextField cursor ─────────────────────────────────────
         if (w.type == (uint8_t)WidgetType::TextField && editing_id == i && cursor_blink > 0.0f) {
-            float text_scale = w.scale;
-            float char_width = 12.0f * text_scale;
-            float cursor_x   = ax + static_cast<float>(pad[i][3]) + 8.0f + static_cast<float>(cursor_pos[i]) * char_width;
+            float    cursor_x = ax + static_cast<float>(pad[i][3]) + 8.0f;
+            uint32_t len      = static_cast<uint32_t>(std::strlen(w.text));
+            Utf8Decoder dec(w.text, len);
+            uint8_t  pos = 0;
+            while (pos < cursor_pos[i]) {
+                uint32_t cp = dec.next();
+                if (cp == 0) break;
+                auto *g = r.default_font.get_glyph(cp);
+                if (g) cursor_x += static_cast<float>(g->advance) * w.scale;
+                ++pos;
+            }
             float cursor_y   = ay + static_cast<float>(pad[i][0]) + 6.0f;
-            float cursor_h   = 20.0f * text_scale;
+            float cursor_h   = 20.0f * w.scale;
             batch.add(cursor_x + 1.0f, cursor_y + cursor_h * 0.5f, 2.0f, cursor_h, 0.0f, theme.cursor, 0);
         }
 
         // ── Custom draw callbacks ────────────────────────────────
         if (w.on_draw) {
+            if (batch.count > 0) {
+                r.flush_sprites(batch, r.white_tex, r.default_sampler);
+                batch.reset();
+            }
             w.on_draw(i, r, batch, ax, ay, dt);
         }
 
@@ -549,7 +785,9 @@ void Manager::render(Renderer &r, SpriteBatch &batch, float dt) noexcept {
         if (focus_id == i && (w.flags & WF_Focusable)) {
             float    focus_w = w.w > 0 ? w.w : 100.0f;
             float    focus_h = w.h > 0 ? w.h : 30.0f;
-            uint32_t fc      = theme.focus_color;
+            float pulse = 0.6f + 0.4f * std::sin(cursor_timer * 6.0f);
+            uint32_t fc = (theme.focus_color & 0x00FFFFFF) |
+                          (static_cast<uint32_t>(pulse * 255.0f) << 24);
             float    fw4     = focus_w + 4.0f;
             batch.add(ax - 2.0f + fw4 * 0.5f, ay - 1.0f, fw4, 2.0f, 0.0f, fc, 0);
             batch.add(ax - 2.0f + fw4 * 0.5f, ay + focus_h + 1.0f, fw4, 2.0f, 0.0f, fc, 0);
@@ -588,7 +826,8 @@ void Manager::render(Renderer &r, SpriteBatch &batch, float dt) noexcept {
 
         int16_t  cx, cy;
         uint16_t cw, ch;
-        if (get_clip(i, cx, cy, cw, ch)) {
+        bool     clipped = get_clip(i, cx, cy, cw, ch);
+        if (clipped) {
             r.set_scissor(cx, cy, cw, ch);
         }
 
@@ -608,13 +847,16 @@ void Manager::render(Renderer &r, SpriteBatch &batch, float dt) noexcept {
             }
             r.draw_text(r.default_font, w.text, txt_x, txt_y, tc, txt_sc);
         } else if (w.type == (uint8_t)WidgetType::Toggle) {
+            // Label goes right of the track (same pattern as the slider % label).
+            // (Was missing: txt_x stayed 0.0 and every toggle label piled at the window edge.)
+            txt_x  = ax + w.w + pad_r + 8.0f;
             txt_y  = ay + pad_t + (w.h - pad_t - pad_b + 2.0f * a - hc) * 0.5f;
             txt_sc = w.scale;
             r.draw_text(r.default_font, w.text, txt_x, txt_y, w.text_color, txt_sc);
         } else if (w.type == (uint8_t)WidgetType::Checkbox) {
             txt_x  = ax + pad_l + 34.0f;
             txt_y  = ay + pad_t + (w.h - pad_t - pad_b + 2.0f * a - hc) * 0.5f;
-            txt_sc = 1.0f;
+            txt_sc = w.scale;
             r.draw_text(r.default_font, w.text, txt_x, txt_y, w.text_color, txt_sc);
         } else if (w.type == (uint8_t)WidgetType::TextField) {
             txt_x  = ax + pad_l + 8.0f;
@@ -651,7 +893,7 @@ void Manager::render(Renderer &r, SpriteBatch &batch, float dt) noexcept {
             }
             r.draw_text(r.default_font, w.text, txt_x, txt_y, w.text_color, txt_sc);
         }
-        r.set_scissor(0, 0, fw, fh);
+        if (clipped) r.set_scissor(0, 0, fw, fh);
     }
 
     if (batch.count > 0) {
@@ -778,7 +1020,8 @@ Theme Theme::load(const char *path) noexcept {
         }
     };
 
-    // ── Colors ──────────────────────────────────────────────────
+    // ── Colors (format: 0xAARRGGBB) ──
+    // JSON example: "FF3A3A3A" = alpha=0xFF, red=0x3A, green=0x3A, blue=0x3A
     set("panel_bg", t.panel_bg);
     set("button_bg", t.button_bg);
     set("button_text", t.button_text);

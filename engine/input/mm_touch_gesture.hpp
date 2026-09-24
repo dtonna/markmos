@@ -132,12 +132,25 @@ struct TouchTracker {
         fingers[slot].type  = GestureType::None;
     }
 
-    // Update durations — call once per frame
+    // Update durations — call once per frame.
+    // Also re-evaluate drag: a finger that moved to the drag threshold
+    // in one frame (before tap_max_time elapsed) and then stopped needs
+    // to be reclassified once enough time passes.
     void update(float dt) noexcept {
         for (uint8_t i = 0; i < active_count; ++i) {
             if (fingers[i].phase == TouchPhase::Pressing ||
                 fingers[i].phase == TouchPhase::Moved) {
                 fingers[i].duration += dt;
+            }
+            if (fingers[i].phase == TouchPhase::Pressing &&
+                fingers[i].type == GestureType::None) {
+                float dx   = fingers[i].curr_x - fingers[i].start_x;
+                float dy   = fingers[i].curr_y - fingers[i].start_y;
+                float dist = std::sqrt(dx * dx + dy * dy);
+                if (dist >= drag_min_dist && fingers[i].duration >= tap_max_time) {
+                    fingers[i].type  = GestureType::Drag;
+                    fingers[i].phase = TouchPhase::Moved;
+                }
             }
         }
     }
