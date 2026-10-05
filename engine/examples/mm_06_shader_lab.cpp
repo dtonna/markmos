@@ -2818,6 +2818,46 @@ void game_cleanup(void *) {
 
 } // namespace
 
-AppCallbacks markmos_main(int, char **) {
+AppCallbacks markmos_main(int argc, char **argv) {
+    if (argc > 1 && argv && argv[1]) {
+        const char *arg = argv[1];
+        if (arg[0] == 'd' && arg[1] >= '1' && arg[1] <= '9' && arg[2] == '\0') {
+            g_mode = static_cast<LabMode>(arg[1] - '1');
+        } else if (arg[0] == 's') {
+            g_mode = LabMode::Sprite;
+        } else if (arg[0] == 'g' && arg[1] == 'r') {
+            g_mode = LabMode::Grayscale;
+        } else if (arg[0] == 'o') {
+            g_mode = LabMode::Outline;
+        } else if (arg[0] == 'c') {
+            g_mode = LabMode::ColorGrade;
+        } else if (arg[0] == 'l') {
+            g_mode = LabMode::LabFile;
+        } else if (arg[0] == 'n' && arg[1] == 'd') {
+            g_mode = LabMode::NormalDerive;
+        } else if (arg[0] == 'n' && arg[1] == 'p') {
+            g_mode = LabMode::NormalProc;
+        } else if (arg[0] == 'p' && arg[1] == 'n') {
+            g_mode = LabMode::NormalPng;
+        } else if (arg[0] == 'c' && arg[1] == 'a') {
+            g_mode = LabMode::CardNormal;
+        } else if (arg[0] == 'c' && arg[1] == 't') {
+            g_mode = LabMode::CardCartoon;
+        } else if (arg[0] == 'p' && arg[1] == 'l') {
+            g_mode = LabMode::CardPlastic;
+        } else if (arg[0] == 'g' && arg[1] == 'l') {
+            g_mode = LabMode::CardGlow;
+        } else if (arg[0] == 'g' && arg[1] == 'o') {
+            g_mode = LabMode::CardGold;
+        } else if (arg[0] == 's' && arg[1] == 't') {
+            g_mode = LabMode::CardStay;
+        } else if (arg[0] == 's' && arg[1] == 'u') {
+            g_mode = LabMode::CardSun;
+        } else if (arg[0] == 'a' && arg[1] == 'u') {
+            g_mode = LabMode::CardAura;
+        } else if (arg[0] == 'f') {
+            g_mode = LabMode::Firework;
+        }
+    }
     return {.user_data = nullptr, .init = game_init, .frame = game_frame, .resize = game_resize, .cleanup = game_cleanup};
 }
