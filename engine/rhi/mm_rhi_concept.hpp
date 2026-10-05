@@ -3,6 +3,7 @@
 
 #pragma once
 #include "../core/mm_expected.hpp"
+#include "core/mm_types.h"
 #include "../core/mm_handle.hpp"
 #include <concepts>
 #include <cstddef>
@@ -13,13 +14,13 @@
 // @zero_virtual Concept-based compile-time interface — no vtable, no inheritance
 // @fallback Expected-like return via Expected<T,E> fallback when std::expected unavailable
 
-enum class ShaderStage : uint8_t { Vertex, Fragment, Compute };
+enum class ShaderStage : u8 { Vertex, Fragment, Compute };
 
-enum class BufferType : uint8_t { Vertex, Index, Uniform, Storage, Indirect, Staging };
+enum class BufferType : u8 { Vertex, Index, Uniform, Storage, Indirect, Staging };
 
-enum class TextureType : uint8_t { Tex2D, Tex2DArray, CubeMap };
+enum class TextureType : u8 { Tex2D, Tex2DArray, CubeMap };
 
-enum class PixelFormat : uint8_t {
+enum class PixelFormat : u8 {
     R8_UNORM,
     R8G8B8A8_UNORM,
     R8G8B8A8_SRGB,
@@ -40,46 +41,46 @@ enum class PixelFormat : uint8_t {
     ETC2_RGBA8
 };
 
-enum class PrimitiveType : uint8_t { Triangle, TriangleStrip, Line, Point };
+enum class PrimitiveType : u8 { Triangle, TriangleStrip, Line, Point };
 
-enum class IndexType : uint8_t { Uint16, Uint32 };
+enum class IndexType : u8 { Uint16, Uint32 };
 
-enum class SamplerFilter : uint8_t { Nearest, Linear };
+enum class SamplerFilter : u8 { Nearest, Linear };
 
-enum class SamplerAddress : uint8_t { Repeat, ClampToEdge, MirroredRepeat };
+enum class SamplerAddress : u8 { Repeat, ClampToEdge, MirroredRepeat };
 
-enum class LoadOp : uint8_t { Load, Clear, DontCare };
-enum class StoreOp : uint8_t { Store, DontCare };
+enum class LoadOp : u8 { Load, Clear, DontCare };
+enum class StoreOp : u8 { Store, DontCare };
 
-enum class BlendFactor : uint8_t { Zero, One, SrcAlpha, OneMinusSrcAlpha, DstAlpha, OneMinusDstAlpha, SrcColor, OneMinusSrcColor };
+enum class BlendFactor : u8 { Zero, One, SrcAlpha, OneMinusSrcAlpha, DstAlpha, OneMinusDstAlpha, SrcColor, OneMinusSrcColor };
 
-enum class BlendOp : uint8_t { Add, Subtract, ReverseSubtract, Min, Max };
+enum class BlendOp : u8 { Add, Subtract, ReverseSubtract, Min, Max };
 
-enum class CompareOp : uint8_t { Never, Less, Equal, LessEqual, Greater, NotEqual, GreaterEqual, Always };
+enum class CompareOp : u8 { Never, Less, Equal, LessEqual, Greater, NotEqual, GreaterEqual, Always };
 
-enum class CullMode : uint8_t { None, Front, Back };
+enum class CullMode : u8 { None, Front, Back };
 
 // Descriptors — flat structs, no inheritance
 struct BufferDesc {
     BufferType type;
-    uint32_t   size;
-    uint32_t   stride;
+    u32   size;
+    u32   stride;
     bool       cpu_visible;
 };
 
 struct TextureDesc {
     TextureType type;
     PixelFormat format;
-    uint16_t    width, height, depth;
-    uint16_t    mip_levels;
-    uint8_t     array_layers;
+    u16    width, height, depth;
+    u16    mip_levels;
+    u8     array_layers;
 };
 
 struct SamplerDesc {
     SamplerFilter  min_filter, mag_filter, mip_filter;
     SamplerAddress address_u, address_v, address_w;
     CompareOp      compare;
-    float          max_anisotropy;
+    f32          max_anisotropy;
 };
 
 struct ShaderDesc {
@@ -89,59 +90,59 @@ struct ShaderDesc {
     const char *entry;
 };
 
-enum class DescriptorType : uint8_t { UniformBuffer, CombinedImageSampler, StorageBuffer };
+enum class DescriptorType : u8 { UniformBuffer, CombinedImageSampler, StorageBuffer };
 
 struct DescriptorBinding {
-    uint32_t       binding;
+    u32       binding;
     DescriptorType type;
-    uint32_t       stage_mask; // bit 0=vertex, 1=fragment, 2=compute
-    uint32_t       count;
+    u32       stage_mask; // bit 0=vertex, 1=fragment, 2=compute
+    u32       count;
 };
 
 struct VertexAttribute {
-    uint32_t    location;
+    u32    location;
     PixelFormat format;
-    uint32_t    offset;
-    uint32_t    stride;
+    u32    offset;
+    u32    stride;
 };
 
 struct FunctionConstant {
-    uint32_t index;      // function constant index
-    bool     value;      // boolean value
+    u32 index; // function constant index
+    bool     value; // boolean value
 };
 
 struct PipelineDesc {
-    ShaderDesc         vertex_shader;
-    ShaderDesc         fragment_shader;
-    PrimitiveType      prim_type;
-    CullMode           cull_mode;
-    BlendFactor        src_blend, dst_blend;
-    BlendOp            blend_op;
-    bool               depth_test;
-    bool               depth_write;
-    CompareOp          depth_compare;
-    PixelFormat        color_formats[4];
-    uint8_t            color_count;
-    PixelFormat        depth_format;
-    VertexAttribute    vertex_attrs[16];
-    uint8_t            vertex_attr_count;
-    DescriptorBinding  descriptor_bindings[8];
-    uint8_t            descriptor_count;
-    bool               is_instance;
-    FunctionConstant   function_constants[4];
-    uint8_t            function_constant_count;
+    ShaderDesc        vertex_shader;
+    ShaderDesc        fragment_shader;
+    PrimitiveType     prim_type;
+    CullMode          cull_mode;
+    BlendFactor       src_blend, dst_blend;
+    BlendOp           blend_op;
+    bool              depth_test;
+    bool              depth_write;
+    CompareOp         depth_compare;
+    PixelFormat       color_formats[4];
+    u8           color_count;
+    PixelFormat       depth_format;
+    VertexAttribute   vertex_attrs[16];
+    u8           vertex_attr_count;
+    DescriptorBinding descriptor_bindings[8];
+    u8           descriptor_count;
+    bool              is_instance;
+    FunctionConstant  function_constants[4];
+    u8           function_constant_count;
 };
 
 struct PassDesc {
-    float   clear_color[4];
-    float   clear_depth;
-    uint8_t clear_stencil;
+    f32   clear_color[4];
+    f32   clear_depth;
+    u8 clear_stencil;
     LoadOp  color_load, depth_load;
     StoreOp color_store, depth_store;
 };
 
 // RHIError type — small, fits in register
-enum class RHIError : uint32_t {
+enum class RHIError : u32 {
     None = 0,
     OutOfMemory,
     InvalidHandle,
@@ -151,11 +152,18 @@ enum class RHIError : uint32_t {
     DeviceLost,
 };
 
+struct SurfaceInfo {
+    void    *native_handle = nullptr; // platform-specific surface handle (e.g. HWND, CAMetalLayer, ANativeWindow)
+    u32 width         = 0;
+    u32 height        = 0;
+    f32    content_scale = 1.0f; // e.g. 2.0 for Retina, 1.0 for standard
+};
+
 // RHI Backend Concept — per spec v4.6, uses ExpectedLike for return type checking
 // Destructor must be noexcept (may hold RAII resources), not necessarily trivially destructible
 template <typename T>
 concept RHI_Backend = requires(T t, const BufferDesc &bd, const TextureDesc &td, const SamplerDesc &sd, const PipelineDesc &pd, const PassDesc &pass,
-                               BufferHandle bh, TextureHandle th, PipelineHandle ph, SamplerHandle sh, const void *data, uint32_t offset) {
+                               BufferHandle bh, TextureHandle th, PipelineHandle ph, SamplerHandle sh, SurfaceInfo s, const void *data, u32 offset) {
     // Resource creation
     requires ExpectedLike<decltype(t.create_buffer(bd)), BufferHandle, RHIError>;
     requires ExpectedLike<decltype(t.create_texture(td)), TextureHandle, RHIError>;
@@ -167,6 +175,7 @@ concept RHI_Backend = requires(T t, const BufferDesc &bd, const TextureDesc &td,
     { t.destroy_texture(th) } -> std::same_as<void>;
     { t.destroy_sampler(sh) } -> std::same_as<void>;
     { t.destroy_pipeline(ph) } -> std::same_as<void>;
+    { t.resize(s) } -> std::same_as<Expected<void, RHIError>>;
 
     // Data upload
     requires ExpectedLike<decltype(t.update_buffer(bh, data, offset, offset)), void, RHIError>;

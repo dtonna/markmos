@@ -16,6 +16,7 @@
 #include "../audio/mm_audio_system.hpp"
 #include "../core/mm_log.hpp"
 #include "../core/mm_save_data.hpp"
+#include "../core/mm_types.h"
 #include "../core/mm_vfs.hpp"
 #include "../game/mm_camera_trauma.hpp"
 #include "../game/mm_particle_pool.hpp"
@@ -31,16 +32,38 @@
 #include <cstdio>
 #include <cstring>
 
+// Simple deterministic RNG (LCG, matches engine convention).
+static u32 g_rng = 12345u;
+static u32 rand_u32() noexcept {
+    g_rng = g_rng * 1664525u + 1013904223u;
+    return g_rng;
+}
+static f32 randf_range(f32 lo, f32 hi) noexcept {
+    return lo + (static_cast<f32>(rand_u32() >> 8) / 16777216.0f) * (hi - lo);
+}
+static i32 rand_range(i32 lo, i32 hi) noexcept {
+    return lo + static_cast<i32>(rand_u32() % static_cast<u32>(hi - lo + 1));
+}
+
+#if defined(TARGET_ANDROID) || (defined(__APPLE__) && TARGET_OS_IPHONE)
+#    define MM_MOBILE 1
+#else
+#    define MM_MOBILE 0
+#endif
+
+constexpr f32 HIT_PAD_LT = 15.0f;
+constexpr f32 HIT_PAD_RB = 10.0f;
+
 // ─────────────────────────────────────────────────────────────
 
-static constexpr uint16_t MAX_BLOCKS    = 256;
+static constexpr u16 MAX_BLOCKS    = 256;
 
-static constexpr float    GRAVITY       = 150.0f;
-static constexpr float    COMBO_TIMEOUT = 1.5f;
+static constexpr f32 GRAVITY       = 150.0f;
+static constexpr f32 COMBO_TIMEOUT = 1.5f;
 
 // ─────────────────────────────────────────────────────────────
 
-enum class GameState : uint8_t {
+enum class GameState : u8 {
     Playing,
     GameOver,
 };
@@ -49,14 +72,14 @@ enum class GameState : uint8_t {
 
 struct Block {
 
-    float    x, y;
-    float    w, h;
+    f32    x, y;
+    f32    w, h;
 
-    uint32_t color;
+    u32    color;
 
-    float    spawn_scale;
+    f32    spawn_scale;
 
-    bool     active;
+    bool   active;
 };
 
 static_assert(sizeof(Block) <= 32);
@@ -86,26 +109,26 @@ struct Game {
 
     Block         blocks[MAX_BLOCKS];
 
-    uint16_t      active_blocks = 0;
+    u16           active_blocks = 0;
 
-    uint64_t      frame_count   = 0;
+    u64           frame_count   = 0;
 
-    float         drop_timer    = 0.0f;
-    float         drop_interval = 0.8f;
+    f32           drop_timer    = 0.0f;
+    f32           drop_interval = 0.8f;
 
-    float         time          = 0.0f;
+    f32           time          = 0.0f;
 
-    float         combo_timer   = 0.0f;
+    f32           combo_timer   = 0.0f;
 
-    float         tap_cooldown  = 0.0f;
-    float         hit_cooldown  = 0.0f;
+    f32           tap_cooldown  = 0.0f;
+    f32           hit_cooldown  = 0.0f;
 
-    float         restart_timer = 0.0f;
+    f32           restart_timer = 0.0f;
 
-    uint32_t      score         = 0;
-    uint32_t      high_score    = 0;
+    u32           score         = 0;
+    u32           high_score    = 0;
 
-    int           combo         = 0;
+    i32           combo         = 0;
 
     bool          started       = false;
     bool          ui_built      = false;
@@ -115,29 +138,30 @@ struct Game {
 
     GameState     state         = GameState::Playing;
 
-    uint8_t       sfx_hit_id    = 0;
-    uint8_t       sfx_score_id  = 0;
-    uint8_t       sfx_tap_id    = 0;
+    u8            sfx_hit_id    = 0;
+    u8            sfx_score_id  = 0;
+
+    ui::Theme     theme;
 
     // HUD widget IDs (for live text updates)
-    uint16_t      hud_id_score  = UINT16_MAX;
-    uint16_t      hud_id_combo  = UINT16_MAX;
+    u16           hud_id_score  = UINT16_MAX;
+    u16           hud_id_combo  = UINT16_MAX;
 
     // deferred destroy list
-    uint16_t      destroy_queue[MAX_ENTITIES];
-    uint16_t      destroy_count = 0;
+    u16           destroy_queue[MAX_ENTITIES];
+    u16           destroy_count = 0;
 };
 
 static Game *g_game = nullptr;
 
 // ─────────────────────────────────────────────────────────────
 
-static void  play_sfx(uint8_t id, int priority, float base, float range) noexcept {
+static void play_sfx(u8 id, i32 priority, f32 base, f32 range) noexcept {
     if (g_game && !g_game->sound_on) return;
 
-    float pitch = base + static_cast<float>(std::rand() % static_cast<int>(range * 100.0f + 0.5f)) / 100.0f;
+    f32 pitch = randf_range(base, base + range);
 
-    g_audio_system.sfx.play_id(id, static_cast<uint8_t>(priority), pitch);
+    g_audio_system.sfx.play_id(id, static_cast<u8>(priority), pitch);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -182,7 +206,7 @@ static void reset_game() noexcept {
     g.camera.decay = 0.92f;
 
     g.ui.init();
-    g.ui.theme = ui::Theme::load("themes/test_theme.json");
+    g.ui.theme = g.theme;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -208,7 +232,7 @@ static Block *alloc_block() noexcept {
 
 // ─────────────────────────────────────────────────────────────
 
-static float get_game_scale() noexcept {
+static f32 get_game_scale() noexcept {
 #if defined(TARGET_ANDROID) || (defined(__APPLE__) && TARGET_OS_IPHONE)
     // On mobile, the coordinate system is already logical (DIPs).
     // We don't need to scale by content_scale again, but we might want
@@ -227,10 +251,10 @@ static void spawn_block() noexcept {
         return;
     }
 
-    float scale = get_game_scale();
-    float bw    = 60.0f * scale; // Slightly smaller base, but scaled for mobile
-    float max_x = static_cast<float>(g_game->renderer.width) - bw;
-    b->x        = max_x > bw ? static_cast<float>(std::rand() % static_cast<int>(max_x - bw + 1.0f) + (bw * 0.5f)) : (bw * 0.5f);
+    f32 scale = get_game_scale();
+    f32 bw    = 60.0f * scale; // Slightly smaller base, but scaled for mobile
+    f32 max_x = static_cast<f32>(g_game->renderer.width) - bw;
+    b->x        = max_x > bw ? static_cast<f32>(rand_range(static_cast<i32>(bw * 0.5f), static_cast<i32>(max_x))) : (bw * 0.5f);
     b->y        = -bw;
 
     b->w        = bw;
@@ -245,7 +269,7 @@ static void spawn_block() noexcept {
         color(1.0f, 1.0f, 0.267f),
     };
 
-    b->color       = colors[std::rand() % 4].to_u32_argb(); // 0xAARRGGBB engine literals
+    b->color       = colors[rand_range(0, 3)].to_u32_argb(); // 0xAARRGGBB engine literals
 
     b->spawn_scale = 0.0f;
 
@@ -294,8 +318,8 @@ static void hit_block(Block &b) noexcept {
 
     g.score       += g.combo;
 
-    float cx       = b.x + b.w * 0.5f;
-    float cy       = b.y + b.h * 0.5f;
+    f32 cx       = b.x + b.w * 0.5f;
+    f32 cy       = b.y + b.h * 0.5f;
 
     if (g.particles_on) {
         g.particles.spawn_burst(cx, cy, 10, 60, 160, 0.5f, b.color);
@@ -315,7 +339,7 @@ static void hit_block(Block &b) noexcept {
 
 // ─────────────────────────────────────────────────────────────
 
-static void update_blocks(float dt) noexcept {
+static void update_blocks(f32 dt) noexcept {
 
     auto &g       = *g_game;
 
@@ -332,8 +356,8 @@ static void update_blocks(float dt) noexcept {
         }
     }
 
-    float scale   = get_game_scale();
-    float gravity = GRAVITY * scale;
+    f32 scale   = get_game_scale();
+    f32 gravity = GRAVITY * scale;
 
 #if defined(TARGET_ANDROID) || (defined(__APPLE__) && TARGET_OS_IPHONE)
     gravity *= 1.5f; // Fall faster on mobile
@@ -347,7 +371,7 @@ static void update_blocks(float dt) noexcept {
 
         b.y += dt * gravity;
 
-        if (b.y > (float)g_game->renderer.height + (b.h * 1.5f)) {
+        if (b.y > (f32)g_game->renderer.height + (b.h * 1.5f)) {
 
             game_over();
 
@@ -358,14 +382,14 @@ static void update_blocks(float dt) noexcept {
 
 // ─────────────────────────────────────────────────────────────
 
-static void update_scene(float dt) noexcept {
+static void update_scene(f32 dt) noexcept {
 
     auto &g         = *g_game;
 
     g.destroy_count = 0;
 
-    g.scene.each([dt](uint16_t idx) {
-        float rs;
+    g.scene.each([dt](u16 idx) {
+        f32 rs;
 
         std::memcpy(&rs, &g_game->scene.user_data[idx], sizeof(rs));
 
@@ -379,7 +403,7 @@ static void update_scene(float dt) noexcept {
         }
     });
 
-    for (uint16_t i = 0; i < g.destroy_count; ++i) {
+    for (u16 i = 0; i < g.destroy_count; ++i) {
 
         g.scene.despawn_at(g.destroy_queue[i]);
     }
@@ -400,12 +424,12 @@ static void render_world() noexcept {
             continue;
         }
 
-        float sw = b.w * b.spawn_scale;
-        float sh = b.h * b.spawn_scale;
+        f32 sw = b.w * b.spawn_scale;
+        f32 sh = b.h * b.spawn_scale;
 
-        float sx = b.x + (b.w - sw) * 0.5f;
+        f32 sx = b.x + (b.w - sw) * 0.5f;
 
-        float sy = b.y + (b.h - sh) * 0.5f;
+        f32 sy = b.y + (b.h - sh) * 0.5f;
 
         g.batch.add(sx, sy, sw, sh, 0.0f, b.color, 0);
     }
@@ -414,9 +438,9 @@ static void render_world() noexcept {
 
     r.flush_particles(g.particles);
 
-    static uint64_t last_log_frame = 0;
+    static u64 last_log_frame = 0;
     if (g.frame_count > last_log_frame + 120) {
-        // MM_LOG("render_world: frame=%llu active_blocks=%u", (unsigned long long)g.frame_count, (uint32_t)g.active_blocks);
+        // MM_LOG("render_world: frame=%llu active_blocks=%u", (unsigned long long)g.frame_count, (u32)g.active_blocks);
         last_log_frame = g.frame_count;
     }
 }
@@ -424,29 +448,29 @@ static void render_world() noexcept {
 // ─────────────────────────────────────────────────────────────
 
 // ─── UI callbacks ──────────────────────────────────────────────────
-static void on_play_click(uint16_t) {
+static void on_play_click(u16, void *) {
     reset_game();
     g_game->started    = true;
     g_game->state      = GameState::Playing;
     g_game->drop_timer = 0.0f; // spawn first block immediately
 }
 
-static void on_toggle_sound(uint16_t id) {
+static void on_toggle_sound(u16 id, void *) {
     g_game->sound_on = g_game->ui.pool[id].state != 0;
     g_audio_system.sfx.set_master_volume(g_game->sound_on ? 1.0f : 0.0f);
     g_save_data.set_sound(g_game->sound_on);
     save_data_save(g_vfs);
 }
 
-static void on_checkbox_part(uint16_t id) {
+static void on_checkbox_part(u16 id, void *) {
     g_game->particles_on = g_game->ui.pool[id].state != 0;
     g_save_data.set_haptic(g_game->particles_on);
     save_data_save(g_vfs);
 }
 
-static void on_slider_volume(uint16_t, float val) { g_audio_system.sfx.set_master_volume(val); }
+static void on_slider_volume(u16, f32 val, void *) { g_audio_system.sfx.set_master_volume(val); }
 
-static void on_quit_click(uint16_t) {
+static void on_quit_click(u16, void *) {
     auto &g = *g_game;
     reset_game();
     g.ui.clear();
@@ -456,9 +480,9 @@ static void on_quit_click(uint16_t) {
     g.state     = GameState::Playing;
 }
 
-static void on_exit_click(uint16_t) { app_quit(); }
+static void on_exit_click(u16, void *) { app_quit(); }
 
-static void on_restart_click(uint16_t) {
+static void on_restart_click(u16, void *) {
     auto &g = *g_game;
     g_audio_system.sfx.stop_all();
     reset_game();
@@ -475,23 +499,23 @@ static void build_hud() noexcept {
     auto &m     = g.ui;
     auto &r     = g.renderer;
 
-    float cw    = static_cast<float>(r.width);
-    float scale = get_game_scale();
+    f32 cw    = static_cast<f32>(r.width);
+    f32 scale = get_game_scale();
 
     // Safety margin from top
 #if defined(TARGET_ANDROID) || (defined(__APPLE__) && TARGET_OS_IPHONE)
-    float safe_top = 80.0f * scale;
+    f32 safe_top = 80.0f * scale;
 #else
-    float safe_top = 20.0f;
+    f32 safe_top = 20.0f;
 #endif
 
-    float sc_scale = 0.9f * scale;
+    f32 sc_scale = 0.9f * scale;
     m.label(20.0f * scale, safe_top, "Score: 0", 0xFFFFFFFF, sc_scale);
     g.hud_id_score         = m.count - 1;
 
     // Combo centered
     const char *combo_text = "Combo x99"; // max width guess for init
-    float       tw_combo, th_combo;
+    f32       tw_combo, th_combo;
     r.measure_text(r.default_font, combo_text, 1.0f * scale, tw_combo, th_combo);
     m.label(cw * 0.5f - tw_combo * 0.5f, safe_top, "", 0xFF88FF88, 1.0f * scale);
     g.hud_id_combo = m.count - 1;
@@ -499,13 +523,13 @@ static void build_hud() noexcept {
     // High score (left of Quit)
     char buf[48];
     snprintf(buf, sizeof(buf), "Best: %u", g.high_score);
-    float tw_best, th_best;
-    float best_scale = 0.8f * scale;
+    f32 tw_best, th_best;
+    f32 best_scale = 0.8f * scale;
     r.measure_text(r.default_font, buf, best_scale, tw_best, th_best);
 
-    float btn_w = 45.0f * scale;
-    float btn_h = 28.0f * scale;
-    float btn_x = cw - btn_w - (15.0f * scale);
+    f32 btn_w = 45.0f * scale;
+    f32 btn_h = 28.0f * scale;
+    f32 btn_x = cw - btn_w - (15.0f * scale);
 
     m.label(btn_x - tw_best - (10.0f * scale), safe_top + (2.0f * scale), buf, 0xFFAAAAAA, best_scale);
     m.button(btn_x, safe_top - (2.0f * scale), btn_w, btn_h, "Quit", 0x55333333, 0xFFCCCCCC, on_quit_click);
@@ -517,42 +541,42 @@ static void build_game_over() noexcept {
     auto &m  = g.ui;
     auto &r  = g.renderer;
 
-    float cw = static_cast<float>(r.width);
-    float ch = static_cast<float>(r.height);
-    float cx = cw * 0.5f;
-    float cy = ch * 0.5f;
+    f32 cw = static_cast<f32>(r.width);
+    f32 ch = static_cast<f32>(r.height);
+    f32 cx = cw * 0.5f;
+    f32 cy = ch * 0.5f;
 
 #if defined(TARGET_ANDROID) || (defined(__APPLE__) && TARGET_OS_IPHONE)
-    float       scale     = 1.1f;
-    float       gap       = 65.0f * scale;
+    f32       scale     = 1.1f;
+    f32       gap       = 65.0f * scale;
 
     const char *title     = "Game Over!";
-    float       fsc_title = 1.2f * scale;
-    float       tw_title, th_title;
+    f32       fsc_title = 1.2f * scale;
+    f32       tw_title, th_title;
     r.measure_text(r.default_font, title, fsc_title, tw_title, th_title);
     m.label(cx - tw_title * 0.5f, cy - 80.0f * scale, title, 0xFFFF4444, fsc_title);
 
     char buf[64];
     snprintf(buf, sizeof(buf), "Score: %u  |  Best: %u", g.score, g.high_score);
-    float fsc_score = 0.9f * scale;
-    float tw_score, th_score;
+    f32 fsc_score = 0.9f * scale;
+    f32 tw_score, th_score;
     r.measure_text(r.default_font, buf, fsc_score, tw_score, th_score);
     m.label(cx - tw_score * 0.5f, cy - 10.0f, buf, 0xFFFFFFFF, fsc_score);
 
     // Measure and build buttons with dynamic width
-    float       btn_h       = 55.0f * scale;
-    float       pad         = 40.0f * scale;
+    f32       btn_h       = 55.0f * scale;
+    f32       pad         = 40.0f * scale;
 
     const char *restart_txt = "Restart";
-    float       tw_res, th_res;
+    f32       tw_res, th_res;
     r.measure_text(r.default_font, restart_txt, 1.0f, tw_res, th_res);
-    float bw_res = tw_res + pad;
+    f32 bw_res = tw_res + pad;
     m.button(cx - bw_res * 0.5f, cy + 50.0f, bw_res, btn_h, restart_txt, 0xFF4488FF, 0xFFFFFFFF, on_restart_click);
 
     const char *menu_txt = "Main Menu";
-    float       tw_menu, th_menu;
+    f32       tw_menu, th_menu;
     r.measure_text(r.default_font, menu_txt, 1.0f, tw_menu, th_menu);
-    float bw_menu = tw_menu + pad;
+    f32 bw_menu = tw_menu + pad;
     m.button(cx - bw_menu * 0.5f, cy + 50.0f + gap, bw_menu, btn_h, menu_txt, 0xFF554466, 0xFFFFFFFF, on_quit_click);
 #else
     m.label(cx - 80.0f, cy - 60.0f, "Game Over!", 0xFFFF4444, 2.0f);
@@ -570,24 +594,24 @@ static void build_ui_demo() noexcept {
     auto &m  = g.ui;
     auto &r  = g.renderer;
 
-    float cw = static_cast<float>(r.width);
-    float ch = static_cast<float>(r.height);
-    float cx = cw * 0.5f;
-    float cy = ch * 0.15f;
+    f32 cw = static_cast<f32>(r.width);
+    f32 ch = static_cast<f32>(r.height);
+    f32 cx = cw * 0.5f;
+    f32 cy = ch * 0.15f;
 
 #if defined(TARGET_ANDROID) || (defined(__APPLE__) && TARGET_OS_IPHONE)
-    float       scale     = 1.1f;
-    float       gap       = 65.0f * scale;
+    f32       scale     = 1.1f;
+    f32       gap       = 65.0f * scale;
 
     const char *title     = "Markmos Mobile";
-    float       fsc_title = 0.95f * scale;
-    float       tw_title, th_title;
+    f32       fsc_title = 0.95f * scale;
+    f32       tw_title, th_title;
     r.measure_text(r.default_font, title, fsc_title, tw_title, th_title);
     m.label(cx - tw_title * 0.5f, cy, title, 0xFFFFAAFF, fsc_title);
 
     cy                    += gap;
     const char *thai_test  = "ภาษาไทยสู้มื้อ";
-    float       tw_thai, th_thai;
+    f32       tw_thai, th_thai;
     r.measure_text(r.default_font, thai_test, 1.0f, tw_thai, th_thai);
     m.label(cx - tw_thai * 0.5f, cy + 20.0f, thai_test, 0xFF88FF88, 1.0f);
 
@@ -616,7 +640,28 @@ static void build_ui_demo() noexcept {
     m.layout(r);
 }
 
-static void game_frame(void *, float dt, InputState &input) {
+// ─── Hit test helper ──────────────────────────────────────────────
+static bool try_hit_block(f32 world_x, f32 world_y) noexcept {
+    for (i32 bi = MAX_BLOCKS - 1; bi >= 0; --bi) {
+        auto &b = g_game->blocks[bi];
+        if (!b.active) {
+            continue;
+        }
+        f32 half_w = b.w * 0.5f;
+        f32 half_h = b.h * 0.5f;
+        if (world_x + HIT_PAD_LT >= b.x - half_w && world_x - HIT_PAD_RB <= b.x + half_w &&
+            world_y + HIT_PAD_LT >= b.y - half_h && world_y - HIT_PAD_RB <= b.y + half_h) {
+#ifndef NDEBUG
+            fprintf(stderr, "[hit] block at (%.0f,%.0f)\n", b.x, b.y);
+#endif
+            hit_block(b);
+            return true;
+        }
+    }
+    return false;
+}
+
+static void game_frame(void * /*user_data*/, f32 dt, InputState &input) {
 
     auto &g  = *g_game;
 
@@ -626,9 +671,9 @@ static void game_frame(void *, float dt, InputState &input) {
     g.tap_cooldown  -= dt;
     g.hit_cooldown  -= dt;
 
-    float cam_x      = 0.0f;
-    float cam_y      = 0.0f;
-    float cam_angle  = 0.0f;
+    f32 cam_x      = 0.0f;
+    f32 cam_y      = 0.0f;
+    f32 cam_angle  = 0.0f;
     if (g.combo_timer > 0.0f) {
         g.combo_timer -= dt;
         if (g.combo_timer <= 0.0f) {
@@ -668,13 +713,14 @@ static void game_frame(void *, float dt, InputState &input) {
         // Immediate hit on touch-down (before gesture waits for release → blocks drift)
         bool hit_immediate = false;
         if (g.ui.clicked == UINT16_MAX) {
-            for (uint8_t i = 0; i < input.touch.active_count; ++i) {
+            for (u8 i = 0; i < input.touch.active_count; ++i) {
                 auto &f = input.touch.fingers[i];
                 if (f.phase != TouchPhase::Pressing) {
                     continue;
                 }
-                float tx = f.curr_x + cam_x;
-                float ty = f.curr_y + cam_y;
+                f32 tx = f.curr_x + cam_x;
+                f32 ty = f.curr_y + cam_y;
+#ifndef NDEBUG
                 fprintf(stderr, "[pressing] f=%llu tx=%.4f ty=%.4f active:", (unsigned long long)g.frame_count, tx, ty);
                 for (auto &b : g.blocks) {
                     if (!b.active) {
@@ -683,32 +729,20 @@ static void game_frame(void *, float dt, InputState &input) {
                     fprintf(stderr, " (%.1f,%.1f)", b.x, b.y);
                 }
                 fprintf(stderr, "\n");
-                float const EPS_LT = 15.0f;
-                float const EPS_RB = 10.0f;
-                for (int32_t bi = MAX_BLOCKS - 1; bi >= 0; --bi) {
-                    auto &b = g.blocks[bi];
-                    if (!b.active) {
-                        continue;
-                    }
-                    float half_w = b.w * 0.5f;
-                    float half_h = b.h * 0.5f;
-                    if (tx + EPS_LT >= b.x - half_w && tx - EPS_RB <= b.x + half_w && ty + EPS_LT >= b.y - half_h && ty - EPS_RB <= b.y + half_h) {
-                        fprintf(stderr, "[pressing] HIT block at (%.0f,%.0f)!\n", b.x, b.y);
-                        hit_block(b);
-                        g.tap_cooldown = 0.15f;
-                        hit_immediate  = true;
-                        break;
-                    }
+#endif
+                if (try_hit_block(tx, ty)) {
+                    g.tap_cooldown = 0.15f;
+                    hit_immediate  = true;
                 }
                 break;
             }
         }
 
         // Tap/click to hit blocks (completed gesture — fallback)
-        for (uint8_t a = 0; a < input.action_count && !hit_immediate; ++a) {
+        for (u8 a = 0; a < input.action_count && !hit_immediate; ++a) {
             if (input.actions[a] == InputAction::Select) {
-                float tx = input.action_x;
-                float ty = input.action_y;
+                f32 tx = input.action_x;
+                f32 ty = input.action_y;
                 fprintf(stderr, "[click] f=%llu screen=(%.0f,%.0f) cam=(%.1f,%.1f) world=(%.0f,%.0f) clicked=%u\n", (unsigned long long)g.frame_count, tx, ty,
                         cam_x, cam_y, tx + cam_x, ty + cam_y, g.ui.clicked);
                 // Don't hit if a widget was clicked instead
@@ -719,6 +753,7 @@ static void game_frame(void *, float dt, InputState &input) {
                 // Convert screen tap position → world space
                 tx += cam_x;
                 ty += cam_y;
+#ifndef NDEBUG
                 fprintf(stderr, "[trace] f=%llu tx=%.4f ty=%.4f active:", (unsigned long long)g.frame_count, tx, ty);
                 for (auto &b : g.blocks) {
                     if (!b.active) {
@@ -727,23 +762,9 @@ static void game_frame(void *, float dt, InputState &input) {
                     fprintf(stderr, " (%.1f,%.1f,%.0f,%.0f)", b.x, b.y, b.w, b.h);
                 }
                 fprintf(stderr, "\n");
-                // Reverse order so top-most (last-rendered) block is checked first
-                // 15px top/left, 10px bottom/right grace
-                float const EPS_LT = 15.0f;
-                float const EPS_RB = 10.0f;
-                for (int32_t bi = MAX_BLOCKS - 1; bi >= 0; --bi) {
-                    auto &b = g.blocks[bi];
-                    if (!b.active) {
-                        continue;
-                    }
-                    float half_w = b.w * 0.5f;
-                    float half_h = b.h * 0.5f;
-                    if (tx + EPS_LT >= b.x - half_w && tx - EPS_RB <= b.x + half_w && ty + EPS_LT >= b.y - half_h && ty - EPS_RB <= b.y + half_h) {
-                        fprintf(stderr, "[click] HIT block at (%.0f,%.0f)!\n", b.x, b.y);
-                        hit_block(b);
-                        g.tap_cooldown = 0.15f;
-                        break;
-                    }
+#endif
+                if (try_hit_block(tx, ty)) {
+                    g.tap_cooldown = 0.15f;
                 }
                 break;
             }
@@ -759,27 +780,29 @@ static void game_frame(void *, float dt, InputState &input) {
         // Update HUD text live
         if (g.hud_id_score != UINT16_MAX) {
             char buf[32];
-            int  len = snprintf(buf, sizeof(buf), "Score: %u", g.score);
+            i32  len = snprintf(buf, sizeof(buf), "Score: %u", g.score);
             if (len > 0) {
                 std::strncpy(g.ui.pool[g.hud_id_score].text, buf, sizeof(g.ui.pool[g.hud_id_score].text) - 1);
+                g.ui.pool[g.hud_id_score].text[sizeof(g.ui.pool[g.hud_id_score].text) - 1] = '\0';
             }
         }
         if (g.hud_id_combo != UINT16_MAX) {
             if (g.combo > 1) {
                 char buf[32];
-                int  len = snprintf(buf, sizeof(buf), "Combo x%d", g.combo);
+                i32  len = snprintf(buf, sizeof(buf), "Combo x%d", g.combo);
                 if (len > 0) {
                     std::strncpy(g.ui.pool[g.hud_id_combo].text, buf, sizeof(g.ui.pool[g.hud_id_combo].text) - 1);
+                    g.ui.pool[g.hud_id_combo].text[sizeof(g.ui.pool[g.hud_id_combo].text) - 1] = '\0';
                 }
-                g.ui.pool[g.hud_id_combo].flags |= ui::WF_Visible;
+                g.ui.pool[g.hud_id_combo].flags |= ui::WF_VISIBLE;
             } else {
-                g.ui.pool[g.hud_id_combo].flags   &= ~ui::WF_Visible;
+                g.ui.pool[g.hud_id_combo].flags   &= ~ui::WF_VISIBLE;
                 g.ui.pool[g.hud_id_combo].text[0]  = '\0';
             }
         }
     }
 
-    static uint64_t last_log_frame = 0;
+    static u64 last_log_frame = 0;
     if (g.frame_count > last_log_frame + 60) {
         // MM_LOG("game_frame: f=%llu - adding render commands  w=%u h=%u cs=%.2f",
         //        (unsigned long long)g.frame_count,
@@ -799,17 +822,18 @@ static void game_frame(void *, float dt, InputState &input) {
 
     g.renderer.graph.begin_pass(pass);
 
-    g.renderer.ortho(cam_x, (float)g.renderer.width + cam_x, (float)g.renderer.height + cam_y, cam_y, -1.0f, 1.0f);
+    g.renderer.ortho(cam_x, (f32)g.renderer.width + cam_x, (f32)g.renderer.height + cam_y, cam_y, -1.0f, 1.0f);
 
     g.renderer.upload_camera();
 
     render_world();
 
     // Reset camera for UI so hit-tests (pick) match screen coordinates
-    g.renderer.ortho(0.0f, (float)g.renderer.width, (float)g.renderer.height, 0.0f, -1.0f, 1.0f);
+    g.renderer.ortho(0.0f, (f32)g.renderer.width, (f32)g.renderer.height, 0.0f, -1.0f, 1.0f);
     g.renderer.upload_camera();
 
-    g.ui.render(g.renderer, g.batch, dt);
+    g.ui.update(dt);
+    g.ui.render(g.renderer, g.batch);
 
     g.renderer.graph.end_pass();
 
@@ -835,8 +859,6 @@ static void game_init(void *) {
 
     g.sfx_hit_id   = g_audio_system.sfx.register_sound("sfx/hit.wav");
     g.sfx_score_id = g_audio_system.sfx.register_sound("sfx/score.wav");
-    g.sfx_tap_id   = g_audio_system.sfx.register_sound("sfx/tap.wav");
-
 
     auto rend_res  = g.renderer.init(g_backend, nullptr, 0, 0);
     if (!rend_res) {
@@ -845,26 +867,28 @@ static void game_init(void *) {
         MM_LOG("Renderer initialized successfully");
     }
 
+    g.theme = ui::Theme::load("themes/test_theme.json");
+
     g.batch.init();
 
     // Create procedural demo texture (no external PNG needed)
     {
-        uint8_t tex_pixels[256 * 256 * 4];
-        for (int y = 0; y < 256; ++y) {
-            for (int x = 0; x < 256; ++x) {
-                int   i    = (y * 256 + x) * 4;
-                float cx   = (float)(x - 128);
-                float cy   = (float)(y - 128);
-                float dist = sqrtf(cx * cx + cy * cy) / 128.0f;
+        u8 tex_pixels[256 * 256 * 4];
+        for (i32 y = 0; y < 256; ++y) {
+            for (i32 x = 0; x < 256; ++x) {
+                i32   i    = (y * 256 + x) * 4;
+                f32   cx   = (f32)(x - 128);
+                f32   cy   = (f32)(y - 128);
+                f32   dist = __builtin_sqrtf(cx * cx + cy * cy) / 128.0f;
                 if (dist > 1.0f) {
                     dist = 1.0f;
                 }
                 // Blue-purple radial gradient
-                uint8_t tr    = (uint8_t)(220 - dist * 180);
-                uint8_t tg    = (uint8_t)(160 - dist * 120);
-                uint8_t tb    = (uint8_t)(255 - dist * 100);
+                u8    tr    = (u8)(220 - dist * 180);
+                u8    tg    = (u8)(160 - dist * 120);
+                u8    tb    = (u8)(255 - dist * 100);
                 // Checkerboard overlay
-                bool    check = ((x / 32) + (y / 32)) % 2 == 0;
+                bool check = ((x / 32) + (y / 32)) % 2 == 0;
                 if (check) {
                     tr = tr * 6 / 10;
                     tg = tg * 6 / 10;
@@ -890,12 +914,11 @@ static void game_init(void *) {
             g.demo_mat = g.renderer.make_material(g.renderer.sprite_pipeline, g.demo_tex, g.renderer.default_sampler);
         }
     }
-    g.batch.init();
 }
 
 // ─────────────────────────────────────────────────────────────
 
-static void game_resize(void *, uint32_t w, uint32_t h) {
+static void game_resize(void *, u32 w, u32 h) {
     g_game->renderer.content_scale = g_content_scale;
     g_game->renderer.resize(w, h);
 }
@@ -914,7 +937,7 @@ static void game_cleanup(void *) {
 
 // ─────────────────────────────────────────────────────────────
 
-AppCallbacks markmos_main(int, char **) {
+AppCallbacks markmos_main(int, char *[]) {
 
     return {
         .user_data = nullptr,

@@ -5,6 +5,7 @@
 // Platform handles: Vulkan backend, input queue, audio, native activity lifecycle
 
 #include "../audio/mm_audio_system.hpp"
+#include "core/mm_types.h"
 #include "../core/mm_log.hpp"
 #include "../core/mm_pool.hpp"
 #include "../core/mm_vfs.hpp"
@@ -13,30 +14,34 @@
 #include "../render/mm_sprite_batch.hpp"
 #include "../rhi/mm_rhi_concept.hpp"
 #include "../rhi/mm_vulkan_backend.hpp"
+#include "game/mm_event_bus.hpp"
 #include "mm_app.hpp"
+#include "mm_job_system.hpp"
 
 #include <android_native_app_glue.h>
 #include <time.h> // clock_gettime, CLOCK_MONOTONIC
 #include <vulkan/vulkan_android.h>
 
 // ─── Engine globals ───────────────────────────────────────────────────────────
-float               g_content_scale = 1.0f;
+// Note: g_event_bus is defined once in engine/game/mm_event_bus.cpp,
+// declared extern via game/mm_event_bus.hpp — do NOT redefine here.
+f32               g_content_scale = 1.0f;
 VulkanBackend      *g_backend       = nullptr;
-
+EventBus           *g_event_bus_ptr = nullptr;
 // ─── App callbacks ────────────────────────────────────────────────────────────
 static AppCallbacks g_callbacks{};
 
 // ─── Timing helpers ───────────────────────────────────────────────────────────
 // Uses CLOCK_MONOTONIC — unaffected by wall-clock adjustments, available on all
-// Android API levels we support (≥26). Returns seconds as double.
-static double       monotonic_now() noexcept {
+// Android API levels we support (≥26). Returns seconds as f64.
+static f64       monotonic_now() noexcept {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
-    return static_cast<double>(ts.tv_sec) + static_cast<double>(ts.tv_nsec) * 1e-9;
+    return static_cast<f64>(ts.tv_sec) + static_cast<f64>(ts.tv_nsec) * 1e-9;
 }
 
 // ─── Keycode mapping ──────────────────────────────────────────────────────────
-static KeyCode keycode_from_android(int32_t kc) noexcept {
+static KeyCode keycode_from_android(i32 kc) noexcept {
     switch (kc) {
     case 29:
         return KeyCode::A;
@@ -118,8 +123,10 @@ static KeyCode keycode_from_android(int32_t kc) noexcept {
         return KeyCode::Left;
     case 22:
         return KeyCode::Right;
-    case 59:
+    case 59: // KEYCODE_SHIFT_LEFT
         return KeyCode::Shift;
+    case 60: // KEYCODE_SHIFT_RIGHT - both shift keys map to one KeyCode, so a
+        return KeyCode::Shift; // right-shift chord works like a left-shift one
     case 113:
         return KeyCode::Ctrl;
     case 57:
@@ -128,12 +135,24 @@ static KeyCode keycode_from_android(int32_t kc) noexcept {
         return KeyCode::Space;
     case 66:
         return KeyCode::Enter;
-    case 131:
-        return KeyCode::Escape;
+    case 111: // KEYCODE_ESCAPE (was 131, which is KEYCODE_F1 - F1 produced Escape
+        return KeyCode::Escape; // and the real Escape key was unmapped)
     case 67:
         return KeyCode::Backspace;
     case 61:
         return KeyCode::Tab;
+    case 92: // KEYCODE_PAGE_UP
+        return KeyCode::PageUp;
+    case 93: // KEYCODE_PAGE_DOWN
+        return KeyCode::PageDown;
+    case 134: // KEYCODE_F4
+        return KeyCode::F4;
+    case 112: // KEYCODE_FORWARD_DEL
+        return KeyCode::Delete;
+    case 122: // KEYCODE_MOVE_HOME
+        return KeyCode::Home;
+    case 123: // KEYCODE_MOVE_END
+        return KeyCode::End;
     default:
         return KeyCode::Unknown;
     }
@@ -147,13 +166,13 @@ struct AndroidApp {
     InputEventQueue *input_queue     = nullptr;
     InputState      *input_state     = nullptr;
 
-    double           last_frame_time = 0.0; // monotonic seconds; 0 = not yet set
+    f64           last_frame_time = 0.0; // monotonic seconds; 0 = not yet set
 
     bool             active          = false;
     bool             paused          = false;
-    int32_t          width           = 0;
-    int32_t          height          = 0;
-    float            scale_factor    = 1.0f;
+    i32          width           = 0;
+    i32          height          = 0;
+    f32            scale_factor    = 1.0f;
 
     void             init() noexcept {
         backend     = new VulkanBackend();
@@ -169,7 +188,7 @@ struct AndroidApp {
         last_frame_time = 0.0;
     }
 
-    void shutdown() noexcept {
+    void shutdown(bool is_destroy = false) noexcept {
         if (g_callbacks.cleanup) {
             g_callbacks.cleanup(g_callbacks.user_data);
         }
@@ -185,25 +204,36 @@ struct AndroidApp {
         delete input_queue;
         input_queue     = nullptr;
         last_frame_time = 0.0;
+        g_event_bus.clear();
+        if (is_destroy) {
+            JobSystemShutdown();
+            PoolShutdown();
+        }
     }
 
     void resize() noexcept {
         if (!window || !backend) {
             return;
         }
-        int32_t new_w = ANativeWindow_getWidth(window);
-        int32_t new_h = ANativeWindow_getHeight(window);
+        i32 new_w = ANativeWindow_getWidth(window);
+        i32 new_h = ANativeWindow_getHeight(window);
         if (new_w == width && new_h == height) {
             return;
         }
         width  = new_w;
         height = new_h;
-        backend->resize();
+        SurfaceInfo info{
+            .native_handle = window,
+            .width         = static_cast<u32>(width),
+            .height        = static_cast<u32>(height),
+            .content_scale = scale_factor > 1.0f ? scale_factor : 1.0f,
+        };
+        backend->resize(info);
         g_content_scale = scale_factor;
-        float cs        = g_content_scale > 1.0f ? g_content_scale : 1.0f;
+        f32 cs        = g_content_scale > 1.0f ? g_content_scale : 1.0f;
         if (g_callbacks.resize) {
-            g_callbacks.resize(g_callbacks.user_data, static_cast<uint32_t>(static_cast<float>(width) / cs + 0.5f),
-                               static_cast<uint32_t>(static_cast<float>(height) / cs + 0.5f));
+            g_callbacks.resize(g_callbacks.user_data, static_cast<u32>(static_cast<f32>(width) / cs + 0.5f),
+                               static_cast<u32>(static_cast<f32>(height) / cs + 0.5f));
         }
     }
 
@@ -218,12 +248,12 @@ struct AndroidApp {
 
         // ── Delta time ────────────────────────────────────────────────────────
         // Seed timing on first call (last_frame_time == 0 only once).
-        double now = monotonic_now();
+        f64 now = monotonic_now();
         if (last_frame_time == 0.0) {
             last_frame_time = now;
         }
 
-        float dt        = static_cast<float>(now - last_frame_time);
+        f32 dt        = static_cast<f32>(now - last_frame_time);
         last_frame_time = now;
 
         // Clamp: prevents spiral-of-death after a hiccup or a debugger break.
@@ -286,10 +316,10 @@ struct AndroidApp {
             g_callbacks.init(g_callbacks.user_data);
         }
 
-        float cs = g_content_scale > 1.0f ? g_content_scale : 1.0f;
+        f32 cs = g_content_scale > 1.0f ? g_content_scale : 1.0f;
         if (g_callbacks.resize) {
-            g_callbacks.resize(g_callbacks.user_data, static_cast<uint32_t>(static_cast<float>(width) / cs + 0.5f),
-                               static_cast<uint32_t>(static_cast<float>(height) / cs + 0.5f));
+            g_callbacks.resize(g_callbacks.user_data, static_cast<u32>(static_cast<f32>(width) / cs + 0.5f),
+                               static_cast<u32>(static_cast<f32>(height) / cs + 0.5f));
         }
 
         active = true;
@@ -310,7 +340,7 @@ void                app_quit() noexcept {
 // ─── Command & input handlers ─────────────────────────────────────────────────
 extern "C" {
 
-void handle_cmd(android_app *app, int32_t cmd) {
+void handle_cmd(android_app *app, i32 cmd) {
     switch (cmd) {
     case APP_CMD_INIT_WINDOW: {
         g_app.window        = app->window;
@@ -343,10 +373,10 @@ void handle_cmd(android_app *app, int32_t cmd) {
             g_callbacks.init(g_callbacks.user_data);
         }
 
-        float cs = g_content_scale > 1.0f ? g_content_scale : 1.0f;
+        f32 cs = g_content_scale > 1.0f ? g_content_scale : 1.0f;
         if (g_callbacks.resize) {
-            g_callbacks.resize(g_callbacks.user_data, static_cast<uint32_t>(static_cast<float>(g_app.width) / cs + 0.5f),
-                               static_cast<uint32_t>(static_cast<float>(g_app.height) / cs + 0.5f));
+            g_callbacks.resize(g_callbacks.user_data, static_cast<u32>(static_cast<f32>(g_app.width) / cs + 0.5f),
+                               static_cast<u32>(static_cast<f32>(g_app.height) / cs + 0.5f));
         }
 
         // Seed timing right before we start rendering, not at init(),
@@ -358,7 +388,7 @@ void handle_cmd(android_app *app, int32_t cmd) {
 
     case APP_CMD_TERM_WINDOW:
         g_app.active = false;
-        g_app.shutdown();
+        g_app.shutdown(false);
         g_app.window = nullptr;
         break;
 
@@ -399,53 +429,53 @@ void handle_cmd(android_app *app, int32_t cmd) {
     }
 }
 
-int32_t handle_input(android_app *app, AInputEvent *event) {
+i32 handle_input(android_app *app, AInputEvent *event) {
     if (!g_app.input_queue) {
         return 0;
     }
 
-    int32_t type = AInputEvent_getType(event);
+    i32 type = AInputEvent_getType(event);
 
     if (type == AINPUT_EVENT_TYPE_MOTION) {
-        int32_t action        = AMotionEvent_getAction(event);
-        int32_t pointer_index = (action & AMOTION_EVENT_ACTION_POINTER_INDEX_MASK) >> AMOTION_EVENT_ACTION_POINTER_INDEX_SHIFT;
-        int32_t pointer_id    = AMotionEvent_getPointerId(event, pointer_index);
-        float   cs            = g_content_scale > 1.0f ? g_content_scale : 1.0f;
-        float   x             = AMotionEvent_getX(event, pointer_index) / cs;
-        float   y             = AMotionEvent_getY(event, pointer_index) / cs;
+        i32 action        = AMotionEvent_getAction(event);
+        i32 pointer_index = (action & AMOTION_EVENT_ACTION_POINTER_INDEX_MASK) >> AMOTION_EVENT_ACTION_POINTER_INDEX_SHIFT;
+        i32 pointer_id    = AMotionEvent_getPointerId(event, pointer_index);
+        f32   cs            = g_content_scale > 1.0f ? g_content_scale : 1.0f;
+        f32   x             = AMotionEvent_getX(event, pointer_index) / cs;
+        f32   y             = AMotionEvent_getY(event, pointer_index) / cs;
 
         switch (action & AMOTION_EVENT_ACTION_MASK) {
         case AMOTION_EVENT_ACTION_DOWN:
         case AMOTION_EVENT_ACTION_POINTER_DOWN:
-            g_app.input_queue->push(InputEvent::make_touch_down(static_cast<uint8_t>(pointer_id), x, y));
+            g_app.input_queue->push(InputEvent::make_touch_down(static_cast<u8>(pointer_id), x, y));
             break;
 
         case AMOTION_EVENT_ACTION_MOVE: {
             size_t count = AMotionEvent_getPointerCount(event);
             for (size_t i = 0; i < count && i < 5; ++i) {
-                int32_t pid = AMotionEvent_getPointerId(event, i);
-                float   px  = AMotionEvent_getX(event, i) / cs;
-                float   py  = AMotionEvent_getY(event, i) / cs;
-                g_app.input_queue->push(InputEvent::make_touch_move(static_cast<uint8_t>(pid), px, py));
+                i32 pid = AMotionEvent_getPointerId(event, i);
+                f32   px  = AMotionEvent_getX(event, i) / cs;
+                f32   py  = AMotionEvent_getY(event, i) / cs;
+                g_app.input_queue->push(InputEvent::make_touch_move(static_cast<u8>(pid), px, py));
             }
             break;
         }
 
         case AMOTION_EVENT_ACTION_UP:
         case AMOTION_EVENT_ACTION_POINTER_UP:
-            g_app.input_queue->push(InputEvent::make_touch_up(static_cast<uint8_t>(pointer_id)));
+            g_app.input_queue->push(InputEvent::make_touch_up(static_cast<u8>(pointer_id)));
             break;
 
         case AMOTION_EVENT_ACTION_CANCEL:
-            g_app.input_queue->push(InputEvent::make_touch_cancel(static_cast<uint8_t>(pointer_id)));
+            g_app.input_queue->push(InputEvent::make_touch_cancel(static_cast<u8>(pointer_id)));
             break;
         }
         return 1;
     }
 
     if (type == AINPUT_EVENT_TYPE_KEY) {
-        int32_t action = AKeyEvent_getAction(event);
-        int32_t kc     = AKeyEvent_getKeyCode(event);
+        i32 action = AKeyEvent_getAction(event);
+        i32 kc     = AKeyEvent_getKeyCode(event);
         KeyCode code   = keycode_from_android(kc);
         if (code == KeyCode::Unknown) {
             return 0;
@@ -465,6 +495,9 @@ int32_t handle_input(android_app *app, AInputEvent *event) {
 void android_main(android_app *app) {
     MM_LOG("android_main() started");
     PoolInit();
+    JobSystemInit(0);
+    g_event_bus.clear();
+    g_event_bus_ptr   = &g_event_bus;
 
     g_android_app     = app;
     g_callbacks       = markmos_main(0, nullptr);
@@ -489,7 +522,7 @@ void android_main(android_app *app) {
             }
 
             if (app->destroyRequested) {
-                g_app.shutdown();
+                g_app.shutdown(true);
                 return;
             }
 

@@ -328,9 +328,9 @@ typedef enum mm_render_api {
 #if defined(__clang__)
 #    if __has_attribute(ext_vector_type)
 typedef int   int2 __attribute__((ext_vector_type(2)));
-typedef float float2 __attribute__((ext_vector_type(2)));
-typedef float float3 __attribute__((ext_vector_type(4)));
-typedef float float4 __attribute__((ext_vector_type(4)));
+typedef f32 float2 __attribute__((ext_vector_type(2)));
+typedef f32 float3 __attribute__((ext_vector_type(4)));
+typedef f32 float4 __attribute__((ext_vector_type(4)));
 
 #    else
 

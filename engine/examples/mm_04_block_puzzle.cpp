@@ -6,6 +6,7 @@
 //         TweenPool slide anim, ParticlePool clear effects
 
 #include "../game/mm_board_grid.hpp"
+#include "../core/mm_types.h"
 #include "../game/mm_game_state.hpp"
 #include "../game/mm_tween_pool.hpp"
 #include "../game/mm_particle_pool.hpp"
@@ -14,54 +15,41 @@
 #include "../render/mm_sprite_batch.hpp"
 #include "../render/mm_shader_registry.hpp"
 #include "../app/mm_app.hpp"
+#include "../math/mm_mat4.h"
 #if defined(USE_METAL_BACKEND)
 #include "../rhi/mm_metal_backend.hpp"
 #elif defined(USE_VULKAN_BACKEND)
 #include "../rhi/mm_vulkan_backend.hpp"
 #endif
 
-struct alignas(16) Mat4 {
-    float m[16];
-    static Mat4 ortho_2d(float w, float h) noexcept {
-        Mat4 mat{};
-        mat.m[0]  = 2.0f / w;
-        mat.m[5]  = -2.0f / h;
-        mat.m[10] = -1.0f;
-        mat.m[12] = -1.0f;
-        mat.m[13] = 1.0f;
-        mat.m[15] = 1.0f;
-        return mat;
-    }
-};
-
 // Tetromino shapes (4 rotation states each)
-static constexpr uint16_t TETRO_I[4] = {
+static constexpr u16 TETRO_I[4] = {
     0b0000111100000000, 0b0010001000100010,
     0b0000111100000000, 0b0010001000100010
 };
-static constexpr uint16_t TETRO_O[4] = { 0b0110011000000000, 0b0110011000000000, 0b0110011000000000, 0b0110011000000000 };
-static constexpr uint16_t TETRO_T[4] = {
+static constexpr u16 TETRO_O[4] = { 0b0110011000000000, 0b0110011000000000, 0b0110011000000000, 0b0110011000000000 };
+static constexpr u16 TETRO_T[4] = {
     0b0100011100000000, 0b0100011001000000,
     0b0000111001000000, 0b0100110001000000
 };
-static constexpr uint16_t TETRO_S[4] = {
+static constexpr u16 TETRO_S[4] = {
     0b0110110000000000, 0b0100011000100000,
     0b0000011011000000, 0b1000110001000000
 };
-static constexpr uint16_t TETRO_Z[4] = {
+static constexpr u16 TETRO_Z[4] = {
     0b1100011000000000, 0b0010011001000000,
     0b0000110001100000, 0b0100110010000000
 };
-static constexpr uint16_t TETRO_L[4] = {
+static constexpr u16 TETRO_L[4] = {
     0b0100010001100000, 0b0000111010000000,
     0b0110010001000000, 0b0010111000000000
 };
-static constexpr uint16_t TETRO_J[4] = {
+static constexpr u16 TETRO_J[4] = {
     0b0110010001000000, 0b1000111000000000,
     0b0100010001100000, 0b0000111000100000
 };
 
-static constexpr uint32_t PIECE_COLORS[] = {
+static constexpr u32 PIECE_COLORS[] = {
     0xFFFF4444, 0xFF4488FF, 0xFF44FF44, 0xFFFFFF44,
     0xFFFF44FF, 0xFFFF8844, 0xFF44FFFF
 };
@@ -85,23 +73,23 @@ struct BlockPuzzle {
     FrameArena      arena;
 
     // Current falling piece
-    uint16_t        piece_shape[4];
-    uint8_t         piece_rotation;
-    int8_t          piece_x, piece_y;
-    uint8_t         piece_type;
+    u16        piece_shape[4];
+    u8         piece_rotation;
+    i8          piece_x, piece_y;
+    u8         piece_type;
     bool            piece_active;
 
     // Game state
-    uint32_t        score;
-    uint32_t        lines_cleared;
-    uint8_t         level;
-    float           drop_timer;
-    float           drop_interval;
+    u32        score;
+    u32        lines_cleared;
+    u8         level;
+    f32           drop_timer;
+    f32           drop_interval;
 
     // Next piece preview
-    uint8_t         next_piece_type;
+    u8         next_piece_type;
 
-    void init(uint8_t cols, uint8_t rows) noexcept {
+    void init(u8 cols, u8 rows) noexcept {
         board.init(cols, rows, 7, 48);
         state = PlayState{&board, 0, 5000, 0, 0, 0.0f};
         score = 0;
@@ -115,12 +103,12 @@ struct BlockPuzzle {
     }
 
     void spawn_piece() noexcept {
-        piece_type = static_cast<uint8_t>(rand() % 7);
+        piece_type = static_cast<u8>(rand() % 7);
         piece_rotation = 0;
-        piece_x = static_cast<int8_t>(board.cols / 2 - 2);
+        piece_x = static_cast<i8>(board.cols / 2 - 2);
         piece_y = 0;
 
-        constexpr const uint16_t* SHAPES[7] = {
+        constexpr const u16* SHAPES[7] = {
             TETRO_I, TETRO_O, TETRO_T, TETRO_S, TETRO_Z, TETRO_L, TETRO_J
         };
         memcpy(piece_shape, SHAPES[piece_type], sizeof(piece_shape));
@@ -134,14 +122,14 @@ struct BlockPuzzle {
         piece_active = true;
     }
 
-    bool check_collision(int8_t x, int8_t y, uint16_t shape) noexcept {
-        for (int8_t r = 0; r < 4; ++r) {
-            for (int8_t c = 0; c < 4; ++c) {
+    bool check_collision(i8 x, i8 y, u16 shape) noexcept {
+        for (i8 r = 0; r < 4; ++r) {
+            for (i8 c = 0; c < 4; ++c) {
                 if (!(shape & (1 << (15 - r * 4 - c)))) continue;
-                int8_t bx = x + c;
-                int8_t by = y + r;
+                i8 bx = x + c;
+                i8 by = y + r;
                 if (bx < 0 || bx >= board.cols || by >= board.rows) return false;
-                if (by >= 0 && board.cell_type[board.idx(static_cast<uint8_t>(by), static_cast<uint8_t>(bx))] != CellType::Empty) {
+                if (by >= 0 && board.cell_type[board.idx(static_cast<u8>(by), static_cast<u8>(bx))] != CellType::Empty) {
                     return false;
                 }
             }
@@ -151,15 +139,15 @@ struct BlockPuzzle {
 
     void lock_piece() noexcept {
         if (!piece_active) return;
-        for (int8_t r = 0; r < 4; ++r) {
-            for (int8_t c = 0; c < 4; ++c) {
+        for (i8 r = 0; r < 4; ++r) {
+            for (i8 c = 0; c < 4; ++c) {
                 if (!(piece_shape[piece_rotation] & (1 << (15 - r * 4 - c)))) continue;
-                int8_t bx = piece_x + c;
-                int8_t by = piece_y + r;
+                i8 bx = piece_x + c;
+                i8 by = piece_y + r;
                 if (by >= 0 && by < board.rows && bx >= 0 && bx < board.cols) {
-                    board.cell_type[board.idx(static_cast<uint8_t>(by), static_cast<uint8_t>(bx))] =
+                    board.cell_type[board.idx(static_cast<u8>(by), static_cast<u8>(bx))] =
                         static_cast<CellType>(piece_type + 1);
-                    board.cell_state[board.idx(static_cast<uint8_t>(by), static_cast<uint8_t>(bx))] = CellState::Idle;
+                    board.cell_state[board.idx(static_cast<u8>(by), static_cast<u8>(bx))] = CellState::Idle;
                 }
             }
         }
@@ -169,31 +157,31 @@ struct BlockPuzzle {
         spawn_piece();
     }
 
-    uint8_t clear_rows() noexcept {
-        uint8_t cleared = 0;
-        for (int8_t r = board.rows - 1; r >= 0; --r) {
+    u8 clear_rows() noexcept {
+        u8 cleared = 0;
+        for (i8 r = board.rows - 1; r >= 0; --r) {
             bool full = true;
-            for (uint8_t c = 0; c < board.cols; ++c) {
-                if (board.cell_type[board.idx(static_cast<uint8_t>(r), c)] == CellType::Empty) {
+            for (u8 c = 0; c < board.cols; ++c) {
+                if (board.cell_type[board.idx(static_cast<u8>(r), c)] == CellType::Empty) {
                     full = false;
                     break;
                 }
             }
             if (full) {
-                for (uint8_t c = 0; c < board.cols; ++c) {
-                    uint16_t i = board.idx(static_cast<uint8_t>(r), c);
-                    float px = c * board.cell_size;
-                    float py = r * board.cell_size;
+                for (u8 c = 0; c < board.cols; ++c) {
+                    u16 i = board.idx(static_cast<u8>(r), c);
+                    f32 px = c * board.cell_size;
+                    f32 py = r * board.cell_size;
                     particles.spawn_burst(px + board.cell_size * 0.5f, py + board.cell_size * 0.5f,
                                           4, 30, 80, 0.3f, 0xFFFFFFFF);
                     board.cell_type[i] = CellType::Empty;
                     board.cell_state[i] = CellState::Empty;
                 }
                 ++cleared;
-                for (int8_t r2 = r - 1; r2 >= 0; --r2) {
-                    for (uint8_t c = 0; c < board.cols; ++c) {
-                        uint16_t src = board.idx(static_cast<uint8_t>(r2), c);
-                        uint16_t dst = board.idx(static_cast<uint8_t>(r2 + 1), c);
+                for (i8 r2 = r - 1; r2 >= 0; --r2) {
+                    for (u8 c = 0; c < board.cols; ++c) {
+                        u16 src = board.idx(static_cast<u8>(r2), c);
+                        u16 dst = board.idx(static_cast<u8>(r2 + 1), c);
                         board.cell_type[dst] = board.cell_type[src];
                         board.cell_state[dst] = board.cell_state[src];
                         board.cell_type[src] = CellType::Empty;
@@ -207,16 +195,16 @@ struct BlockPuzzle {
         if (cleared > 0) {
             camera.add_trauma(SHAKE_MEDIUM);
             lines_cleared += cleared;
-            static constexpr uint32_t ROW_SCORES[] = {0, 100, 300, 500, 800};
+            static constexpr u32 ROW_SCORES[] = {0, 100, 300, 500, 800};
             score += ROW_SCORES[cleared] * level;
-            level = static_cast<uint8_t>(1 + lines_cleared / 10);
+            level = static_cast<u8>(1 + lines_cleared / 10);
             drop_interval = std::max(0.1f, 1.0f - (level - 1) * 0.08f);
         }
 
         return cleared;
     }
 
-    void update(float dt, InputState& input) noexcept {
+    void update(f32 dt, InputState& input) noexcept {
         if (!piece_active) return;
 
         drop_timer += dt;
@@ -230,7 +218,7 @@ struct BlockPuzzle {
             }
         }
 
-        for (uint8_t i = 0; i < input.action_count; ++i) {
+        for (u8 i = 0; i < input.action_count; ++i) {
             switch (input.actions[i]) {
                 case InputAction::Select:
                     while (check_collision(piece_x, piece_y + 1, piece_shape[piece_rotation])) {
@@ -249,9 +237,13 @@ struct BlockPuzzle {
                         ++piece_x;
                     }
                     break;
-                case InputAction::SwapUp:
+                // The Up arrow (or W), NOT SwapUp. SwapUp's only producer used to
+                // be Shift+Tab, so rotation was bound to Shift+Tab and nothing
+                // else; after Tab became FocusNext/FocusPrev it would have had no
+                // producer at all and the piece could not be turned over.
+                case InputAction::MenuUp:
                 {
-                    uint8_t next_rot = (piece_rotation + 1) % 4;
+                    u8 next_rot = (piece_rotation + 1) % 4;
                     if (check_collision(piece_x, piece_y, piece_shape[next_rot])) {
                         piece_rotation = next_rot;
                     }
@@ -269,31 +261,31 @@ struct BlockPuzzle {
     void render() noexcept {
         sprite_batch.reset();
 
-        float s = static_cast<float>(board.cell_size) - 2.0f;
+        f32 s = static_cast<f32>(board.cell_size) - 2.0f;
 
-        for (uint8_t r = 0; r < board.rows; ++r) {
-            for (uint8_t c = 0; c < board.cols; ++c) {
-                uint16_t i = board.idx(r, c);
+        for (u8 r = 0; r < board.rows; ++r) {
+            for (u8 c = 0; c < board.cols; ++c) {
+                u16 i = board.idx(r, c);
                 CellType t = board.cell_type[i];
                 if (t == CellType::Empty) continue;
 
-                float x = c * board.cell_size;
-                float y = r * board.cell_size;
-                uint32_t color = PIECE_COLORS[static_cast<uint8_t>(t) % 7];
+                f32 x = c * board.cell_size;
+                f32 y = r * board.cell_size;
+                u32 color = PIECE_COLORS[static_cast<u8>(t) % 7];
                 sprite_batch.add(x, y, s, s, 0.0f, color, 1);
             }
         }
 
         if (piece_active) {
-            uint32_t pc = PIECE_COLORS[piece_type % 7];
-            for (int8_t r = 0; r < 4; ++r) {
-                for (int8_t c = 0; c < 4; ++c) {
+            u32 pc = PIECE_COLORS[piece_type % 7];
+            for (i8 r = 0; r < 4; ++r) {
+                for (i8 c = 0; c < 4; ++c) {
                     if (!(piece_shape[piece_rotation] & (1 << (15 - r * 4 - c)))) continue;
-                    int8_t bx = piece_x + c;
-                    int8_t by = piece_y + r;
+                    i8 bx = piece_x + c;
+                    i8 by = piece_y + r;
                     if (by < 0) continue;
-                    float x = bx * board.cell_size;
-                    float y = by * board.cell_size;
+                    f32 x = bx * board.cell_size;
+                    f32 y = by * board.cell_size;
                     sprite_batch.add(x, y, s, s, 0.0f, pc, 2);
                 }
             }
@@ -353,7 +345,7 @@ static void game_init(void*) {
     auto tex_res = bk.create_texture(td);
     if (!tex_res) return;
     g_game.texture = *tex_res;
-    uint32_t white_pixel = 0xFFFFFFFF;
+    u32 white_pixel = 0xFFFFFFFF;
     bk.update_texture(g_game.texture, &white_pixel, 0, 0, 1, 1, 0, 0);
 
     SamplerDesc sd = { SamplerFilter::Nearest, SamplerFilter::Nearest, SamplerFilter::Nearest,
@@ -366,7 +358,7 @@ static void game_init(void*) {
     g_game.arena.init(g_game.arena_buf, BlockPuzzle::ARENA_SIZE);
 }
 
-static void game_frame(void*, float dt, InputState& input) {
+static void game_frame(void*, f32 dt, InputState& input) {
     auto& bk = *g_backend;
 
     g_game.update(dt, input);
@@ -374,8 +366,8 @@ static void game_frame(void*, float dt, InputState& input) {
 
     g_game.arena.reset();
 
-    Mat4 cam = Mat4::ortho_2d(1170.0f, 2532.0f);
-    bk.update_buffer(g_game.ub, &cam, 0, sizeof(Mat4));
+    mm_math::mat4 cam = mm_math::mat4::ortho(0.0f, 1170.0f, 2532.0f, 0.0f, -1.0f, 1.0f);
+    bk.update_buffer(g_game.ub, cam.data(), 0, sizeof(mm_math::mat4));
 
     g_game.sprite_batch.flush(bk, g_game.vb, g_game.ub, g_game.pipeline,
                               g_game.texture, g_game.sampler, g_game.arena);
@@ -390,7 +382,7 @@ static void game_cleanup(void*) {
     bk.destroy_sampler(g_game.sampler);
 }
 
-AppCallbacks markmos_main(int, char**) {
+extern "C" AppCallbacks markmos_main(int, char**) {
     return {
         .user_data = nullptr,
         .init = game_init,

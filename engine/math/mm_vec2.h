@@ -19,6 +19,9 @@ struct vec2 {
         struct alignas(8) {
             f32 x, y;
         };
+        struct alignas(8) {
+            f32 w, h;
+        };
         f32 data[2];
     };
 
@@ -168,6 +171,14 @@ struct vec2 {
     MM_FORCE_INLINE vec2 rotate_around(const vec2 &center, f32 angle_rad) const noexcept { return (*this - center).rotate(angle_rad) + center; }
     MM_FORCE_INLINE vec2 rotate90() const noexcept { return vec2(-y, x); }
     MM_FORCE_INLINE vec2 rotate270() const noexcept { return vec2(y, -x); }
+
+    // =============================================================================
+    // Constants
+    // =============================================================================
+    MM_FORCE_INLINE f32  X() const noexcept { return x; }
+    MM_FORCE_INLINE f32  Y() const noexcept { return y; }
+    MM_FORCE_INLINE f32  W() const noexcept { return w; }
+    MM_FORCE_INLINE f32  H() const noexcept { return h; }
 
     static const vec2    ZERO;
     static const vec2    ONE;

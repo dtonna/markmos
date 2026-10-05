@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "mm_audio_system.hpp"
+#include "core/mm_types.h"
 #include "../core/mm_log.hpp"
 #include "../thirdparty/miniaudio/miniaudio.h"
 #include <cstring>
@@ -13,8 +14,8 @@
 struct SfxEntry {
     void           *pcm; // heap-allocated decoded samples
     ma_format       fmt;
-    uint32_t        channels;
-    uint32_t        sample_rate;
+    u32        channels;
+    u32        sample_rate;
     ma_uint64       frame_count;
     bool            loaded;
 };
@@ -23,7 +24,7 @@ static SfxEntry s_entries[MAX_SOUNDS];
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
-static bool     decode_file(ma_engine *engine, const char *path, void **out_pcm, ma_format *out_fmt, uint32_t *out_channels, uint32_t *out_sample_rate,
+static bool     decode_file(ma_engine *engine, const char *path, void **out_pcm, ma_format *out_fmt, u32 *out_channels, u32 *out_sample_rate,
                             ma_uint64 *out_frames) noexcept {
     // Load file via VFS to handle Android assets correctly
     VfsBlob blob = g_vfs.read_bundle(path);
@@ -52,7 +53,7 @@ static bool     decode_file(ma_engine *engine, const char *path, void **out_pcm,
         // Fallback for streams/formats that don't support get_length easily
         const ma_uint64 chunk = 4096;
         ma_uint64       cap   = chunk;
-        uint32_t        bpf   = ma_get_bytes_per_frame(cfg.format, cfg.channels);
+        u32        bpf   = ma_get_bytes_per_frame(cfg.format, cfg.channels);
         void           *buf   = ma_malloc(cap * bpf, nullptr);
         if (!buf) {
             ma_decoder_uninit(&dec);
@@ -73,7 +74,7 @@ static bool     decode_file(ma_engine *engine, const char *path, void **out_pcm,
                 buf = nb;
             }
             ma_uint64 read = 0;
-            ma_decoder_read_pcm_frames(&dec, static_cast<uint8_t *>(buf) + total * bpf, chunk, &read);
+            ma_decoder_read_pcm_frames(&dec, static_cast<u8 *>(buf) + total * bpf, chunk, &read);
             total += read;
             if (read < chunk) {
                 break;
@@ -90,7 +91,7 @@ static bool     decode_file(ma_engine *engine, const char *path, void **out_pcm,
         return frames > 0;
     }
 
-    uint32_t bpf = ma_get_bytes_per_frame(cfg.format, cfg.channels);
+    u32 bpf = ma_get_bytes_per_frame(cfg.format, cfg.channels);
     void    *buf = ma_malloc(frames * bpf, nullptr);
     if (!buf) {
         ma_decoder_uninit(&dec);
@@ -129,7 +130,7 @@ void SfxPool::init(ma_engine *eng) noexcept {
     memset(sources, 0, sizeof(sources));
     memset(s_entries, 0, sizeof(s_entries));
 
-    for (uint8_t i = 0; i < voice_count; ++i) {
+    for (u8 i = 0; i < voice_count; ++i) {
         voices[i].sound         = static_cast<ma_sound *>(ma_malloc(sizeof(ma_sound), nullptr));
         voices[i].buffer        = ma_malloc(sizeof(ma_audio_buffer), nullptr);
         voices[i].priority      = SFX_PRIORITY_MAX;
@@ -144,14 +145,14 @@ void SfxPool::init(ma_engine *eng) noexcept {
     }
 }
 
-uint8_t SfxPool::register_sound(const char *path) noexcept {
+u8 SfxPool::register_sound(const char *path) noexcept {
     if (sound_count >= MAX_SOUNDS) {
         return SFX_NO_SOUND;
     }
 
     MM_LOG("SfxPool::register_sound(%s)", path);
 
-    uint8_t   id      = sound_count;
+    u8   id      = sound_count;
     SfxEntry &e       = s_entries[id];
 
     e.loaded          = false;
@@ -185,14 +186,14 @@ static void voice_release(SfxVoice &v) noexcept {
     v.priority = SFX_PRIORITY_MAX;
 }
 
-static bool play_entry(SfxPool &pool, uint8_t id, uint8_t priority, float pitch, float volume_scale) noexcept {
+static bool play_entry(SfxPool &pool, u8 id, u8 priority, f32 pitch, f32 volume_scale) noexcept {
     SfxEntry &e = s_entries[id];
     if (!e.loaded) {
         return false;
     }
 
-    uint8_t idx = MAX_SFX_VOICES;
-    for (uint8_t i = 0; i < pool.voice_count; ++i) {
+    u8 idx = MAX_SFX_VOICES;
+    for (u8 i = 0; i < pool.voice_count; ++i) {
         SfxVoice &v = pool.voices[i];
         if (v.active && v.sound && !ma_sound_is_playing(v.sound)) {
             voice_release(v);
@@ -203,9 +204,9 @@ static bool play_entry(SfxPool &pool, uint8_t id, uint8_t priority, float pitch,
     }
 
     if (idx == MAX_SFX_VOICES) {
-        uint8_t worst     = 0;
-        uint8_t worst_pri = pool.voices[0].priority;
-        for (uint8_t i = 1; i < pool.voice_count; ++i) {
+        u8 worst     = 0;
+        u8 worst_pri = pool.voices[0].priority;
+        for (u8 i = 1; i < pool.voice_count; ++i) {
             if (pool.voices[i].priority > worst_pri) {
                 worst_pri = pool.voices[i].priority;
                 worst     = i;
@@ -252,19 +253,19 @@ static bool play_entry(SfxPool &pool, uint8_t id, uint8_t priority, float pitch,
     return true;
 }
 
-bool SfxPool::play_id(uint8_t id, uint8_t priority) noexcept { return play_id(id, priority, 1.0f); }
-bool SfxPool::play_id(uint8_t id, uint8_t priority, float pitch) noexcept { return play_id(id, priority, pitch, 1.0f); }
-bool SfxPool::play_id(uint8_t id, uint8_t priority, float pitch, float volume_scale) noexcept {
+bool SfxPool::play_id(u8 id, u8 priority) noexcept { return play_id(id, priority, 1.0f); }
+bool SfxPool::play_id(u8 id, u8 priority, f32 pitch) noexcept { return play_id(id, priority, pitch, 1.0f); }
+bool SfxPool::play_id(u8 id, u8 priority, f32 pitch, f32 volume_scale) noexcept {
     if (id >= sound_count || !source_loaded[id]) {
         return false;
     }
     return play_entry(*this, id, priority, pitch, volume_scale);
 }
 
-bool SfxPool::play(const char *path, uint8_t priority) noexcept { return play(path, priority, 1.0f); }
-bool SfxPool::play(const char *path, uint8_t priority, float pitch) noexcept { return play(path, priority, pitch, 1.0f); }
-bool SfxPool::play(const char *path, uint8_t priority, float pitch, float volume_scale) noexcept {
-    for (uint8_t i = 0; i < sound_count; ++i) {
+bool SfxPool::play(const char *path, u8 priority) noexcept { return play(path, priority, 1.0f); }
+bool SfxPool::play(const char *path, u8 priority, f32 pitch) noexcept { return play(path, priority, pitch, 1.0f); }
+bool SfxPool::play(const char *path, u8 priority, f32 pitch, f32 volume_scale) noexcept {
+    for (u8 i = 0; i < sound_count; ++i) {
         if (sound_paths[i] && strcmp(sound_paths[i], path) == 0) {
             return play_entry(*this, i, priority, pitch, volume_scale);
         }
@@ -273,7 +274,7 @@ bool SfxPool::play(const char *path, uint8_t priority, float pitch, float volume
 }
 
 void SfxPool::shutdown() noexcept {
-    for (uint8_t i = 0; i < voice_count; ++i) {
+    for (u8 i = 0; i < voice_count; ++i) {
         voice_release(voices[i]);
         if (voices[i].sound) {
             ma_free(voices[i].sound, nullptr);
@@ -284,7 +285,7 @@ void SfxPool::shutdown() noexcept {
             voices[i].buffer = nullptr;
         }
     }
-    for (uint8_t i = 0; i < sound_count; ++i) {
+    for (u8 i = 0; i < sound_count; ++i) {
         SfxEntry &e = s_entries[i];
         if (e.loaded) {
             ma_free(e.pcm, nullptr);
@@ -301,25 +302,25 @@ void SfxPool::shutdown() noexcept {
 }
 
 void SfxPool::stop_all() noexcept {
-    for (uint8_t i = 0; i < voice_count; ++i) {
+    for (u8 i = 0; i < voice_count; ++i) {
         if (voices[i].active && voices[i].sound) {
             ma_sound_stop(voices[i].sound);
         }
     }
 }
 
-void SfxPool::set_master_volume(float vol) noexcept {
+void SfxPool::set_master_volume(f32 vol) noexcept {
     master_volume = vol;
-    for (uint8_t i = 0; i < voice_count; ++i) {
+    for (u8 i = 0; i < voice_count; ++i) {
         if (voices[i].active && voices[i].sound) {
             ma_sound_set_volume(voices[i].sound, vol);
         }
     }
 }
 
-uint8_t SfxPool::find_lowest_priority() noexcept {
-    uint8_t lowest = 0, lowest_pri = voices[0].priority;
-    for (uint8_t i = 1; i < voice_count; ++i) {
+u8 SfxPool::find_lowest_priority() noexcept {
+    u8 lowest = 0, lowest_pri = voices[0].priority;
+    for (u8 i = 1; i < voice_count; ++i) {
         if (voices[i].priority > lowest_pri) {
             lowest_pri = voices[i].priority;
             lowest     = i;
@@ -365,9 +366,9 @@ void MusicLayer::shutdown() noexcept {
     }
 }
 
-void MusicLayer::play(const char *path, float fade_duration) noexcept {
+void MusicLayer::play(const char *path, f32 fade_duration) noexcept {
     MM_LOG("MusicLayer::play(%s)", path);
-    uint8_t next = 1 - active_track;
+    u8 next = 1 - active_track;
 
     if (track[next]) {
         ma_sound_stop(track[next]);
@@ -389,7 +390,7 @@ void MusicLayer::play(const char *path, float fade_duration) noexcept {
 
     void     *pcm = nullptr;
     ma_format fmt;
-    uint32_t  channels, sample_rate;
+    u32  channels, sample_rate;
     ma_uint64 frame_count;
 
     if (!decode_file(engine, path, &pcm, &fmt, &channels, &sample_rate, &frame_count)) {
@@ -437,20 +438,20 @@ void MusicLayer::play(const char *path, float fade_duration) noexcept {
     crossfading        = 1;
 }
 
-void MusicLayer::stop(float fade_duration) noexcept {
+void MusicLayer::stop(f32 fade_duration) noexcept {
     crossfade_duration = fade_duration;
     crossfade_t        = 0.0f;
     crossfading        = 1;
 }
 
-void MusicLayer::update(float dt) noexcept {
+void MusicLayer::update(f32 dt) noexcept {
     if (!crossfading) {
         return;
     }
     crossfade_t += dt;
-    float t      = crossfade_t / crossfade_duration;
+    f32 t      = crossfade_t / crossfade_duration;
     if (t >= 1.0f) {
-        uint8_t next = 1 - active_track;
+        u8 next = 1 - active_track;
         if (track[next]) {
             volume[next] = 1.0f;
             ma_sound_set_volume(track[next], 1.0f);
@@ -463,7 +464,7 @@ void MusicLayer::update(float dt) noexcept {
         crossfading  = 0;
         return;
     }
-    uint8_t next         = 1 - active_track;
+    u8 next         = 1 - active_track;
     volume[active_track] = 1.0f - t;
     volume[next]         = t;
     if (track[active_track]) {
@@ -474,7 +475,7 @@ void MusicLayer::update(float dt) noexcept {
     }
 }
 
-void MusicLayer::set_volume(float vol) noexcept {
+void MusicLayer::set_volume(f32 vol) noexcept {
     for (int i = 0; i < 2; ++i) {
         if (track[i]) {
             ma_sound_set_volume(track[i], vol);
@@ -532,4 +533,4 @@ void AudioSystem::shutdown() noexcept {
     }
 }
 
-void AudioSystem::update(float dt) noexcept { music.update(dt); }
+void AudioSystem::update(f32 dt) noexcept { music.update(dt); }

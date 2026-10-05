@@ -3,12 +3,14 @@
 
 #pragma once
 #include <cstdint>
+#include "core/mm_types.h"
 #include <cstddef>
+#include <cassert>
 #include <concepts>
 #include <type_traits>
 
-// Draw Call Sort Key — uint64_t packed sort key
-// Cache reason: single uint64_t comparison, hardware-accelerated sort (O(n log n))
+// Draw Call Sort Key — u64 packed sort key
+// Cache reason: single u64 comparison, hardware-accelerated sort (O(n log n))
 // No pointer indirection, no virtual dispatch, sort by integer key
 // 
 // Layer bits ensure correct front-to-back ordering for 2D:
@@ -21,39 +23,50 @@
 //   material: 16 bits (65536 material instances)
 //   depth:    28 bits (268M depth values in fixed-point)
 
-static constexpr uint8_t LAYER_BACKGROUND = 0;
-static constexpr uint8_t LAYER_GRID       = 1;
-static constexpr uint8_t LAYER_PIECES     = 2;
-static constexpr uint8_t LAYER_EFFECTS    = 3;
-static constexpr uint8_t LAYER_UI         = 4;
-static constexpr uint8_t LAYER_OVERLAY    = 5;
+static constexpr u8 LAYER_BACKGROUND = 0;
+static constexpr u8 LAYER_GRID       = 1;
+static constexpr u8 LAYER_PIECES     = 2;
+static constexpr u8 LAYER_EFFECTS    = 3;
+static constexpr u8 LAYER_UI         = 4;
+static constexpr u8 LAYER_OVERLAY    = 5;
 
 struct SortKey {
-    uint64_t key;
+    u64 key;
 
     constexpr SortKey() : key(0) {}
 
-    constexpr SortKey(uint8_t layer, uint16_t pipeline, uint16_t material, float depth)
+    constexpr SortKey(u8 layer, u16 pipeline, u16 material, f32 depth)
         : key(pack(layer, pipeline, material, depth)) {}
 
-    static constexpr uint64_t pack(uint8_t layer, uint16_t pipeline, uint16_t material, float depth) noexcept {
-        // Convert float depth to fixed-point 28-bit
-        // Normalize: clamp to [0, 1], map to 28-bit integer
-        uint32_t d = static_cast<uint32_t>(clamp01(depth) * 268435455.0f);
-        return (static_cast<uint64_t>(layer)     << 56) |
-               (static_cast<uint64_t>(pipeline)  << 44) |
-               (static_cast<uint64_t>(material)  << 28) |
-               static_cast<uint64_t>(d);
+    static constexpr u64 pack(u8 layer, u16 pipeline, u16 material, f32 depth) noexcept {
+        // Convert f32 depth to fixed-point 28-bit. Compute in DOUBLE: 2^28 - 1
+        // (= 268435455) is not representable in float32, so `(u32)(1.0f *
+        // 268435455.0f)` rounds up to 2^28 - past the field, bleeding a bit into
+        // the material bits and giving depth() == 0 for depth == 1.0. This was an
+        // overflow, not a packing slip.
+        u32 d = static_cast<u32>(clamp01(depth) * 268435455.0);
+        // Fields are packed without widening: a value past its width bleeds into
+        // the bits below it. That must be a caught mistake, not a silent layer/material
+        // corruption later in the sort order.
+        assert((pipeline & ~(0x0FFF)) == 0 && "SortKey::pack - pipeline needs 12 bits");
+        assert((material & ~(0xFFFF)) == 0 && "SortKey::pack - material needs 16 bits");
+        if (d > 0x0FFFFFFFu) {
+            d = 0x0FFFFFFFu;
+        }
+        return (static_cast<u64>(layer)     << 56) |
+               (static_cast<u64>(pipeline)  << 44) |
+               (static_cast<u64>(material)  << 28) |
+               static_cast<u64>(d);
     }
 
-    static constexpr float clamp01(float v) noexcept {
+    static constexpr f32 clamp01(f32 v) noexcept {
         return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
     }
 
-    uint8_t  layer()    const noexcept { return static_cast<uint8_t>(key >> 56); }
-    uint16_t pipeline() const noexcept { return static_cast<uint16_t>((key >> 44) & 0xFFF); }
-    uint16_t material() const noexcept { return static_cast<uint16_t>((key >> 28) & 0xFFFF); }
-    uint32_t depth()    const noexcept { return static_cast<uint32_t>(key & 0xFFFFFFF); }
+    u8  layer()    const noexcept { return static_cast<u8>(key >> 56); }
+    u16 pipeline() const noexcept { return static_cast<u16>((key >> 44) & 0xFFF); }
+    u16 material() const noexcept { return static_cast<u16>((key >> 28) & 0xFFFF); }
+    u32 depth()    const noexcept { return static_cast<u32>(key & 0xFFFFFFF); }
 
     static constexpr SortKey min() noexcept { SortKey sk; sk.key = 0; return sk; }
     static constexpr SortKey max() noexcept { SortKey sk; sk.key = 0xFFFF'FFFF'FFFF'FFFFull; return sk; }

@@ -1,0 +1,79 @@
+// Shader Lab — sunburst mode (X): slow-rotating rays on the card.
+// Hot-reload: save this file while the lab runs in sun mode (key X).
+// Uses lab_card.png only — no normal texture needed.
+//
+// Look: N soft rays spin around the card center (default 0.05Hz ≈
+// 20s/rev), warm gold, bright core + gaussian falloff. Subtle over the
+// card face, full strength outside the edge.
+//
+// Tune live:
+//   - Host keys: Up/Down = speed, Left/Right = ray count, +/- = intensity.
+//   - Edit below: sharpness, fade power, core size, default color.
+//   - Host params win for time/speed/rays/intensity on param update.
+//
+// Rules:
+//   - Entry MUST stay named `lab_sun_main` (looked up by name).
+//   - VSOutput MUST match sprite_vertex_msl (position/uv/color).
+//   - Params MUST be `LabSunParams` at [[buffer(2)]]: three float4s.
+//     (Metal packs vectors at 16-byte boundaries — float4 members ONLY.)
+//   - Metal only.
+
+#include <metal_stdlib>
+using namespace metal;
+
+struct VSOutput {
+    float4 position [[position]];
+    float2 uv;
+    float4 color;
+};
+
+struct LabSunParams {
+    float4 timing; // x = time (s), y = speed (Hz, rotations/sec), z = ray count, w = ray sharpness
+    float4 color;  // rgba ray color (warm gold default)
+    float4 misc;   // x = card aspect (w/h), y = intensity, z = quad scale k, w = radial fade power
+};
+
+float sd_round_box(float2 p, float2 b, float r) {
+    float2 q = abs(p) - b + r;
+    return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+}
+
+fragment float4 lab_sun_main(
+    VSOutput              input [[stage_in]],
+    texture2d<float>      albedo [[texture(0)]],
+    sampler               samp  [[sampler(0)]],
+    constant LabSunParams& p    [[buffer(2)]]
+) {
+    // The host draws a quad k× larger than the card (margin for the rays
+    // to travel in). Remap to card space; the sampler clamps to edge so
+    // mask the base by the inside test.
+    float k = max(p.misc.z, 1.0);
+    float2 card_uv = (input.uv - 0.5) * k + 0.5;
+    float4 base = albedo.sample(samp, card_uv) * input.color;
+    float2 inside2 = step(float2(0.0), card_uv) * step(card_uv, float2(1.0));
+    base *= inside2.x * inside2.y;
+
+    // Aspect-correct polar coords around the card center.
+    float aspect = max(p.misc.x, 1e-3);
+    float2 pc = (card_uv - 0.5) * float2(aspect, 1.0);
+    float r = length(pc);
+    float ang = atan2(pc.y, pc.x) + p.timing.x * 6.2831853 * max(p.timing.y, 0.0);
+
+    // Rays: cosine fan sharpened by pow, faded radially (gaussian).
+    float rays = 0.5 + 0.5 * cos(ang * max(p.timing.z, 1.0));
+    rays = pow(rays, max(p.timing.w, 1.0));
+    float fade = exp(-r * r * max(p.misc.w, 1e-3));
+    float core = exp(-r * r * 24.0);
+
+    // Card body mask (same rounded box as the glow shader).
+    float2 half_size = float2(aspect * 0.5, 0.5) - 0.03;
+    float dist = sd_round_box(pc, half_size, 0.03);
+    float aa = max(fwidth(dist), 1e-3);
+    float body = 1.0 - smoothstep(-aa, aa, dist);
+    float outside = smoothstep(-aa, aa, dist);
+
+    // Subtle over the card face, full strength outside the edge.
+    float a = (rays * fade + core) * p.color.a * p.misc.y;
+    float3 col = base.rgb * body + p.color.rgb * a * (outside + body * 0.35);
+    return float4(col, max(base.a * body, a));
+}

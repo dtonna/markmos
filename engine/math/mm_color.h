@@ -135,6 +135,13 @@ struct color {
     }
 
     MM_FORCE_INLINE static color from_hsv(f32 h, f32 s, f32 v, f32 a_ = 1.0F) noexcept {
+        // Wrap h into [0, 360): the branch chain below only covers
+        // hp in [0, 6), so an unwrapped h (e.g. 420 or -30) falls
+        // through to the final else and reads as the [5, 6) sector.
+        h = __builtin_fmodf(h, 360.0F);
+        if (h < 0.0F) {
+            h += 360.0F;
+        }
         f32 c = v * s;
         f32 hp = h / 60.0F;
         f32 x = c * (1.0F - __builtin_fabsf(__builtin_fmodf(hp, 2.0F) - 1.0F));
@@ -148,7 +155,10 @@ struct color {
         else if (hp < 5.0F) { r_ = x; g_ = 0.0F; b_ = c; }
         else { r_ = c; g_ = 0.0F; b_ = x; }
 
-        return color(r_ + m, g_ + m, b_ + m, a_);
+        return color(MM_CLAMP(r_ + m, 0.0F, 1.0F),
+                     MM_CLAMP(g_ + m, 0.0F, 1.0F),
+                     MM_CLAMP(b_ + m, 0.0F, 1.0F),
+                     a_);
     }
 
     static const color WHITE;
@@ -171,5 +181,9 @@ inline const color color::YELLOW      = color(1.0F, 1.0F, 0.0F, 1.0F);
 inline const color color::CYAN        = color(0.0F, 1.0F, 1.0F, 1.0F);
 inline const color color::MAGENTA     = color(1.0F, 0.0F, 1.0F, 1.0F);
 inline const color color::TRANSPARENT = color(0.0F, 0.0F, 0.0F, 0.0F);
+
+MM_FORCE_INLINE constexpr color lerp(const color &a, const color &b, f32 t) noexcept {
+    return color(a.v + (b.v - a.v) * float4{t, t, t, t});
+}
 
 } // namespace mm_math

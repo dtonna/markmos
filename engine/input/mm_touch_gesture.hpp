@@ -3,6 +3,7 @@
 
 #pragma once
 #include <cstdint>
+#include "core/mm_types.h"
 #include <cmath>
 
 // Touch Gesture System — state machine, no alloc per touch
@@ -10,22 +11,22 @@
 // Design: FSM per finger: Idle → Pressing → (Tap|Swipe|LongPress|Drag)
 // No virtual dispatch, no heap alloc, fixed-size tracker
 
-enum class GestureType : uint8_t {
+enum class GestureType : u8 {
     None, Tap, SwipeUp, SwipeDown, SwipeLeft, SwipeRight, LongPress, Drag
 };
 
-enum class TouchPhase : uint8_t {
+enum class TouchPhase : u8 {
     Idle, Pressing, Moved, Ended, Cancelled
 };
 
 struct GestureState {
     GestureType type;
     TouchPhase  phase;
-    float       start_x, start_y;
-    float       prev_x,  prev_y;
-    float       curr_x,  curr_y;
-    float       duration;     // seconds held
-    float       total_dx;     // total accumulated displacement
+    f32       start_x, start_y;
+    f32       prev_x,  prev_y;
+    f32       curr_x,  curr_y;
+    f32       duration;     // seconds held
+    f32       total_dx;     // total accumulated displacement
 
     void reset() noexcept {
         type     = GestureType::None;
@@ -38,13 +39,13 @@ struct GestureState {
 
 struct TouchTracker {
     GestureState fingers[5];   // max 5 simultaneous touches
-    uint8_t      active_count;
+    u8      active_count;
 
     // Configurable thresholds
-    float swipe_min_dist;      // 20px default
-    float tap_max_time;        // 0.25s default
-    float long_press_time;     // 0.5s default
-    float drag_min_dist;       // 5px default
+    f32 swipe_min_dist;      // 20px default
+    f32 tap_max_time;        // 0.25s default
+    f32 long_press_time;     // 0.5s default
+    f32 drag_min_dist;       // 5px default
 
     TouchTracker() noexcept {
         reset();
@@ -60,13 +61,13 @@ struct TouchTracker {
     }
 
     // Find a finger slot by touch ID (0-4)
-    uint8_t find_slot(uint8_t touch_id) noexcept {
+    u8 find_slot(u8 touch_id) noexcept {
         return touch_id < 5 ? touch_id : 0;
     }
 
     // Touch begin
-    void on_touch_down(uint8_t touch_id, float x, float y) noexcept {
-        uint8_t slot = find_slot(touch_id);
+    void on_touch_down(u8 touch_id, f32 x, f32 y) noexcept {
+        u8 slot = find_slot(touch_id);
         auto& f = fingers[slot];
         f.phase   = TouchPhase::Pressing;
         f.type    = GestureType::None;
@@ -74,12 +75,12 @@ struct TouchTracker {
         f.start_y = f.prev_y = f.curr_y = y;
         f.duration = 0.0f;
         f.total_dx = 0.0f;
-        if (slot >= active_count) active_count = static_cast<uint8_t>(slot + 1);
+        if (slot >= active_count) active_count = static_cast<u8>(slot + 1);
     }
 
     // Touch move
-    void on_touch_move(uint8_t touch_id, float x, float y) noexcept {
-        uint8_t slot = find_slot(touch_id);
+    void on_touch_move(u8 touch_id, f32 x, f32 y) noexcept {
+        u8 slot = find_slot(touch_id);
         auto& f = fingers[slot];
         if (f.phase == TouchPhase::Idle) return;
 
@@ -88,9 +89,9 @@ struct TouchTracker {
         f.curr_x = x;
         f.curr_y = y;
 
-        float dx = f.curr_x - f.start_x;
-        float dy = f.curr_y - f.start_y;
-        float dist = std::sqrt(dx * dx + dy * dy);
+        f32 dx = f.curr_x - f.start_x;
+        f32 dy = f.curr_y - f.start_y;
+        f32 dist = __builtin_sqrtf(dx * dx + dy * dy);
 
         if (dist >= swipe_min_dist && f.type == GestureType::None) {
             // Determine swipe direction
@@ -109,8 +110,8 @@ struct TouchTracker {
     }
 
     // Touch end
-    void on_touch_up(uint8_t touch_id) noexcept {
-        uint8_t slot = find_slot(touch_id);
+    void on_touch_up(u8 touch_id) noexcept {
+        u8 slot = find_slot(touch_id);
         auto& f = fingers[slot];
         if (f.phase == TouchPhase::Idle) return;
 
@@ -126,8 +127,8 @@ struct TouchTracker {
     }
 
     // Touch cancel
-    void on_touch_cancel(uint8_t touch_id) noexcept {
-        uint8_t slot = find_slot(touch_id);
+    void on_touch_cancel(u8 touch_id) noexcept {
+        u8 slot = find_slot(touch_id);
         fingers[slot].phase = TouchPhase::Cancelled;
         fingers[slot].type  = GestureType::None;
     }
@@ -136,17 +137,17 @@ struct TouchTracker {
     // Also re-evaluate drag: a finger that moved to the drag threshold
     // in one frame (before tap_max_time elapsed) and then stopped needs
     // to be reclassified once enough time passes.
-    void update(float dt) noexcept {
-        for (uint8_t i = 0; i < active_count; ++i) {
+    void update(f32 dt) noexcept {
+        for (u8 i = 0; i < active_count; ++i) {
             if (fingers[i].phase == TouchPhase::Pressing ||
                 fingers[i].phase == TouchPhase::Moved) {
                 fingers[i].duration += dt;
             }
             if (fingers[i].phase == TouchPhase::Pressing &&
                 fingers[i].type == GestureType::None) {
-                float dx   = fingers[i].curr_x - fingers[i].start_x;
-                float dy   = fingers[i].curr_y - fingers[i].start_y;
-                float dist = std::sqrt(dx * dx + dy * dy);
+                f32 dx   = fingers[i].curr_x - fingers[i].start_x;
+                f32 dy   = fingers[i].curr_y - fingers[i].start_y;
+                f32 dist = __builtin_sqrtf(dx * dx + dy * dy);
                 if (dist >= drag_min_dist && fingers[i].duration >= tap_max_time) {
                     fingers[i].type  = GestureType::Drag;
                     fingers[i].phase = TouchPhase::Moved;
@@ -156,8 +157,8 @@ struct TouchTracker {
     }
 
     // Consume gesture — returns gesture and resets only that finger
-    GestureState consume(uint8_t touch_id) noexcept {
-        uint8_t slot = find_slot(touch_id);
+    GestureState consume(u8 touch_id) noexcept {
+        u8 slot = find_slot(touch_id);
         GestureState result = fingers[slot];
         fingers[slot].reset();
         // Recompute active_count
@@ -168,7 +169,7 @@ struct TouchTracker {
     }
 
     // Peek gesture without consuming
-    const GestureState& peek(uint8_t touch_id) const noexcept {
+    const GestureState& peek(u8 touch_id) const noexcept {
         return fingers[touch_id < 5 ? touch_id : 0];
     }
 };

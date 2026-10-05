@@ -3,6 +3,7 @@
 
 #pragma once
 #include <cstddef>
+#include "core/mm_types.h"
 
 namespace shader {
 
@@ -240,7 +241,7 @@ struct Uniforms {
 };
 
 vertex VSOutput cube_vertex_main(
-    const device float3* pos  [[buffer(0)]],
+    const device float3* pos  [[buffer(2)]],
     const device uchar4* col  [[buffer(1)]],
     constant Uniforms&   u    [[buffer(2)]],
     uint vid [[vertex_id]]
@@ -340,7 +341,7 @@ struct RoundedParams {
     float glow_intensity;
     float glow_width;
     float glow_pulse_freq;
-    float sdf_aa_scale;   // default 1.0 (like button.frag); lower = softer
+    float sdf_aa_scale;   // default 1.0; lower = softer
     float _pad0;
     float _pad1;
     float _pad2;
@@ -360,7 +361,21 @@ fragment float4 rounded_sprite_fragment_main(
     sampler          samp  [[sampler(0)]],
     constant RoundedParams& params [[buffer(2)]]
 ) {
-    float dist = sdf_rounded_box(input.local, input.radius);
+    // Pixel-space SDF: v_local spans -0.5..+0.5 per axis, so a distance in
+    // that space is anisotropic (0.04 = 16px on a 400px-wide side, 1px on a
+    // 28px-tall top) - thick side borders and corners wider than they are
+    // tall, i.e. "the radius does not round". The quad's pixel size is
+    // recoverable from the derivatives of local, so no vertex change is
+    // needed; radius / border width stay normalized by the SHORT axis, which
+    // is what the RECT per-side path already does.
+    float2 size = float2(1.0 / max(fwidth(input.local.x), 1e-5),
+                         1.0 / max(fwidth(input.local.y), 1e-5));
+    float  k    = min(size.x, size.y);
+    float  R    = min(input.radius * k, k * 0.5);
+    float2 p    = input.local * size;
+    float2 q    = abs(p) - size * 0.5 + R;
+    float  dist = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - R;
+
     float aa_raw = fwidth(dist);
     float aa     = max(aa_raw * params.sdf_aa_scale, 0.001);  // avoid zero derivative
 
@@ -372,7 +387,7 @@ fragment float4 rounded_sprite_fragment_main(
         tex.sample(samp, input.uv) * input.color;
 
     // Border from per-vertex only (no UBO override — avoids batch-wide border)
-    float bw = input.border_w;
+    float bw = input.border_w * k;  // px, isotropic across the four sides
     float border_mask = 0.0;
     if (bw > 0.0) {
         border_mask =
@@ -414,6 +429,62 @@ fragment float4 rounded_sprite_fragment_main(
 )msl";
 
 static constexpr size_t rounded_sprite_fragment_msl_size = sizeof(rounded_sprite_fragment_msl);
+
+// ─── Ring Fragment (analytic progress ring — one quad, no tile seams) ──
+static constexpr char   ring_fragment_msl[]    = R"msl(
+#include <metal_stdlib>
+using namespace metal;
+
+struct VSOutput {
+    float4 position [[position]];
+    float2 uv;
+    float4 color;
+    float2 local;
+    float  radius;
+    float  border_w;
+    float4 border_color;
+};
+
+struct RingParams {
+    // x=outer_r, y=thickness (local), w=aa_scale. No sweep: a UBO's content is
+    // global to the frame (commands execute at submit), so every ring would
+    // render the last ring's sweep. The sweep rides `input.radius` instead -
+    // the ring draws no rounded corners, so that slot is free.
+    float4 p;
+};
+
+fragment float4 ring_fragment_main(
+    VSOutput         input [[stage_in]],
+    texture2d<float> tex   [[texture(0)]],
+    sampler          samp  [[sampler(0)]],
+    constant RingParams& params [[buffer(2)]]
+) {
+    // Local units throughout: the quad spans -0.5..0.5, so the circle
+    // edge is at r = outer_r = 0.5. (An earlier revision doubled into
+    // -1..1 but kept outer_r = 0.5 — the ring drew at half size while
+    // the sparkle tip used full-size math. Never again.)
+    float  r    = length(input.local);
+    float  mid  = params.p.x - params.p.y * 0.5;
+    float  hw   = params.p.y * 0.5;
+    float  aa   = max(float(fwidth(r)) * params.p.w, 0.001);
+    float  band = 1.0 - smoothstep(hw - aa, hw + aa, abs(r - mid));
+
+    // Sweep from 12 o'clock, clockwise. Local y grows downward, so the
+    // top is (0,-0.5): atan2(x, -y) is 0 there and grows clockwise.
+    float ang = atan2(input.local.x, -input.local.y);
+    if (ang < 0.0) {
+        ang += 6.2831853;
+    }
+    float d    = ang - input.radius; // repurposed as the sweep (see RingParams)
+    float aa_a = max(float(fwidth(d)) * params.p.w, 0.001);
+    float cap  = 1.0 - smoothstep(-aa_a, aa_a, d);
+
+    float4 col = tex.sample(samp, input.uv) * input.color;
+    return float4(col.rgb, col.a * band * cap);
+}
+)msl";
+
+static constexpr size_t ring_fragment_msl_size = sizeof(ring_fragment_msl);
 
 // ─── Screen Quad Vertex (shared base for all post-process) ────────
 static constexpr char   screen_quad_vertex_msl[]         = R"msl(
@@ -683,68 +754,6 @@ fragment float4 grayscale_fragment_main(
 )msl";
 
 static constexpr size_t grayscale_fragment_msl_size      = sizeof(grayscale_fragment_msl);
-
-// ─── Button Fragment ──────────────────────────────────────────────
-static constexpr char   button_fragment_msl[]            = R"msl(
-#include <metal_stdlib>
-using namespace metal;
-
-struct VSOutput {
-    float4 position [[position]];
-    float2 uv;
-    float4 color;
-    float2 local;
-    float  radius;
-};
-
-struct ButtonParams {
-    float4 border_color;
-    float4 icon_color;
-    float2 aspect;       // width/height
-    float  border_width; // normalized 0..1
-    float  has_texture;  // 0 = solid color, 1 = sample texture
-};
-
-float sdf_rounded_box_aspect(float2 p, float2 half_size, float r) {
-    float2 q = abs(p * half_size * 2.0) - half_size + r;
-    return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
-}
-
-fragment float4 button_fragment_main(
-    VSOutput             input [[stage_in]],
-    texture2d<float>     tex   [[texture(0)]],
-    sampler              samp  [[sampler(0)]],
-    constant ButtonParams& p   [[buffer(2)]]
-) {
-    float2 half_size = float2(0.5 * p.aspect.x, 0.5);
-    float  r_scaled  = input.radius * min(half_size.x, half_size.y);
-    float  dist      = sdf_rounded_box_aspect(input.local, half_size, r_scaled);
-    float  aa        = fwidth(dist); // abs(dfdx(dist)) + abs(dfdy(dist));
-    float  mask      = 1.0 - smoothstep(-aa, aa, dist);
-
-    float4 fill;
-    if (p.has_texture > 0.5) {
-        fill = tex.sample(samp, input.uv) * p.icon_color;
-    } else {
-        fill = input.color;
-    }
-
-    float4 col;
-    if (p.border_width > 0.0 && p.border_color.a > 0.0) {
-        float2 inner_half = half_size - p.border_width;
-        float  inner_r    = max(r_scaled - p.border_width, 0.0);
-        float  inner_dist = sdf_rounded_box_aspect(input.local, inner_half, inner_r);
-        float  border     = smoothstep(-aa, aa, inner_dist);
-        col = mix(p.border_color, fill, border);
-    } else {
-        col = fill;
-    }
-
-    return float4(col.rgb, col.a * mask);
-}
-)msl";
-
-static constexpr size_t button_fragment_msl_size         = sizeof(button_fragment_msl);
 
 // ─── Normal Derive Fragment (Sobel normal from albedo + Blinn-Phong) ─
 // Engine port of lab_derive. No second texture needed.

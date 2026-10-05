@@ -3,6 +3,7 @@
 
 #pragma once
 #include "mm_sprite.hpp"
+#include "core/mm_types.h"
 #include "mm_texture_loader.hpp"
 #include "../rhi/mm_rhi_concept.hpp"
 #include "../core/mm_expected.hpp"
@@ -40,9 +41,9 @@ static inline const char* skip_line(const char* p) noexcept {
 }
 
 // Internal: copy next whitespace-delimited token, returns ptr after token
-static inline const char* next_token(const char* p, char* out, uint16_t max_len) noexcept {
+static inline const char* next_token(const char* p, char* out, u16 max_len) noexcept {
     p = skip_ws(p);
-    uint16_t i = 0;
+    u16 i = 0;
     while (*p && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r') {
         if (i < max_len - 1) out[i++] = *p;
         ++p;
@@ -62,7 +63,7 @@ static inline bool line_starts_with(const char* p, const char* prefix) noexcept 
 }
 
 // ─── Sprite atlas error ──────────────────────────────────────────
-enum class SpriteError : uint32_t {
+enum class SpriteError : u32 {
     None = 0,
     FileNotFound,
     ParseError,
@@ -142,7 +143,7 @@ Expected<SpriteAtlas, SpriteError> sprite_atlas_load_from_file(
 
                 if (current_anim && frame_name[0] && dur_str[0]) {
                     // Find the frame index by name
-                    uint16_t fi = 0;
+                    u16 fi = 0;
                     while (fi < atlas.frame_count &&
                            std::strcmp(atlas.frame_names[fi], frame_name) != 0) {
                         ++fi;
@@ -151,7 +152,7 @@ Expected<SpriteAtlas, SpriteError> sprite_atlas_load_from_file(
                         current_anim->frame_count < SPRITE_MAX_ANIM_FRAMES) {
                         auto& af = current_anim->frames[current_anim->frame_count++];
                         af.frame_index = fi;
-                        af.duration = static_cast<float>(std::atof(dur_str));
+                        af.duration = static_cast<f32>(std::atof(dur_str));
                     }
                 }
             } else {
@@ -182,12 +183,12 @@ Expected<SpriteAtlas, SpriteError> sprite_atlas_load_from_file(
 
                 if (name[0] && ws[0] && hs[0]) {
                     std::memcpy(atlas.frame_names[atlas.frame_count], name, SPRITE_MAX_NAME);
-                    f.x = static_cast<uint16_t>(std::atoi(xs));
-                    f.y = static_cast<uint16_t>(std::atoi(ys));
-                    f.w = static_cast<uint16_t>(std::atoi(ws));
-                    f.h = static_cast<uint16_t>(std::atoi(hs));
-                    f.pivot_x = static_cast<float>(std::atof(pxs));
-                    f.pivot_y = static_cast<float>(std::atof(pys));
+                    f.x = static_cast<u16>(std::atoi(xs));
+                    f.y = static_cast<u16>(std::atoi(ys));
+                    f.w = static_cast<u16>(std::atoi(ws));
+                    f.h = static_cast<u16>(std::atoi(hs));
+                    f.pivot_x = static_cast<f32>(std::atof(pxs));
+                    f.pivot_y = static_cast<f32>(std::atof(pys));
                     ++atlas.frame_count;
                 }
             }
@@ -261,7 +262,7 @@ Expected<SpriteAtlas, SpriteError> sprite_atlas_load_from_file(
     atlas.tex_h   = tex->height;
 
     // Fill in texture info for each frame
-    for (uint16_t i = 0; i < atlas.frame_count; ++i) {
+    for (u16 i = 0; i < atlas.frame_count; ++i) {
         atlas.frames[i].texture = atlas.texture;
         atlas.frames[i].tex_w   = atlas.tex_w;
         atlas.frames[i].tex_h   = atlas.tex_h;
