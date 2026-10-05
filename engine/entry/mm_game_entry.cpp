@@ -448,29 +448,29 @@ static void render_world() noexcept {
 // ─────────────────────────────────────────────────────────────
 
 // ─── UI callbacks ──────────────────────────────────────────────────
-static void on_play_click(u16) {
+static void on_play_click(u16, void *) {
     reset_game();
     g_game->started    = true;
     g_game->state      = GameState::Playing;
     g_game->drop_timer = 0.0f; // spawn first block immediately
 }
 
-static void on_toggle_sound(u16 id) {
+static void on_toggle_sound(u16 id, void *) {
     g_game->sound_on = g_game->ui.pool[id].state != 0;
     g_audio_system.sfx.set_master_volume(g_game->sound_on ? 1.0f : 0.0f);
     g_save_data.set_sound(g_game->sound_on);
     save_data_save(g_vfs);
 }
 
-static void on_checkbox_part(u16 id) {
+static void on_checkbox_part(u16 id, void *) {
     g_game->particles_on = g_game->ui.pool[id].state != 0;
     g_save_data.set_haptic(g_game->particles_on);
     save_data_save(g_vfs);
 }
 
-static void on_slider_volume(u16, f32 val) { g_audio_system.sfx.set_master_volume(val); }
+static void on_slider_volume(u16, f32 val, void *) { g_audio_system.sfx.set_master_volume(val); }
 
-static void on_quit_click(u16) {
+static void on_quit_click(u16, void *) {
     auto &g = *g_game;
     reset_game();
     g.ui.clear();
@@ -480,9 +480,9 @@ static void on_quit_click(u16) {
     g.state     = GameState::Playing;
 }
 
-static void on_exit_click(u16) { app_quit(); }
+static void on_exit_click(u16, void *) { app_quit(); }
 
-static void on_restart_click(u16) {
+static void on_restart_click(u16, void *) {
     auto &g = *g_game;
     g_audio_system.sfx.stop_all();
     reset_game();

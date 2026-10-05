@@ -212,6 +212,7 @@ if(BUILD_EXAMPLES)
         examples/mm_05_particle_stress.cpp
         examples/mm_06_shader_lab.cpp
         examples/mm_07_ui_lab.cpp
+        entry/mm_game_entry.cpp
     )
 endif()
 
