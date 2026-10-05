@@ -32,6 +32,28 @@
 #include <cstdio>
 #include <cstring>
 
+// Simple deterministic RNG (LCG, matches engine convention).
+static u32 g_rng = 12345u;
+static u32 rand_u32() noexcept {
+    g_rng = g_rng * 1664525u + 1013904223u;
+    return g_rng;
+}
+static f32 randf_range(f32 lo, f32 hi) noexcept {
+    return lo + (static_cast<f32>(rand_u32() >> 8) / 16777216.0f) * (hi - lo);
+}
+static i32 rand_range(i32 lo, i32 hi) noexcept {
+    return lo + static_cast<i32>(rand_u32() % static_cast<u32>(hi - lo + 1));
+}
+
+#if defined(TARGET_ANDROID) || (defined(__APPLE__) && TARGET_OS_IPHONE)
+#    define MM_MOBILE 1
+#else
+#    define MM_MOBILE 0
+#endif
+
+constexpr f32 HIT_PAD_LT = 15.0f;
+constexpr f32 HIT_PAD_RB = 10.0f;
+
 // ─────────────────────────────────────────────────────────────
 
 static constexpr u16 MAX_BLOCKS    = 256;
@@ -118,7 +140,8 @@ struct Game {
 
     u8            sfx_hit_id    = 0;
     u8            sfx_score_id  = 0;
-    u8            sfx_tap_id    = 0;
+
+    ui::Theme     theme;
 
     // HUD widget IDs (for live text updates)
     u16           hud_id_score  = UINT16_MAX;
@@ -136,7 +159,7 @@ static Game *g_game = nullptr;
 static void play_sfx(u8 id, i32 priority, f32 base, f32 range) noexcept {
     if (g_game && !g_game->sound_on) return;
 
-    f32 pitch = base + static_cast<f32>(std::rand() % static_cast<i32>(range * 100.0f + 0.5f)) / 100.0f;
+    f32 pitch = randf_range(base, base + range);
 
     g_audio_system.sfx.play_id(id, static_cast<u8>(priority), pitch);
 }
@@ -183,7 +206,7 @@ static void reset_game() noexcept {
     g.camera.decay = 0.92f;
 
     g.ui.init();
-    g.ui.theme = ui::Theme::load("themes/test_theme.json");
+    g.ui.theme = g.theme;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -231,7 +254,7 @@ static void spawn_block() noexcept {
     f32 scale = get_game_scale();
     f32 bw    = 60.0f * scale; // Slightly smaller base, but scaled for mobile
     f32 max_x = static_cast<f32>(g_game->renderer.width) - bw;
-    b->x        = max_x > bw ? static_cast<f32>(std::rand() % static_cast<i32>(max_x - bw + 1.0f) + (bw * 0.5f)) : (bw * 0.5f);
+    b->x        = max_x > bw ? static_cast<f32>(rand_range(static_cast<i32>(bw * 0.5f), static_cast<i32>(max_x))) : (bw * 0.5f);
     b->y        = -bw;
 
     b->w        = bw;
@@ -246,7 +269,7 @@ static void spawn_block() noexcept {
         color(1.0f, 1.0f, 0.267f),
     };
 
-    b->color       = colors[std::rand() % 4].to_u32_argb(); // 0xAARRGGBB engine literals
+    b->color       = colors[rand_range(0, 3)].to_u32_argb(); // 0xAARRGGBB engine literals
 
     b->spawn_scale = 0.0f;
 
@@ -617,7 +640,28 @@ static void build_ui_demo() noexcept {
     m.layout(r);
 }
 
-static void game_frame(void *, f32 dt, InputState &input) {
+// ─── Hit test helper ──────────────────────────────────────────────
+static bool try_hit_block(f32 world_x, f32 world_y) noexcept {
+    for (i32 bi = MAX_BLOCKS - 1; bi >= 0; --bi) {
+        auto &b = g_game->blocks[bi];
+        if (!b.active) {
+            continue;
+        }
+        f32 half_w = b.w * 0.5f;
+        f32 half_h = b.h * 0.5f;
+        if (world_x + HIT_PAD_LT >= b.x - half_w && world_x - HIT_PAD_RB <= b.x + half_w &&
+            world_y + HIT_PAD_LT >= b.y - half_h && world_y - HIT_PAD_RB <= b.y + half_h) {
+#ifndef NDEBUG
+            fprintf(stderr, "[hit] block at (%.0f,%.0f)\n", b.x, b.y);
+#endif
+            hit_block(b);
+            return true;
+        }
+    }
+    return false;
+}
+
+static void game_frame(void * /*user_data*/, f32 dt, InputState &input) {
 
     auto &g  = *g_game;
 
@@ -676,6 +720,7 @@ static void game_frame(void *, f32 dt, InputState &input) {
                 }
                 f32 tx = f.curr_x + cam_x;
                 f32 ty = f.curr_y + cam_y;
+#ifndef NDEBUG
                 fprintf(stderr, "[pressing] f=%llu tx=%.4f ty=%.4f active:", (unsigned long long)g.frame_count, tx, ty);
                 for (auto &b : g.blocks) {
                     if (!b.active) {
@@ -684,22 +729,10 @@ static void game_frame(void *, f32 dt, InputState &input) {
                     fprintf(stderr, " (%.1f,%.1f)", b.x, b.y);
                 }
                 fprintf(stderr, "\n");
-                f32 const EPS_LT = 15.0f;
-                f32 const EPS_RB = 10.0f;
-                for (i32 bi = MAX_BLOCKS - 1; bi >= 0; --bi) {
-                    auto &b = g.blocks[bi];
-                    if (!b.active) {
-                        continue;
-                    }
-                    f32 half_w = b.w * 0.5f;
-                    f32 half_h = b.h * 0.5f;
-                    if (tx + EPS_LT >= b.x - half_w && tx - EPS_RB <= b.x + half_w && ty + EPS_LT >= b.y - half_h && ty - EPS_RB <= b.y + half_h) {
-                        fprintf(stderr, "[pressing] HIT block at (%.0f,%.0f)!\n", b.x, b.y);
-                        hit_block(b);
-                        g.tap_cooldown = 0.15f;
-                        hit_immediate  = true;
-                        break;
-                    }
+#endif
+                if (try_hit_block(tx, ty)) {
+                    g.tap_cooldown = 0.15f;
+                    hit_immediate  = true;
                 }
                 break;
             }
@@ -720,6 +753,7 @@ static void game_frame(void *, f32 dt, InputState &input) {
                 // Convert screen tap position → world space
                 tx += cam_x;
                 ty += cam_y;
+#ifndef NDEBUG
                 fprintf(stderr, "[trace] f=%llu tx=%.4f ty=%.4f active:", (unsigned long long)g.frame_count, tx, ty);
                 for (auto &b : g.blocks) {
                     if (!b.active) {
@@ -728,23 +762,9 @@ static void game_frame(void *, f32 dt, InputState &input) {
                     fprintf(stderr, " (%.1f,%.1f,%.0f,%.0f)", b.x, b.y, b.w, b.h);
                 }
                 fprintf(stderr, "\n");
-                // Reverse order so top-most (last-rendered) block is checked first
-                // 15px top/left, 10px bottom/right grace
-                f32 const EPS_LT = 15.0f;
-                f32 const EPS_RB = 10.0f;
-                for (i32 bi = MAX_BLOCKS - 1; bi >= 0; --bi) {
-                    auto &b = g.blocks[bi];
-                    if (!b.active) {
-                        continue;
-                    }
-                    f32 half_w = b.w * 0.5f;
-                    f32 half_h = b.h * 0.5f;
-                    if (tx + EPS_LT >= b.x - half_w && tx - EPS_RB <= b.x + half_w && ty + EPS_LT >= b.y - half_h && ty - EPS_RB <= b.y + half_h) {
-                        fprintf(stderr, "[click] HIT block at (%.0f,%.0f)!\n", b.x, b.y);
-                        hit_block(b);
-                        g.tap_cooldown = 0.15f;
-                        break;
-                    }
+#endif
+                if (try_hit_block(tx, ty)) {
+                    g.tap_cooldown = 0.15f;
                 }
                 break;
             }
@@ -763,6 +783,7 @@ static void game_frame(void *, f32 dt, InputState &input) {
             i32  len = snprintf(buf, sizeof(buf), "Score: %u", g.score);
             if (len > 0) {
                 std::strncpy(g.ui.pool[g.hud_id_score].text, buf, sizeof(g.ui.pool[g.hud_id_score].text) - 1);
+                g.ui.pool[g.hud_id_score].text[sizeof(g.ui.pool[g.hud_id_score].text) - 1] = '\0';
             }
         }
         if (g.hud_id_combo != UINT16_MAX) {
@@ -771,6 +792,7 @@ static void game_frame(void *, f32 dt, InputState &input) {
                 i32  len = snprintf(buf, sizeof(buf), "Combo x%d", g.combo);
                 if (len > 0) {
                     std::strncpy(g.ui.pool[g.hud_id_combo].text, buf, sizeof(g.ui.pool[g.hud_id_combo].text) - 1);
+                    g.ui.pool[g.hud_id_combo].text[sizeof(g.ui.pool[g.hud_id_combo].text) - 1] = '\0';
                 }
                 g.ui.pool[g.hud_id_combo].flags |= ui::WF_VISIBLE;
             } else {
@@ -837,8 +859,6 @@ static void game_init(void *) {
 
     g.sfx_hit_id   = g_audio_system.sfx.register_sound("sfx/hit.wav");
     g.sfx_score_id = g_audio_system.sfx.register_sound("sfx/score.wav");
-    g.sfx_tap_id   = g_audio_system.sfx.register_sound("sfx/tap.wav");
-
 
     auto rend_res  = g.renderer.init(g_backend, nullptr, 0, 0);
     if (!rend_res) {
@@ -846,6 +866,8 @@ static void game_init(void *) {
     } else {
         MM_LOG("Renderer initialized successfully");
     }
+
+    g.theme = ui::Theme::load("themes/test_theme.json");
 
     g.batch.init();
 
@@ -857,7 +879,7 @@ static void game_init(void *) {
                 i32   i    = (y * 256 + x) * 4;
                 f32   cx   = (f32)(x - 128);
                 f32   cy   = (f32)(y - 128);
-                f32   dist = sqrtf(cx * cx + cy * cy) / 128.0f;
+                f32   dist = __builtin_sqrtf(cx * cx + cy * cy) / 128.0f;
                 if (dist > 1.0f) {
                     dist = 1.0f;
                 }
@@ -892,7 +914,6 @@ static void game_init(void *) {
             g.demo_mat = g.renderer.make_material(g.renderer.sprite_pipeline, g.demo_tex, g.renderer.default_sampler);
         }
     }
-    g.batch.init();
 }
 
 // ─────────────────────────────────────────────────────────────
