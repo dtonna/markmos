@@ -1,0 +1,183 @@
+// Shader Lab — aura mode (A): breathing inner light + edge frame pulse.
+// Hot-reload: save this file while the lab runs in aura mode (key A).
+// Uses lab_card.png only — no normal texture needed.
+//
+// Look: the card slowly fills with warm inner light (0 → max → normal
+// loop). As the light rises, a warm-white frame hugs the card edge with
+// a bright pulse orbiting it, and same-colored spicules fire outward
+// from the edge in time with the pulse.
+//
+// Tune live:
+//   - Host keys: Up/Down = breath speed, Left/Right = filament count,
+//     +/- = intensity.
+//   - Edit below: frame width, filament length, warp (freq/speed/bend),
+//     flow, erosion, flicker, colors.
+//   - Host params win for time/speed/spikes/intensity on param update.
+//
+// Rules:
+//   - Entry MUST stay named `lab_aura_main` (looked up by name).
+//   - VSOutput MUST match sprite_vertex_msl (position/uv/color).
+//   - Params MUST be `LabAuraParams` at [[buffer(2)]]: three float4s.
+//     (Metal packs vectors at 16-byte boundaries — float4 members ONLY.)
+//   - Metal only. No dynamic loops (fBm uses a fixed 3-iteration loop;
+//     filaments use closed-form nearest-sector math).
+
+#include <metal_stdlib>
+using namespace metal;
+
+struct VSOutput {
+    float4 position [[position]];
+    float2 uv;
+    float4 color;
+};
+
+struct LabAuraParams {
+    float4 timing; // x = time (s), y = breath speed (Hz), z = filament density, w = filament length (card-uv)
+    float4 color;  // rgba warm-white aura color
+    float4 misc;   // x = card aspect (w/h), y = intensity, z = quad scale k, w = frame width (card-uv)
+    float4 tune2;  // x = filament opacity (host SPK/OPA steppers), y/z/w spare
+};
+
+float sd_round_box(float2 p, float2 b, float r) {
+    float2 q = abs(p) - b + r;
+    return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+}
+
+float hash1(float n) {
+    return fract(sin(n * 127.1) * 43758.5453);
+}
+
+float hash21(float2 p) {
+    return fract(sin(dot(p, float2(127.1, 311.7))) * 43758.5453);
+}
+
+float vnoise(float2 p) {
+    float2 i = floor(p);
+    float2 f = fract(p);
+    float2 s = f * f * (3.0 - 2.0 * f);
+    float a = hash21(i);
+    float b = hash21(i + float2(1.0, 0.0));
+    float c = hash21(i + float2(0.0, 1.0));
+    float d = hash21(i + float2(1.0, 1.0));
+    return mix(mix(a, b, s.x), mix(c, d, s.x), s.y);
+}
+
+// 3-octave fractal noise, fixed loop bound (Metal-safe). Output ~0..1.
+float fbm(float2 p) {
+    float v = 0.0;
+    float amp = 0.5;
+    for (int i = 0; i < 3; ++i) {
+        v += amp * vnoise(p);
+        p = p * 2.03 + 11.7;
+        amp *= 0.5;
+    }
+    return v;
+}
+
+fragment float4 lab_aura_main(
+    VSOutput               input [[stage_in]],
+    texture2d<float>       albedo [[texture(0)]],
+    sampler                samp  [[sampler(0)]],
+    constant LabAuraParams& p    [[buffer(2)]]
+) {
+    // The host draws a quad k× larger than the card (margin for the frame
+    // pulse and spicules). Remap to card space; the sampler clamps to edge
+    // so mask the base by the inside test.
+    float k = max(p.misc.z, 1.0);
+    float2 card_uv = (input.uv - 0.5) * k + 0.5;
+    float4 base = albedo.sample(samp, card_uv) * input.color;
+    float2 inside2 = step(float2(0.0), card_uv) * step(card_uv, float2(1.0));
+    base *= inside2.x * inside2.y;
+
+    // Aspect-correct card space, center origin.
+    float aspect = max(p.misc.x, 1e-3);
+    float2 pc = (card_uv - 0.5) * float2(aspect, 1.0);
+    float r = length(pc);
+    float ang = atan2(pc.y, pc.x);
+
+    // Breath envelope: 0 → 1 → 0, smooth at both ends.
+    float ph = fract(p.timing.x * max(p.timing.y, 1e-3));
+    float breath = sin(3.14159265 * ph);
+    breath *= breath;
+
+    // Card body mask (same rounded box as the glow/sun shaders).
+    float2 half_size = float2(aspect * 0.5, 0.5) - 0.03;
+    float dist = sd_round_box(pc, half_size, 0.03);
+    float aa = max(fwidth(dist), 1e-3);
+    float body = 1.0 - smoothstep(-aa, aa, dist);
+    float outside = smoothstep(-aa, aa, dist);
+
+    // Inner light: warm lift over the face, brighter toward the center.
+    float core = exp(-r * r * 8.0);
+    float3 col = base.rgb * body + p.color.rgb * breath * (0.30 + 0.55 * core) * p.misc.y * body;
+
+    // Edge frame hugging the card: appears as the light rises.
+    float fw = max(p.misc.w, 1e-4);
+    float frame = 1.0 - smoothstep(0.0, fw, abs(dist));
+
+    // Orbiting pulse: bright comet segment traveling around the edge,
+    // one lap per breath cycle.
+    float pulse_ang = 6.2831853 * ph;
+    float d_ang = atan2(sin(ang - pulse_ang), cos(ang - pulse_ang));
+    float comet = exp(-d_ang * d_ang * 6.0);
+    float frame_a = frame * breath * (0.55 + 0.45 * comet);
+
+    // Spicule filaments: thin solar-prominence threads rooted at the edge,
+    // same color as the pulse. Domain-warped angle arcs them back toward
+    // the center; ridged fBm sharpened to bright cores with dark lanes
+    // between; a second slow noise breaks each thread into segments that
+    // dissolve at the tips.
+    // Seam note: everything is sampled through circular coords
+    // (cos/sin of the warped angle), so there is no ±π discontinuity —
+    // the old sector math left a visible seam at the left edge.
+    // (Edit live — hot-reload applies on save.)
+    const float warp_freq = 3.0;  // bend waves per unit radius
+    const float warp_speed = 1.5; // bend drift, rad/s
+    const float bend_amp = 0.55;  // arc strength, radians (at full range)
+    const float bend_range = 0.15; // distance over which bend ramps in (card-uv)
+    const float droop = 0.4;      // one-way downward arc, radians at tip
+    const float flow_speed = 0.35; // outward noise flow
+    const float erosion = 0.45;   // how aggressively lanes dissolve
+
+    float t = p.timing.x;
+    // Ballistic arc: strands leave the edge straight (no bend at the root),
+    // then curve over with distance — sway ramps in over bend_range, plus
+    // a one-way droop growing with along².
+    float d_out = dist; // > 0 outside the edge
+    float n = max(p.timing.z, 1.0);
+    float ring_r = 0.8 + n * 0.05; // L/R count → strand density
+    float2 dir0 = float2(cos(ang), sin(ang)); // raw-angle circle (seamless)
+    // Smooth length variation (vnoise, NOT quantized hash — floor() jumps
+    // at y=0, i.e. the left edge, and showed as a join-point seam).
+    float vary = 0.7 + 0.3 * vnoise(dir0 * 3.0);
+    float len = max(p.timing.w, 1e-3) * breath * vary;
+    float along0 = d_out / max(len, 1e-4);
+    float bend_here = bend_amp * smoothstep(0.0, bend_range, d_out);
+    float th_w = ang + sin(r * 3.14159265 * warp_freq - t * warp_speed) * bend_here
+               + droop * along0 * along0; // one-way arc-over, grows with distance
+    float2 dir = float2(cos(th_w), sin(th_w)); // seamless around the circle
+
+
+    // Thin bright thread cores: ridged fBm raised to a high power so only
+    // the ridge crests survive, with dark lanes between threads.
+    float2 fbm_uv = dir * (ring_r * 1.5) + float2(0.0, r * 2.5 - t * flow_speed);
+    float ridge = 1.0 - abs(2.0 * fbm(fbm_uv) - 1.0);
+    float line = pow(clamp(ridge, 0.0, 1.0), 10.0);
+
+    // Breakup: slow noise along the thread cuts gaps so each strand is a
+    // chain of segments, dissolving toward the tip.
+    float gaps = fbm(dir * 2.0 + float2(5.0, r * 4.0 - t * 0.8));
+    line *= smoothstep(0.25, 0.75, gaps * 0.6 + 0.55 * (1.0 - d_out / max(len, 1e-4)));
+
+    // Erosion mask: lanes dissolve first, thread cores persist to the tip.
+    // (Normal-order smoothstep — reversed edges are undefined in Metal.)
+    float along = along0;
+    float d = along - line * erosion;
+    float spike = (1.0 - smoothstep(0.0, 0.5, d)) * p.tune2.x; // host filament opacity
+    spike *= smoothstep(0.0, 0.02, along); // root fade-in
+    spike *= step(0.0, d_out) * step(d_out, len * 1.3);
+
+    float aura_a = (frame_a + spike * breath) * p.color.a * p.misc.y;
+    col += p.color.rgb * aura_a * (outside + body * 0.25);
+    return float4(col, max(base.a * body, aura_a));
+}

@@ -3,6 +3,7 @@
 
 #pragma once
 #include <cassert>
+#include "core/mm_types.h"
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -91,11 +92,11 @@ class Pool {
 #ifndef NDEBUG
         assert(owns(ptr) && "pointer does not belong to this pool");
 
-        assert(allocated_ > 0 && "double free / corrupted pool");
+        assert(allocated_ > 0 && "f64 free / corrupted pool");
 
         auto *dbg = static_cast<FreeNode *>(ptr);
 
-        assert(dbg->magic != kFreeMagic && "double free detected");
+        assert(dbg->magic != kFreeMagic && "f64 free detected");
 
         std::memset(ptr, 0xDD, slot_size_);
 
@@ -188,8 +189,8 @@ class Pool {
 
   private:
 #ifndef NDEBUG
-    static constexpr uint32_t kFreeMagic = 0xDEADBEEF;
-    static constexpr uint32_t kUsedMagic = 0xCAFEBABE;
+    static constexpr u32 kFreeMagic = 0xDEADBEEF;
+    static constexpr u32 kUsedMagic = 0xCAFEBABE;
 #endif
 
     // ------------------------------------------------------------------------
@@ -199,7 +200,7 @@ class Pool {
         FreeNode *next;
 
 #ifndef NDEBUG
-        uint32_t magic;
+        u32 magic;
 #endif
     };
 

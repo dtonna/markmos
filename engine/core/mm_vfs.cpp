@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "mm_vfs.hpp"
+#include "core/mm_types.h"
 #include "mm_job_system.hpp"
 #include "mm_log.hpp"
 #include "mm_pool.hpp"
@@ -88,7 +89,7 @@ VfsBlob Vfs::read_doc(const char *path) noexcept {
 
 VfsBlob Vfs::read_absolute(const char *path) noexcept { return read_file(path); }
 
-bool    Vfs::write_doc(const char *path, const void *data, uint64_t size) noexcept {
+bool    Vfs::write_doc(const char *path, const void *data, u64 size) noexcept {
     char full[1024];
     int  n = std::snprintf(full, sizeof(full), "%s/%s", doc_path_, path);
     if (n < 0 || static_cast<size_t>(n) >= sizeof(full)) {
@@ -104,7 +105,7 @@ bool    Vfs::write_doc(const char *path, const void *data, uint64_t size) noexce
     return ok;
 }
 
-bool Vfs::write_doc_atomic(const char *path, const void *data, uint64_t size) noexcept {
+bool Vfs::write_doc_atomic(const char *path, const void *data, u64 size) noexcept {
     char tmp[1024], dst[1024];
     int  n = std::snprintf(tmp, sizeof(tmp), "%s/%s.tmp", doc_path_, path);
     if (n < 0 || static_cast<size_t>(n) >= sizeof(tmp)) {
@@ -172,7 +173,7 @@ VfsBlob Vfs::read_file(const char *full_path) noexcept {
                 return {};
             }
 
-            auto  blob_size = static_cast<uint64_t>(size);
+            auto  blob_size = static_cast<u64>(size);
             void *dst       = pool_alloc(static_cast<size_t>(blob_size));
             if (!dst) {
                 MM_ERROR("VFS: Out of memory for asset blob: %s (%llu bytes)", full_path, (unsigned long long)blob_size);
@@ -201,7 +202,7 @@ VfsBlob Vfs::read_file(const char *full_path) noexcept {
         ::close(fd);
         return {};
     }
-    auto blob_size = static_cast<uint64_t>(st.st_size);
+    auto blob_size = static_cast<u64>(st.st_size);
     if (blob_size == 0) {
         ::close(fd);
         return {};
@@ -215,7 +216,7 @@ VfsBlob Vfs::read_file(const char *full_path) noexcept {
 
     ssize_t bytes = ::read(fd, dst, static_cast<size_t>(blob_size));
     ::close(fd);
-    if (bytes < 0 || static_cast<uint64_t>(bytes) != blob_size) {
+    if (bytes < 0 || static_cast<u64>(bytes) != blob_size) {
         pool_free_sized(dst, static_cast<size_t>(blob_size));
         return {};
     }
@@ -233,7 +234,7 @@ VfsBlob Vfs::read_file(const char *full_path) noexcept {
         return {};
     }
 
-    auto blob_size = static_cast<uint64_t>(size_li.QuadPart);
+    auto blob_size = static_cast<u64>(size_li.QuadPart);
     void *dst = pool_alloc(static_cast<size_t>(blob_size));
     if (!dst) {
         CloseHandle(hFile);
@@ -295,7 +296,7 @@ void AssetLoader::process_completed() noexcept {
 bool AssetLoader::push_result(const LoadResult &r) noexcept {
     while (lock_.test_and_set(std::memory_order_acquire)) {
     }
-    uint32_t next = (tail_ + 1) & (kMaxPending - 1);
+    u32 next = (tail_ + 1) & (kMaxPending - 1);
     if (next == head_) {
         lock_.clear(std::memory_order_release);
         return false;

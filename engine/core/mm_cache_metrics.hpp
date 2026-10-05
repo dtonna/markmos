@@ -3,6 +3,7 @@
 
 #pragma once
 #include <cstdint>
+#include "core/mm_types.h"
 #include <atomic>
 
 // Cache Metrics — instrumentation counters for zero-alloc / cache behavior validation
@@ -13,9 +14,9 @@
 #if defined(ENGINE_ENABLE_ASSERT) && ENGINE_ENABLE_ASSERT
 
 struct CacheCounters {
-    alignas(64) std::atomic<uint32_t> allocations_this_frame{0};
-    alignas(64) std::atomic<uint32_t> slotmap_lookups_in_hot_loop{0};
-    alignas(64) std::atomic<uint32_t> pool_overflows{0};
+    alignas(64) std::atomic<u32> allocations_this_frame{0};
+    alignas(64) std::atomic<u32> slotmap_lookups_in_hot_loop{0};
+    alignas(64) std::atomic<u32> pool_overflows{0};
 
     void reset_frame() noexcept {
         allocations_this_frame.store(0, std::memory_order_relaxed);
@@ -34,9 +35,9 @@ struct CacheCounters {
         pool_overflows.fetch_add(1, std::memory_order_relaxed);
     }
 
-    uint32_t allocs() const noexcept { return allocations_this_frame.load(std::memory_order_relaxed); }
-    uint32_t hot_lookups() const noexcept { return slotmap_lookups_in_hot_loop.load(std::memory_order_relaxed); }
-    uint32_t overflows() const noexcept { return pool_overflows.load(std::memory_order_relaxed); }
+    u32 allocs() const noexcept { return allocations_this_frame.load(std::memory_order_relaxed); }
+    u32 hot_lookups() const noexcept { return slotmap_lookups_in_hot_loop.load(std::memory_order_relaxed); }
+    u32 overflows() const noexcept { return pool_overflows.load(std::memory_order_relaxed); }
 };
 
 inline CacheCounters g_cache_counters;

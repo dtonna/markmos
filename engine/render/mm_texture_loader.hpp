@@ -3,6 +3,7 @@
 
 #pragma once
 #include "../rhi/mm_rhi_concept.hpp"
+#include "core/mm_types.h"
 #include "../core/mm_expected.hpp"
 #include "../core/mm_vfs.hpp"
 #include <cstdint>
@@ -11,9 +12,9 @@
 // Result of a successful texture load
 struct TextureInfo {
     TextureHandle handle;
-    uint16_t      width;
-    uint16_t      height;
-    uint8_t       channels;  // always 4 (RGBA)
+    u16      width;
+    u16      height;
+    u8       channels;  // always 4 (RGBA)
 };
 
 // stb_image forward declarations
@@ -42,8 +43,8 @@ Expected<TextureInfo, RHIError> texture_load_from_memory(
     TextureDesc desc{};
     desc.type        = TextureType::Tex2D;
     desc.format      = srgb ? PixelFormat::R8G8B8A8_SRGB : PixelFormat::R8G8B8A8_UNORM;
-    desc.width       = static_cast<uint16_t>(w);
-    desc.height      = static_cast<uint16_t>(h);
+    desc.width       = static_cast<u16>(w);
+    desc.height      = static_cast<u16>(h);
     desc.depth       = 1;
     desc.mip_levels  = 1;
     desc.array_layers = 1;

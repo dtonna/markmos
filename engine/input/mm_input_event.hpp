@@ -3,15 +3,16 @@
 
 #pragma once
 #include <atomic>
+#include "core/mm_types.h"
 #include <cstdint>
 
 // Input Event Types — tagged union, 32 bytes each
 // SPSC ring buffer queues events from platform callbacks to game loop
 // No virtual, no alloc, trivially copyable
 
-enum class InputEventType : uint8_t { None, TouchDown, TouchMove, TouchUp, TouchCancel, KeyDown, KeyUp, MouseMove, MouseScroll, TextInput };
+enum class InputEventType : u8 { None, TouchDown, TouchMove, TouchUp, TouchCancel, KeyDown, KeyUp, MouseMove, MouseScroll, TextInput };
 
-enum class KeyCode : uint16_t {
+enum class KeyCode : u16 {
     Unknown = 0,
     A,
     B,
@@ -61,6 +62,21 @@ enum class KeyCode : uint16_t {
     Escape,
     Backspace,
     Tab,
+    // Added for TextField editing. Home/End were unreachable before: macOS
+    // delivers them as Fn+Left / Fn+Right, so the host could only ever see
+    // Left/Right and could not tell the two apart. Delete is a distinct
+    // virtual keycode from Backspace on every platform.
+    Delete,
+    Home,
+    End,
+    // F4 + PageUp/PageDown complete the standard ComboBox / scrolling-list
+    // contract (see InputAction::MenuToggle and MenuPageUp). F4 has no other
+    // meaning in this engine, and macOS gives PageUp/PageDown real virtual
+    // keycodes of their own (0x74 / 0x79 in HIToolbox Events.h) - they are NOT
+    // the arrow keys, so nothing collides with Down.
+    F4,
+    PageUp,
+    PageDown,
     GameA,
     GameB,
     GameX,
@@ -77,15 +93,15 @@ enum class KeyCode : uint16_t {
 
 struct InputEvent {
     InputEventType    type;
-    uint8_t           touch_id;
+    u8           touch_id;
     char              ch;         // TextInput character
-    uint8_t           _pad0;
-    float             x, y;
-    float             dx, dy;
+    u8           _pad0;
+    f32             x, y;
+    f32             dx, dy;
     KeyCode           key;
-    uint16_t          _pad1;
+    u16          _pad1;
 
-    static InputEvent make_touch_down(uint8_t id, float x, float y) noexcept {
+    static InputEvent make_touch_down(u8 id, f32 x, f32 y) noexcept {
         InputEvent e{};
         e.type     = InputEventType::TouchDown;
         e.touch_id = id;
@@ -94,7 +110,7 @@ struct InputEvent {
         return e;
     }
 
-    static InputEvent make_touch_move(uint8_t id, float x, float y) noexcept {
+    static InputEvent make_touch_move(u8 id, f32 x, f32 y) noexcept {
         InputEvent e{};
         e.type     = InputEventType::TouchMove;
         e.touch_id = id;
@@ -103,14 +119,14 @@ struct InputEvent {
         return e;
     }
 
-    static InputEvent make_touch_up(uint8_t id) noexcept {
+    static InputEvent make_touch_up(u8 id) noexcept {
         InputEvent e{};
         e.type     = InputEventType::TouchUp;
         e.touch_id = id;
         return e;
     }
 
-    static InputEvent make_touch_cancel(uint8_t id) noexcept {
+    static InputEvent make_touch_cancel(u8 id) noexcept {
         InputEvent e{};
         e.type     = InputEventType::TouchCancel;
         e.touch_id = id;
@@ -131,7 +147,7 @@ struct InputEvent {
         return e;
     }
 
-    static InputEvent make_mouse_move(float x, float y) noexcept {
+    static InputEvent make_mouse_move(f32 x, f32 y) noexcept {
         InputEvent e{};
         e.type = InputEventType::MouseMove;
         e.x    = x;
@@ -139,7 +155,7 @@ struct InputEvent {
         return e;
     }
 
-    static InputEvent make_mouse_scroll(float dx, float dy) noexcept {
+    static InputEvent make_mouse_scroll(f32 dx, f32 dy) noexcept {
         InputEvent e{};
         e.type = InputEventType::MouseScroll;
         e.dx   = dx;
@@ -160,15 +176,15 @@ static_assert(sizeof(InputEvent) <= 32, "InputEvent <= 32 bytes");
 // Lock-free SPSC ring buffer — 256 event slots
 // Push from platform callback thread, pop from game loop thread
 struct InputEventQueue {
-    static constexpr uint32_t kCapacity = 256;
+    static constexpr u32 kCapacity = 256;
 
-    alignas(64) std::atomic<uint32_t> head{0};
-    alignas(64) std::atomic<uint32_t> tail{0};
+    alignas(64) std::atomic<u32> head{0};
+    alignas(64) std::atomic<u32> tail{0};
     alignas(64) InputEvent slots[kCapacity];
 
     bool push(const InputEvent &event) noexcept {
-        uint32_t h    = head.load(std::memory_order_relaxed);
-        uint32_t next = (h + 1) % kCapacity;
+        u32 h    = head.load(std::memory_order_relaxed);
+        u32 next = (h + 1) % kCapacity;
 
         if (next == tail.load(std::memory_order_acquire)) {
             return false;
@@ -179,7 +195,7 @@ struct InputEventQueue {
     }
 
     bool pop(InputEvent &out) noexcept {
-        uint32_t t = tail.load(std::memory_order_relaxed);
+        u32 t = tail.load(std::memory_order_relaxed);
         if (t == head.load(std::memory_order_acquire)) {
             return false;
         }

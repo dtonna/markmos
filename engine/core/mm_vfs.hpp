@@ -3,6 +3,7 @@
 
 #pragma once
 #include "mm_cache_metrics.hpp"
+#include "core/mm_types.h"
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -12,7 +13,7 @@
 // Freed via VfsBlob::free()
 struct VfsBlob {
     void    *data = nullptr;
-    uint64_t size = 0;
+    u64 size = 0;
 
     void     free() noexcept;
     bool     valid() const noexcept { return data != nullptr && size > 0; }
@@ -29,8 +30,8 @@ class Vfs {
     VfsBlob     read_doc(const char *path) noexcept;
     VfsBlob     read_absolute(const char *path) noexcept;
 
-    bool        write_doc(const char *path, const void *data, uint64_t size) noexcept;
-    bool        write_doc_atomic(const char *path, const void *data, uint64_t size) noexcept;
+    bool        write_doc(const char *path, const void *data, u64 size) noexcept;
+    bool        write_doc_atomic(const char *path, const void *data, u64 size) noexcept;
     bool        exists(const char *path) noexcept;
     const char *get_bundle_path() noexcept { return bundle_path_; }
 
@@ -61,7 +62,7 @@ class AssetLoader {
     void process_completed() noexcept; // call once per frame on main thread
 
   private:
-    static constexpr uint32_t kMaxPending = 256;
+    static constexpr u32 kMaxPending = 256;
 
     struct LoadResult {
         VfsBlob blob;
@@ -71,8 +72,8 @@ class AssetLoader {
 
     Vfs             *vfs_ = nullptr;
     LoadResult       results_[kMaxPending];
-    uint32_t         head_ = 0;
-    uint32_t         tail_ = 0;
+    u32         head_ = 0;
+    u32         tail_ = 0;
     std::atomic_flag lock_ = ATOMIC_FLAG_INIT;
 
     bool             push_result(const LoadResult &r) noexcept;

@@ -7,6 +7,7 @@
 // Cache expectation: match scan = 256-byte linear walk (L1), gravity compact = L1
 
 #include "../app/mm_app.hpp"
+#include "../core/mm_types.h"
 #include "../game/mm_board_grid.hpp"
 #include "../game/mm_camera_trauma.hpp"
 #include "../game/mm_game_state.hpp"
@@ -16,6 +17,7 @@
 #include "../input/mm_input_state.hpp"
 #include "../render/mm_shader_registry.hpp"
 #include "../render/mm_sprite_batch.hpp"
+#include "../math/mm_mat4.h"
 #if defined(USE_METAL_BACKEND)
 #    include "../rhi/mm_metal_backend.hpp"
 #elif defined(USE_VULKAN_BACKEND)
@@ -23,21 +25,6 @@
 #endif
 
 // Column-major 4x4 matrix for CameraUBO
-struct alignas(16) Mat4 {
-    float       m[16];
-
-    static Mat4 ortho_2d(float w, float h) noexcept {
-        Mat4 mat{};
-        mat.m[0]  = 2.0f / w;
-        mat.m[5]  = -2.0f / h;
-        mat.m[10] = -1.0f;
-        mat.m[12] = -1.0f;
-        mat.m[13] = 1.0f;
-        mat.m[15] = 1.0f;
-        return mat;
-    }
-};
-
 struct Match3Game {
     // Core systems
     BoardGrid               board;
@@ -62,13 +49,13 @@ struct Match3Game {
     FrameArena arena;
 
     // Game state
-    uint32_t   score;
-    uint8_t    moves_left;
-    uint8_t    selected_row, selected_col;
+    u32   score;
+    u8    moves_left;
+    u8    selected_row, selected_col;
     bool       has_selection;
-    float      time;
+    f32      time;
 
-    void       init(uint8_t cols, uint8_t rows, uint8_t types) noexcept {
+    void       init(u8 cols, u8 rows, u8 types) noexcept {
         board.init(cols, rows, types, 64);
         state         = PlayState{&board, 0, 1000, 30, 0, 60.0f};
         has_selection = false;
@@ -77,40 +64,47 @@ struct Match3Game {
         time          = 0.0f;
 
         // Fill board with random tiles
-        for (uint8_t r = 0; r < rows; ++r) {
-            for (uint8_t c = 0; c < cols; ++c) {
+        for (u8 r = 0; r < rows; ++r) {
+            for (u8 c = 0; c < cols; ++c) {
                 board.cell_type[board.idx(r, c)]  = static_cast<CellType>(1 + (r * 7 + c * 13) % types);
                 board.cell_state[board.idx(r, c)] = CellState::Idle;
             }
         }
 
         // Remove any pre-existing matches
-        uint16_t matches[BOARD_MAX];
+        u16 matches[BOARD_MAX];
         while (board.find_matches(3, matches) > 0) {
-            for (uint8_t r = 0; r < rows; ++r) {
-                for (uint8_t c = 0; c < cols; ++c) {
-                    board.cell_type[board.idx(r, c)]  = static_cast<CellType>(1 + (r * 17 + c * 31 + static_cast<uint32_t>(time)) % types);
+            for (u8 r = 0; r < rows; ++r) {
+                for (u8 c = 0; c < cols; ++c) {
+                    board.cell_type[board.idx(r, c)]  = static_cast<CellType>(1 + (r * 17 + c * 31 + static_cast<u32>(time)) % types);
                     board.cell_state[board.idx(r, c)] = CellState::Idle;
                 }
             }
         }
     }
 
-    void update(float dt, InputState &input) noexcept {
+    void update(f32 dt, InputState &input) noexcept {
         time += dt;
 
         // 1. Process game-facing actions from InputState
-        for (uint8_t i = 0; i < input.action_count; ++i) {
+        for (u8 i = 0; i < input.action_count; ++i) {
             switch (input.actions[i]) {
             case InputAction::Select:
                 handle_tap(input.action_x, input.action_y);
                 break;
-            case InputAction::SwapUp:
+            // Up/Down arrows, NOT SwapUp/SwapDown. The input layer emits
+            // MenuUp/MenuDown for the arrow keys and W/S; Shift+Tab used to be
+            // the only producer of SwapUp, so this vertical swipe was bound to
+            // Shift+Tab and to nothing else - and after Tab became FocusNext /
+            // FocusPrev it would have had no producer at all. SwapLeft/SwapRight
+            // below are still dead for the same reason (no Left/Right mapping),
+            // left alone rather than half-migrated.
+            case InputAction::MenuUp:
                 if (has_selection) {
                     handle_swipe_dir(-1, 0);
                 }
                 break;
-            case InputAction::SwapDown:
+            case InputAction::MenuDown:
                 if (has_selection) {
                     handle_swipe_dir(1, 0);
                 }
@@ -147,9 +141,9 @@ struct Match3Game {
         camera.update(dt);
     }
 
-    void handle_tap(float x, float y) noexcept {
-        uint8_t col = static_cast<uint8_t>(x / board.cell_size);
-        uint8_t row = static_cast<uint8_t>(y / board.cell_size);
+    void handle_tap(f32 x, f32 y) noexcept {
+        u8 col = static_cast<u8>(x / board.cell_size);
+        u8 row = static_cast<u8>(y / board.cell_size);
         if (!board.in_bounds(row, col)) {
             return;
         }
@@ -159,8 +153,8 @@ struct Match3Game {
             selected_col  = col;
             has_selection = true;
         } else {
-            int8_t dr = static_cast<int8_t>(row) - static_cast<int8_t>(selected_row);
-            int8_t dc = static_cast<int8_t>(col) - static_cast<int8_t>(selected_col);
+            i8 dr = static_cast<i8>(row) - static_cast<i8>(selected_row);
+            i8 dc = static_cast<i8>(col) - static_cast<i8>(selected_col);
 
             if ((std::abs(dr) + std::abs(dc)) == 1) {
                 try_swap(selected_row, selected_col, row, col);
@@ -169,21 +163,21 @@ struct Match3Game {
         }
     }
 
-    void handle_swipe_dir(int8_t dr, int8_t dc) noexcept {
-        uint8_t tr = static_cast<uint8_t>(static_cast<int8_t>(selected_row) + dr);
-        uint8_t tc = static_cast<uint8_t>(static_cast<int8_t>(selected_col) + dc);
+    void handle_swipe_dir(i8 dr, i8 dc) noexcept {
+        u8 tr = static_cast<u8>(static_cast<i8>(selected_row) + dr);
+        u8 tc = static_cast<u8>(static_cast<i8>(selected_col) + dc);
         if (board.in_bounds(tr, tc)) {
             try_swap(selected_row, selected_col, tr, tc);
         }
         has_selection = false;
     }
 
-    void try_swap(uint8_t r1, uint8_t c1, uint8_t r2, uint8_t c2) noexcept {
+    void try_swap(u8 r1, u8 c1, u8 r2, u8 c2) noexcept {
         if (!board.would_match(r1, c1, r2, c2)) {
             camera.add_trauma(SHAKE_SMALL);
 
-            float *x1 = &sprite_batch.world_x[r1 * board.cols + c1];
-            float *x2 = &sprite_batch.world_x[r2 * board.cols + c2];
+            f32 *x1 = &sprite_batch.world_x[r1 * board.cols + c1];
+            f32 *x2 = &sprite_batch.world_x[r2 * board.cols + c2];
             tweens.spawn(x1, *x1, *x1 + 4.0f, 0.15f, e_ease_type::SINE_IN_OUT, 2);
             tweens.spawn(x2, *x2, *x2 - 4.0f, 0.15f, e_ease_type::SINE_IN_OUT, 2);
             return;
@@ -192,23 +186,23 @@ struct Match3Game {
         board.swap(r1, c1, r2, c2);
         --moves_left;
 
-        uint16_t matches[BOARD_MAX];
-        uint8_t  match_count = board.find_matches(3, matches);
+        u16 matches[BOARD_MAX];
+        u8  match_count = board.find_matches(3, matches);
 
         if (match_count > 0) {
             board.mark_matched(matches, match_count);
 
-            for (uint8_t m = 0; m + 1 < match_count; m += 2) {
-                uint16_t packed = matches[m];
-                uint8_t  r      = static_cast<uint8_t>(packed >> 8);
-                uint8_t  c      = static_cast<uint8_t>(packed & 0xFF);
-                float    px     = c * board.cell_size + board.cell_size * 0.5f;
-                float    py     = r * board.cell_size + board.cell_size * 0.5f;
+            for (u8 m = 0; m + 1 < match_count; m += 2) {
+                u16 packed = matches[m];
+                u8  r      = static_cast<u8>(packed >> 8);
+                u8  c      = static_cast<u8>(packed & 0xFF);
+                f32    px     = c * board.cell_size + board.cell_size * 0.5f;
+                f32    py     = r * board.cell_size + board.cell_size * 0.5f;
                 particles.spawn_burst(px, py, 12, 40, 100, 0.4f, 0xFFFFAA00);
                 text_popups.spawn_score(px, py, 100, 0xFFFFFF00);
             }
 
-            for (uint16_t i = 0; i < BOARD_MAX; ++i) {
+            for (u16 i = 0; i < BOARD_MAX; ++i) {
                 if (board.cell_state[i] == CellState::Matched) {
                     board.cell_type[i]  = CellType::Empty;
                     board.cell_state[i] = CellState::Empty;
@@ -217,10 +211,10 @@ struct Match3Game {
 
             board.apply_gravity();
 
-            for (uint8_t c = 0; c < board.cols; ++c) {
-                for (uint8_t r = 0; r < board.rows; ++r) {
+            for (u8 c = 0; c < board.cols; ++c) {
+                for (u8 r = 0; r < board.rows; ++r) {
                     if (board.cell_type[board.idx(r, c)] == CellType::Empty) {
-                        board.cell_type[board.idx(r, c)]  = static_cast<CellType>(1 + (r * 13 + c * 7 + static_cast<uint8_t>(time)) % board.num_types);
+                        board.cell_type[board.idx(r, c)]  = static_cast<CellType>(1 + (r * 13 + c * 7 + static_cast<u8>(time)) % board.num_types);
                         board.cell_state[board.idx(r, c)] = CellState::Spawning;
                     }
                 }
@@ -231,19 +225,19 @@ struct Match3Game {
     void render() noexcept {
         sprite_batch.reset();
 
-        for (uint8_t r = 0; r < board.rows; ++r) {
-            for (uint8_t c = 0; c < board.cols; ++c) {
-                uint16_t i = board.idx(r, c);
+        for (u8 r = 0; r < board.rows; ++r) {
+            for (u8 c = 0; c < board.cols; ++c) {
+                u16 i = board.idx(r, c);
                 if (board.cell_type[i] == CellType::Empty) {
                     continue;
                 }
 
-                float                     x        = c * board.cell_size;
-                float                     y        = r * board.cell_size;
-                float                     s        = static_cast<float>(board.cell_size) - 2.0f;
+                f32                     x        = c * board.cell_size;
+                f32                     y        = r * board.cell_size;
+                f32                     s        = static_cast<f32>(board.cell_size) - 2.0f;
 
-                static constexpr uint32_t COLORS[] = {0xFFFF4444, 0xFF4488FF, 0xFF44FF44, 0xFFFFFF44, 0xFFFF44FF, 0xFFFF8844};
-                uint32_t                  color    = COLORS[static_cast<uint8_t>(board.cell_type[i]) % 6];
+                static constexpr u32 COLORS[] = {0xFFFF4444, 0xFF4488FF, 0xFF44FF44, 0xFFFFFF44, 0xFFFF44FF, 0xFFFF8844};
+                u32                  color    = COLORS[static_cast<u8>(board.cell_type[i]) % 6];
                 sprite_batch.add(x, y, s, s, 0.0f, color, LAYER_PIECES);
             }
         }
@@ -310,7 +304,7 @@ static void       game_init(void *) {
         return;
     }
     g_game.texture       = *tex_res;
-    uint32_t white_pixel = 0xFFFFFFFF;
+    u32 white_pixel = 0xFFFFFFFF;
     bk.update_texture(g_game.texture, &white_pixel, 0, 0, 1, 1, 0, 0);
 
     // Nearest-clamp sampler
@@ -326,7 +320,7 @@ static void       game_init(void *) {
     g_game.arena.init(g_game.arena_buf, Match3Game::ARENA_SIZE);
 }
 
-static void game_frame(void *, float dt, InputState &input) {
+static void game_frame(void *, f32 dt, InputState &input) {
     auto &bk = *g_backend;
 
     g_game.update(dt, input);
@@ -336,8 +330,8 @@ static void game_frame(void *, float dt, InputState &input) {
     g_game.arena.reset();
 
     // Orthographic camera mapping pixel coords → NDC
-    Mat4 cam = Mat4::ortho_2d(1170.0f, 2532.0f);
-    bk.update_buffer(g_game.ub, &cam, 0, sizeof(Mat4));
+    mm_math::mat4 cam = mm_math::mat4::ortho(0.0f, 1170.0f, 2532.0f, 0.0f, -1.0f, 1.0f);
+    bk.update_buffer(g_game.ub, cam.data(), 0, sizeof(mm_math::mat4));
 
     // Flush sprites to GPU
     g_game.sprite_batch.flush(bk, g_game.vb, g_game.ub, g_game.pipeline, g_game.texture, g_game.sampler, g_game.arena);
@@ -352,7 +346,7 @@ static void game_cleanup(void *) {
     bk.destroy_sampler(g_game.sampler);
 }
 
-AppCallbacks markmos_main(int, char **) {
+extern "C" AppCallbacks markmos_main(int, char **) {
     return {
         .user_data = nullptr,
         .init      = game_init,

@@ -3,6 +3,7 @@
 
 #pragma once
 #include "../core/mm_expected.hpp"
+#include "core/mm_types.h"
 #include "../core/mm_handle.hpp"
 #include "../core/mm_log.hpp"
 #include "../core/mm_slotmap.hpp"
@@ -26,13 +27,13 @@
 
 struct MetalBuffer {
     MTL::Buffer *buffer;
-    uint32_t     size;
+    u32     size;
     BufferType   type;
 };
 
 struct MetalTexture {
     MTL::Texture *texture;
-    uint32_t      width, height;
+    u32      width, height;
     PixelFormat   format;
 };
 
@@ -60,16 +61,16 @@ struct MetalBackend {
     MTL::IndexType           current_ib_type          = MTL::IndexTypeUInt16;
 
     const MTL::Buffer       *last_vertex_ubo[8]       = {};
-    uint64_t                 last_vertex_ubo_off[8]   = {};
+    u64                 last_vertex_ubo_off[8]   = {};
     const MTL::Buffer       *last_fragment_ubo[8]     = {};
-    uint64_t                 last_fragment_ubo_off[8] = {};
+    u64                 last_fragment_ubo_off[8] = {};
 
     bool                     has_scissor              = false;
     MTL::ScissorRect         last_scissor{};
 
     const MTL::SamplerState *last_fragment_sampler[8] = {};
     const MTL::Buffer       *last_vertex_buf[8]       = {};
-    uint64_t                 last_vertex_buf_off[8]   = {};
+    u64                 last_vertex_buf_off[8]   = {};
     const MTL::Texture      *last_fragment_tex[8]     = {};
 
     Slotmap<MetalBuffer>     buffers;
@@ -77,7 +78,7 @@ struct MetalBackend {
     Slotmap<MetalPipeline>   pipelines;
     Slotmap<MetalSampler>    samplers;
 
-    uint32_t                 frame_index = 0;
+    u32                 frame_index = 0;
 
     // Init — creates device, command queue, layer
     Expected<void, RHIError> init(void *metal_layer) noexcept {
@@ -190,6 +191,7 @@ struct MetalBackend {
         MTL::SamplerDescriptor *sd = MTL::SamplerDescriptor::alloc()->init();
         sd->setMinFilter(desc.min_filter == SamplerFilter::Linear ? MTL::SamplerMinMagFilterLinear : MTL::SamplerMinMagFilterNearest);
         sd->setMagFilter(desc.mag_filter == SamplerFilter::Linear ? MTL::SamplerMinMagFilterLinear : MTL::SamplerMinMagFilterNearest);
+        sd->setMipFilter(desc.mip_filter == SamplerFilter::Linear ? MTL::SamplerMipFilterLinear : MTL::SamplerMipFilterNearest);
         sd->setSAddressMode(to_metal_address(desc.address_u));
         sd->setTAddressMode(to_metal_address(desc.address_v));
         sd->setMaxAnisotropy(static_cast<NS::UInteger>(desc.max_anisotropy));
@@ -254,15 +256,15 @@ struct MetalBackend {
             rpd->release();
             return make_unexpected(RHIError::ShaderCompileFail);
         }
-        NS::String *fs_entry = NS::String::string(pdesc.fragment_shader.entry, NS::UTF8StringEncoding);
+        NS::String                  *fs_entry = NS::String::string(pdesc.fragment_shader.entry, NS::UTF8StringEncoding);
 
         // Function constants for Metal specialization
-        MTL::FunctionConstantValues *fcv = MTL::FunctionConstantValues::alloc()->init();
-        for (uint8_t i = 0; i < pdesc.function_constant_count; ++i) {
+        MTL::FunctionConstantValues *fcv      = MTL::FunctionConstantValues::alloc()->init();
+        for (u8 i = 0; i < pdesc.function_constant_count; ++i) {
             bool val = pdesc.function_constants[i].value;
             fcv->setConstantValue(&val, MTL::DataTypeBool, pdesc.function_constants[i].index);
         }
-        auto       *fs_fn    = fs_lib->newFunction(fs_entry, fcv, &err);
+        auto *fs_fn = fs_lib->newFunction(fs_entry, fcv, &err);
         if (!fs_fn) {
             if (err) {
                 const char *emsg = err->localizedDescription()->utf8String();
@@ -285,9 +287,9 @@ struct MetalBackend {
 
         // Vertex descriptor from vertex_attrs
         MTL::VertexDescriptor *vd         = MTL::VertexDescriptor::alloc()->init();
-        uint32_t               max_stride = 0;
-        uint32_t               buf_idx    = pdesc.is_instance ? 1 : 0;
-        for (uint8_t i = 0; i < pdesc.vertex_attr_count; ++i) {
+        u32               max_stride = 0;
+        u32               buf_idx    = pdesc.is_instance ? 1 : 0;
+        for (u8 i = 0; i < pdesc.vertex_attr_count; ++i) {
             auto &attr = pdesc.vertex_attrs[i];
             vd->attributes()->object(attr.location)->setFormat(to_metal_vertex_format(attr.format));
             vd->attributes()->object(attr.location)->setOffset(attr.offset);
@@ -304,7 +306,7 @@ struct MetalBackend {
         vd->release();
 
         // Color attachments
-        for (uint8_t i = 0; i < pdesc.color_count; ++i) {
+        for (u8 i = 0; i < pdesc.color_count; ++i) {
             auto ca = rpd->colorAttachments()->object(i);
             ca->setPixelFormat(to_metal_format(pdesc.color_formats[i]));
             ca->setBlendingEnabled(true);
@@ -407,17 +409,17 @@ struct MetalBackend {
         pipelines.free(handle.handle);
     }
 
-    Expected<void, RHIError> update_buffer(BufferHandle handle, const void *data, uint32_t offset, uint32_t size) noexcept {
+    Expected<void, RHIError> update_buffer(BufferHandle handle, const void *data, u32 offset, u32 size) noexcept {
         auto *buf = buffers.get(handle.handle);
         if (!buf) {
             return make_unexpected(RHIError::InvalidHandle);
         }
-        memcpy(static_cast<uint8_t *>(buf->buffer->contents()) + offset, data, size);
+        memcpy(static_cast<u8 *>(buf->buffer->contents()) + offset, data, size);
         return {};
     }
 
-    Expected<void, RHIError> update_texture(TextureHandle handle, const void *data, uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t mip,
-                                            uint32_t slice) noexcept {
+    Expected<void, RHIError> update_texture(TextureHandle handle, const void *data, u32 x, u32 y, u32 w, u32 h, u32 mip,
+                                            u32 slice) noexcept {
         auto *tex = textures.get(handle.handle);
         if (!tex) {
             return make_unexpected(RHIError::InvalidHandle);
@@ -440,13 +442,15 @@ struct MetalBackend {
         return {};
     }
 
-    void                     resize(uint32_t w, uint32_t h) noexcept { layer->setDrawableSize(CGSizeMake(w, h)); }
+    Expected<void, RHIError> resize(SurfaceInfo s) noexcept {
+        if (!s.native_handle) {
+            return make_unexpected(RHIError::InvalidHandle);
+        }
+        layer->setDrawableSize(CGSizeMake(s.width, s.height));
+        return {};
+    }
 
     Expected<void, RHIError> end_frame() noexcept {
-        if (encoder) {
-            encoder->endEncoding();
-            encoder = nullptr;
-        }
         if (cmd_buf && drawable) {
             cmd_buf->presentDrawable(drawable);
             cmd_buf->commit();
@@ -515,13 +519,13 @@ struct MetalBackend {
         return {};
     }
 
-    Expected<void, RHIError> bind_vertex_buffers(BufferHandle *handles, uint32_t count, const uint64_t *offsets, const uint64_t * /*strides*/,
-                                                 const uint32_t *bindings = nullptr) noexcept {
-        for (uint32_t i = 0; i < count; ++i) {
+    Expected<void, RHIError> bind_vertex_buffers(BufferHandle *handles, u32 count, const u64 *offsets, const u64 * /*strides*/,
+                                                 const u32 *bindings = nullptr) noexcept {
+        for (u32 i = 0; i < count; ++i) {
             auto *buf = buffers.get(handles[i].handle);
             if (buf) {
-                uint32_t idx = bindings ? bindings[i] : i;
-                uint64_t off = offsets ? offsets[i] : 0;
+                u32 idx = bindings ? bindings[i] : i;
+                u64 off = offsets ? offsets[i] : 0;
                 if (idx < 8 && last_vertex_buf[idx] == buf->buffer && last_vertex_buf_off[idx] == off) {
                     continue;
                 }
@@ -535,9 +539,9 @@ struct MetalBackend {
         return {};
     }
 
-    uint64_t                 current_ib_offset = 0;
+    u64                 current_ib_offset = 0;
 
-    Expected<void, RHIError> bind_index_buffer(BufferHandle handle, IndexType type, uint64_t offset = 0) noexcept {
+    Expected<void, RHIError> bind_index_buffer(BufferHandle handle, IndexType type, u64 offset = 0) noexcept {
         auto *buf = buffers.get(handle.handle);
         if (!buf) {
             return make_unexpected(RHIError::InvalidHandle);
@@ -548,18 +552,18 @@ struct MetalBackend {
         return {};
     }
 
-    Expected<void, RHIError> bind_uniform_buffer(BufferHandle handle, uint32_t index) noexcept {
+    Expected<void, RHIError> bind_uniform_buffer(BufferHandle handle, u32 index) noexcept {
         auto *buf = buffers.get(handle.handle);
         if (!buf) {
             return make_unexpected(RHIError::InvalidHandle);
         }
 
-        uint32_t physical_idx = index + 1;
+        u32 physical_idx = index + 1;
         if (physical_idx >= 8) {
             return make_unexpected(RHIError::InvalidHandle);
         }
 
-        const uint64_t offset = 0;
+        const u64 offset = 0;
 
         if (last_vertex_ubo[physical_idx] != buf->buffer || last_vertex_ubo_off[physical_idx] != offset) {
             encoder->setVertexBuffer(buf->buffer, offset, physical_idx);
@@ -576,27 +580,27 @@ struct MetalBackend {
         return {};
     }
 
-    Expected<void, RHIError> draw(uint32_t vertex_count, uint32_t instance_count, uint32_t first_vertex, uint32_t first_instance) noexcept {
+    Expected<void, RHIError> draw(u32 vertex_count, u32 instance_count, u32 first_vertex, u32 first_instance) noexcept {
         encoder->drawPrimitives(MTL::PrimitiveTypeTriangle, first_vertex, vertex_count, instance_count, first_instance);
         return {};
     }
 
-    Expected<void, RHIError> draw_indexed(uint32_t index_count, uint32_t instance_count, uint32_t first_index, int32_t vertex_offset = 0) noexcept {
+    Expected<void, RHIError> draw_indexed(u32 index_count, u32 instance_count, u32 first_index, i32 vertex_offset = 0) noexcept {
         if (!this->encoder || !this->current_ib) {
             return {};
         }
-        uint32_t index_size = (this->current_ib_type == MTL::IndexTypeUInt16) ? 2 : 4;
+        u32 index_size = (this->current_ib_type == MTL::IndexTypeUInt16) ? 2 : 4;
         this->encoder->drawIndexedPrimitives(MTL::PrimitiveTypeTriangle, index_count, this->current_ib_type, this->current_ib,
                                              current_ib_offset + first_index * index_size, instance_count, vertex_offset, 0);
         return {};
     }
 
-    Expected<void, RHIError> bind_fragment_texture(TextureHandle handle, uint32_t index) noexcept {
+    Expected<void, RHIError> bind_fragment_texture(TextureHandle handle, u32 index) noexcept {
         auto *tex = textures.get(handle.handle);
         if (!tex) {
             return make_unexpected(RHIError::InvalidHandle);
         }
-        uint32_t physical_idx = (index > 0) ? (index - 1) : 0;
+        u32 physical_idx = (index > 0) ? (index - 1) : 0;
         if (physical_idx < 8 && last_fragment_tex[physical_idx] == tex->texture) {
             return {};
         }
@@ -607,12 +611,12 @@ struct MetalBackend {
         return {};
     }
 
-    Expected<void, RHIError> bind_fragment_sampler(SamplerHandle handle, uint32_t index) noexcept {
+    Expected<void, RHIError> bind_fragment_sampler(SamplerHandle handle, u32 index) noexcept {
         auto *samp = samplers.get(handle.handle);
         if (!samp) {
             return make_unexpected(RHIError::InvalidHandle);
         }
-        uint32_t physical_idx = (index > 0) ? (index - 1) : 0;
+        u32 physical_idx = (index > 0) ? (index - 1) : 0;
         if (physical_idx < 8 && last_fragment_sampler[physical_idx] == samp->sampler) {
             return {};
         }
@@ -623,7 +627,7 @@ struct MetalBackend {
         return {};
     }
 
-    Expected<void, RHIError> set_scissor(int16_t x, int16_t y, uint16_t w, uint16_t h) noexcept {
+    Expected<void, RHIError> set_scissor(i16 x, i16 y, u16 w, u16 h) noexcept {
         MTL::ScissorRect rect{};
         rect.x      = static_cast<NS::UInteger>(x);
         rect.y      = static_cast<NS::UInteger>(y);
@@ -664,7 +668,7 @@ struct MetalBackend {
         }
     }
 
-    static NS::UInteger bytes_per_row_for_format(PixelFormat fmt, uint32_t width) noexcept {
+    static NS::UInteger bytes_per_row_for_format(PixelFormat fmt, u32 width) noexcept {
         switch (fmt) {
         case PixelFormat::R8_UNORM:
             return width;
@@ -692,7 +696,7 @@ struct MetalBackend {
         }
     }
 
-    static NS::UInteger bytes_per_image_for_format(PixelFormat fmt, uint32_t width, uint32_t height) noexcept {
+    static NS::UInteger bytes_per_image_for_format(PixelFormat fmt, u32 width, u32 height) noexcept {
         NS::UInteger row = bytes_per_row_for_format(fmt, width);
         switch (fmt) {
         case PixelFormat::ASTC_4x4:

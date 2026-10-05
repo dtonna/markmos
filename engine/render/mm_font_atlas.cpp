@@ -2,11 +2,12 @@
 // SPDX-License-Identifier: MIT
 
 #include "mm_font_atlas.hpp"
+#include "core/mm_types.h"
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "stb_truetype.h"
 #include <cstring>
 
-void FontAtlas::bake(const unsigned char* ttf_data, int /*ttf_size*/, float pixel_height) noexcept {
+void FontAtlas::bake(const unsigned char* ttf_data, int /*ttf_size*/, f32 pixel_height) noexcept {
     memset(pixels, 0, sizeof(pixels));
     stbtt_bakedchar cd[FONT_NUM_CHARS];
 
@@ -15,9 +16,9 @@ void FontAtlas::bake(const unsigned char* ttf_data, int /*ttf_size*/, float pixe
                                        FONT_FIRST_CHAR, FONT_NUM_CHARS, cd);
     (void)result;
 
-    inv_atlas_w = 1.0f / static_cast<float>(FONT_ATLAS_W);
-    inv_atlas_h = 1.0f / static_cast<float>(FONT_ATLAS_H);
-    line_height = static_cast<uint8_t>(pixel_height * 1.2f);
+    inv_atlas_w = 1.0f / static_cast<f32>(FONT_ATLAS_W);
+    inv_atlas_h = 1.0f / static_cast<f32>(FONT_ATLAS_H);
+    line_height = static_cast<u8>(pixel_height * 1.2f);
 
     for (int i = 0; i < FONT_NUM_CHARS; ++i) {
         baked_chars[i * 4 + 0] = cd[i].x0;
@@ -27,12 +28,12 @@ void FontAtlas::bake(const unsigned char* ttf_data, int /*ttf_size*/, float pixe
         xoff[i]    = cd[i].xoff;
         yoff[i]    = cd[i].yoff;
         xadvance[i] = cd[i].xadvance;
-        w[i] = static_cast<uint16_t>(cd[i].x1 - cd[i].x0);
-        h[i] = static_cast<uint16_t>(cd[i].y1 - cd[i].y0);
+        w[i] = static_cast<u16>(cd[i].x1 - cd[i].x0);
+        h[i] = static_cast<u16>(cd[i].y1 - cd[i].y0);
     }
 }
 
-int FontAtlas::bake_range(const unsigned char* ttf_data, float pixel_height,
+int FontAtlas::bake_range(const unsigned char* ttf_data, f32 pixel_height,
                           int first_char, int count, int start_y,
                           stbtt_bakedchar* chardata_out) const noexcept {
     unsigned char* sub_pixels = const_cast<unsigned char*>(pixels) + start_y * FONT_ATLAS_W;
@@ -47,9 +48,9 @@ int FontAtlas::bake_range(const unsigned char* ttf_data, float pixel_height,
     return (result > 0) ? result + start_y : result;
 }
 
-void FontAtlas::get_quad(uint8_t c, float& x, float& y,
-                         float& u0, float& v0, float& u1, float& v1,
-                         float& gw, float& gh) const noexcept {
+void FontAtlas::get_quad(u8 c, f32& x, f32& y,
+                         f32& u0, f32& v0, f32& u1, f32& v1,
+                         f32& gw, f32& gh) const noexcept {
     if (c < FONT_FIRST_CHAR || c >= FONT_FIRST_CHAR + FONT_NUM_CHARS) {
         gw = 0; gh = 0;
         u0 = v0 = u1 = v1 = 0;

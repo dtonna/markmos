@@ -34,6 +34,7 @@ struct vec3 {
     MM_FORCE_INLINE constexpr vec3        operator/(const vec3 &r) const { return vec3(v / r.v); }
     MM_FORCE_INLINE constexpr vec3        operator*(const vec3 &r) const { return vec3(v * r.v); }
     MM_FORCE_INLINE constexpr friend vec3 operator*(const f32 s, const vec3 &r) { return r * s; }
+    MM_FORCE_INLINE constexpr friend vec3 operator/(const f32 s, const vec3 &r) { return vec3(s / r.x, s / r.y, s / r.z); }
     MM_FORCE_INLINE constexpr vec3        operator-() const { return vec3(-v); }
     MM_FORCE_INLINE constexpr vec3       &operator-=(const vec3 &r) {
         v -= r.v;
@@ -126,6 +127,11 @@ struct vec3 {
         cos_angle     = MM_CLAMP(cos_angle, -1.0F, 1.0F);
         return __builtin_acosf(cos_angle);
     }
+
+    MM_FORCE_INLINE f32  X() const noexcept { return x; }
+    MM_FORCE_INLINE f32  Y() const noexcept { return y; }
+    MM_FORCE_INLINE f32  Z() const noexcept { return z; }
+    MM_FORCE_INLINE f32  W() const noexcept { return w; }
 
     static const vec3 ZERO;
     static const vec3 ONE;

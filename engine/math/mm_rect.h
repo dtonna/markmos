@@ -5,23 +5,69 @@
 
 #include "core/mm_types.h"
 #include "mm_vec2.h"
+#include <cstddef>
 #include <math.h>
+#include <cassert>
 
 namespace mm_math {
 
+enum class position_mode : uint8_t {
+    ABSOLUTE, // x,y = absolute position in points
+    RELATIVE, // x,y = relative offset from parent (0,0 = parent's top-left, 1,1 = parent's bottom-right)
+    ANCHORED, // x,y = anchor point in parent (0,0 = parent's top-left, 1,1 = parent's bottom-right), w,h = offset from anchor
+};
+
+enum class anchor : uint8_t {
+    TOP_LEFT,
+    TOP_CENTER,
+    TOP_RIGHT,
+    CENTER_LEFT,
+    CENTER,
+    CENTER_RIGHT,
+    BOTTOM_LEFT,
+    BOTTOM_CENTER,
+    BOTTOM_RIGHT,
+};
+
 struct rect {
-    f32 x, y, w, h;
+    union {
+        float4 v;
+        struct alignas(16) {
+            f32 x, y, w, h;
+        };
+        struct alignas(16) {
+            vec2 m_position, m_size;
+        };
+    };
+    // f32 x, y, w, h;
 
     MM_FORCE_INLINE constexpr rect() noexcept : x(0.0F), y(0.0F), w(0.0F), h(0.0F) {}
     MM_FORCE_INLINE constexpr rect(f32 x_, f32 y_, f32 w_, f32 h_) noexcept : x(x_), y(y_), w(w_), h(h_) {}
-    MM_FORCE_INLINE constexpr rect(const vec2 &pos, const vec2 &size) noexcept : x(pos.x), y(pos.y), w(size.x), h(size.y) {}
+    MM_FORCE_INLINE constexpr rect(const vec2 &pos, const vec2 &size) noexcept : m_position(pos), m_size(size) {}
 
-    MM_FORCE_INLINE constexpr rect(const rect &) noexcept            = default;
-    MM_FORCE_INLINE constexpr rect(rect &&) noexcept                 = default;
-    MM_FORCE_INLINE constexpr rect &operator=(const rect &) noexcept = default;
+    MM_FORCE_INLINE constexpr rect(const rect &) noexcept = default;
+    MM_FORCE_INLINE constexpr rect(rect &&) noexcept      = default;
+    // Manual assign: the union's variant struct holding vec2s has a
+    // non-trivial copy-assign (vec2 defines operator=), which deletes the
+    // union's implicit copy/move-assign. Assigning the float view directly
+    // is identical (all views share the same 16 bytes).
+    MM_FORCE_INLINE constexpr rect &operator=(const rect &r) noexcept {
+        x = r.x;
+        y = r.y;
+        w = r.w;
+        h = r.h;
+        return *this;
+    }
+    MM_FORCE_INLINE constexpr rect &operator=(rect &&r) noexcept {
+        x = r.x;
+        y = r.y;
+        w = r.w;
+        h = r.h;
+        return *this;
+    }
 
     //  (fabsf(x - target) < 1e-5f)
-    MM_FORCE_INLINE constexpr bool  operator==(const rect &r) const noexcept {
+    MM_FORCE_INLINE constexpr bool operator==(const rect &r) const noexcept {
         return (fabsf(x - r.x) < 1e-5f && fabsf(y - r.y) < 1e-5f && fabsf(w - r.w) < 1e-5f && fabsf(h - r.h) < 1e-5f);
     }
     MM_FORCE_INLINE constexpr bool operator!=(const rect &r) const noexcept { return !(*this == r); }
@@ -49,26 +95,17 @@ struct rect {
         x = x_;
         y = y_;
     }
-    MM_FORCE_INLINE constexpr void set_position(const vec2 &pos) noexcept {
-        x = pos.x;
-        y = pos.y;
-    }
+    MM_FORCE_INLINE constexpr void set_position(const vec2 &pos) noexcept { m_position = pos; }
     MM_FORCE_INLINE constexpr void set_size(f32 w_, f32 h_) noexcept {
         w = w_;
         h = h_;
     }
-    MM_FORCE_INLINE constexpr void set_size(const vec2 &sz) noexcept {
-        w = sz.x;
-        h = sz.y;
-    }
+    MM_FORCE_INLINE constexpr void set_size(const vec2 &sz) noexcept { m_size = sz; }
     MM_FORCE_INLINE constexpr void translate(f32 dx, f32 dy) noexcept {
         x += dx;
         y += dy;
     }
-    MM_FORCE_INLINE constexpr void translate(const vec2 &d) noexcept {
-        x += d.x;
-        y += d.y;
-    }
+    MM_FORCE_INLINE constexpr void translate(const vec2 &d) noexcept { m_position += d; }
     MM_FORCE_INLINE constexpr void inflate(f32 dw, f32 dh) noexcept {
         x -= dw;
         y -= dh;
@@ -104,6 +141,49 @@ struct rect {
         f32 btm = MM_MAX(a.bottom(), b.bottom());
         return rect(l, t, r - l, btm - t);
     }
+
+MM_FORCE_INLINE static constexpr rect apply_positioning(const rect &child, const rect &parent, position_mode mode, anchor anchor_point,
+                                                             const vec2 &offset = {0, 0}) noexcept {
+        if (mode == position_mode::ABSOLUTE) {
+            return child;
+        } else if (mode == position_mode::RELATIVE) {
+            f32 new_x = parent.x + child.x;
+            f32 new_y = parent.y + child.y;
+            return rect(new_x, new_y, child.w, child.h);
+        } else if (mode == position_mode::ANCHORED) {
+            vec2 anchor_pos = compute_anchor_offset(parent, anchor_point);
+            return rect(anchor_pos + offset - vec2(child.w * 0.5f, child.h * 0.5f), child.size());
+        }
+        MM_ASSERT(false && "unrecognized position_mode");
+        return child; // unreachable
+    }
+
+    MM_FORCE_INLINE static constexpr vec2 compute_anchor_offset(const rect &parent, anchor anchor_point) noexcept {
+        switch (anchor_point) {
+        case anchor::TOP_LEFT:
+            return vec2(parent.x, parent.y);
+        case anchor::TOP_CENTER:
+            return vec2(parent.x + parent.w * 0.5f, parent.y);
+        case anchor::TOP_RIGHT:
+            return vec2(parent.x + parent.w, parent.y);
+        case anchor::CENTER_LEFT:
+            return vec2(parent.x, parent.y + parent.h * 0.5f);
+        case anchor::CENTER:
+            return parent.center();
+        case anchor::CENTER_RIGHT:
+            return vec2(parent.x + parent.w, parent.y + parent.h * 0.5f);
+        case anchor::BOTTOM_LEFT:
+            return vec2(parent.x, parent.y + parent.h);
+        case anchor::BOTTOM_CENTER:
+            return vec2(parent.x + parent.w * 0.5f, parent.y + parent.h);
+        case anchor::BOTTOM_RIGHT:
+            return vec2(parent.x + parent.w, parent.y + parent.h);
+        }
+        MM_ASSERT(false && "unrecognized anchor");
+        return parent.center(); // unreachable
+    }
+
+    MM_FORCE_INLINE constexpr rect        with_padding(f32 p) const noexcept { return rect(x + p, y + p, w - p * 2.0F, h - p * 2.0F); }
 
     // =============================================================================
     // Factories

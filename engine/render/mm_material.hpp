@@ -3,12 +3,13 @@
 
 #pragma once
 #include "../core/mm_handle.hpp"
+#include "core/mm_types.h"
 #include "../rhi/mm_rhi_concept.hpp"
 #include <cstdint>
 #include <cstring>
 
 // ─── Built-in material types ─────────────────────────────────────
-enum class e_material_type : uint8_t {
+enum class e_material_type : u8 {
     SPRITEALPHA,    // alpha blend (default)
     SPRITEADDITIVE, // additive blend
     SPRITEMULTIPLY, // multiply blend
@@ -20,7 +21,6 @@ enum class e_material_type : uint8_t {
     CLIPRECT,       // screen-space clipping
     DISSOLVE,       // procedural dissolve transition
     GRAYSCALE,      // desaturation
-    SDFBUTTON,      // aspect-correct SDF button (pill/circle/rounded rect)
     NORMALDERIVE,   // Sobel normal from albedo + Blinn-Phong (lab D6)
     NORMALMAP,      // tangent-space normal map lighting (lab D7/D8/D9 card)
     CARTOON,        // toon bands + ink edges (lab C)
@@ -53,11 +53,11 @@ struct Material {
 
 // ─── Technique — render pass descriptor ─────────────────────────
 // Single-pass for now; pass_count reserved for multi-pass (e.g., glow, shadow).
-static constexpr uint8_t TECHNIQUE_MAX_PASSES = 4;
+static constexpr u8 TECHNIQUE_MAX_PASSES = 4;
 
 struct Technique {
     Material         passes[TECHNIQUE_MAX_PASSES];
-    uint8_t          pass_count;
+    u8          pass_count;
     char             name[32];
 
     static Technique make_single(const Material &mat, const char *label = "") noexcept {

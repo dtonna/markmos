@@ -3,6 +3,7 @@
 
 #pragma once
 #include "../core/mm_expected.hpp"
+#include "core/mm_types.h"
 #include "../core/mm_handle.hpp"
 #include "../core/mm_log.hpp"
 #include "../core/mm_slotmap.hpp"
@@ -32,7 +33,7 @@
 struct VulkanBuffer {
     VkBuffer      buffer;
     VmaAllocation alloc;
-    uint32_t      size;
+    u32      size;
     BufferType    type;
 };
 
@@ -40,7 +41,7 @@ struct VulkanTexture {
     VkImage       image;
     VmaAllocation alloc;
     VkImageView   view;
-    uint32_t      width, height;
+    u32      width, height;
     PixelFormat   format;
 };
 
@@ -68,10 +69,11 @@ struct VulkanBackend {
     VkInstance                 instance;
     VkDevice                   device;
     VkPhysicalDevice           phys_device;
+    bool                       sampler_aniso_supported = false; // queried at init; gates anisotropyEnable
     VkQueue                    graphics_queue;
     VkQueue                    present_queue;
-    uint32_t                   graphics_family;
-    uint32_t                   present_family;
+    u32                   graphics_family;
+    u32                   present_family;
 
     // VMA allocator
     VmaAllocator               allocator;
@@ -82,7 +84,7 @@ struct VulkanBackend {
     VkFence                    frame_fence;
     VkCommandPool              cmd_pool;
     VkCommandBuffer            cmd_buf;
-    uint64_t                   timeline_value;
+    u64                   timeline_value;
 
     // Surface + Swapchain
     VkSurfaceKHR               surface;
@@ -91,7 +93,7 @@ struct VulkanBackend {
     VkFormat                   swap_format;
     std::vector<VkImage>       swap_images;
     std::vector<VkImageView>   swap_views;
-    uint32_t                   swap_index;
+    u32                   swap_index;
 
     // Slotmaps
     Slotmap<VulkanBuffer>      buffers;
@@ -109,7 +111,7 @@ struct VulkanBackend {
     PFN_vkCmdBeginRenderingKHR vkCmdBeginRenderingKHR;
     PFN_vkCmdEndRenderingKHR   vkCmdEndRenderingKHR;
 
-    uint32_t                   frame_index;
+    u32                   frame_index;
 
     Expected<void, RHIError>   init(void *window_handle) noexcept {
         if (instance != VK_NULL_HANDLE) {
@@ -210,6 +212,14 @@ struct VulkanBackend {
         VkPhysicalDeviceFeatures2 features2{};
         features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
         features2.pNext = &features12;
+
+        // Anisotropy (minified-atlas cleanup): enable the device feature
+        // only when the physical device offers it; create_sampler checks
+        // this flag before setting anisotropyEnable.
+        VkPhysicalDeviceFeatures avail_features{};
+        vkGetPhysicalDeviceFeatures(phys_device, &avail_features);
+        sampler_aniso_supported                  = (avail_features.samplerAnisotropy == VK_TRUE);
+        features2.features.samplerAnisotropy     = sampler_aniso_supported ? VK_TRUE : VK_FALSE;
 
         vkb::DeviceBuilder device_builder(physical_device);
         auto               dev_ret = device_builder.add_pNext(&features2).build();
@@ -461,7 +471,7 @@ struct VulkanBackend {
     }
 
     Expected<BufferHandle, RHIError> create_buffer(const BufferDesc &desc) noexcept {
-        // MM_LOG("create_buffer entering: type=%d size=%u cpu_visible=%d", (int)desc.type, (uint32_t)desc.size, (int)desc.cpu_visible);
+        // MM_LOG("create_buffer entering: type=%d size=%u cpu_visible=%d", (int)desc.type, (u32)desc.size, (int)desc.cpu_visible);
         if (!allocator) {
             MM_ERROR("create_buffer: allocator is NULL!");
             return make_unexpected(RHIError::BackendError);
@@ -513,7 +523,7 @@ struct VulkanBackend {
         }
         // MM_LOG("create_buffer: vmaCreateBuffer OK: buffer=%p, alloc=%p", (void *)buf, (void *)alloc);
 
-        VulkanBuffer vb{buf, alloc, (uint32_t)desc.size, desc.type};
+        VulkanBuffer vb{buf, alloc, (u32)desc.size, desc.type};
 
         // MM_LOG("create_buffer: emplace into slotmap");
         SlotHandle   sh = buffers.emplace(vb);
@@ -576,9 +586,13 @@ struct VulkanBackend {
         info.sType         = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
         info.magFilter     = desc.mag_filter == SamplerFilter::Linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
         info.minFilter     = desc.min_filter == SamplerFilter::Linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+        info.mipmapMode    = desc.mip_filter == SamplerFilter::Linear ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        info.minLod        = 0.0f;
+        info.maxLod        = 16.0f; // else only level 0 is ever sampled (default maxLod = 0)
         info.addressModeU  = to_vk_address(desc.address_u);
         info.addressModeV  = to_vk_address(desc.address_v);
         info.addressModeW  = to_vk_address(desc.address_w);
+        info.anisotropyEnable = (desc.max_anisotropy > 1.0f && sampler_aniso_supported) ? VK_TRUE : VK_FALSE;
         info.maxAnisotropy = desc.max_anisotropy;
         info.compareOp     = to_vk_compare(desc.compare);
 
@@ -599,7 +613,7 @@ struct VulkanBackend {
         VkShaderModuleCreateInfo vsm{};
         vsm.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
         vsm.codeSize = desc.vertex_shader.code_size;
-        vsm.pCode    = static_cast<const uint32_t *>(desc.vertex_shader.code);
+        vsm.pCode    = static_cast<const u32 *>(desc.vertex_shader.code);
 
         VkShaderModule vs_module;
         if (vkCreateShaderModule(device, &vsm, nullptr, &vs_module) != VK_SUCCESS) {
@@ -610,7 +624,7 @@ struct VulkanBackend {
         VkShaderModuleCreateInfo fsm{};
         fsm.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
         fsm.codeSize = desc.fragment_shader.code_size;
-        fsm.pCode    = static_cast<const uint32_t *>(desc.fragment_shader.code);
+        fsm.pCode    = static_cast<const u32 *>(desc.fragment_shader.code);
 
         VkShaderModule fs_module;
         if (vkCreateShaderModule(device, &fsm, nullptr, &fs_module) != VK_SUCCESS) {
@@ -635,12 +649,12 @@ struct VulkanBackend {
         // --- Vertex input ---
         VkVertexInputBindingDescription   bindings[16];
         VkVertexInputAttributeDescription attrs[16];
-        uint32_t                          binding_count = 0;
-        uint32_t                          attr_count    = desc.vertex_attr_count;
+        u32                          binding_count = 0;
+        u32                          attr_count    = desc.vertex_attr_count;
 
         // Group attributes by stride (binding)
-        uint32_t                          max_stride    = 0;
-        for (uint8_t i = 0; i < attr_count; ++i) {
+        u32                          max_stride    = 0;
+        for (u8 i = 0; i < attr_count; ++i) {
             auto &a           = desc.vertex_attrs[i];
             attrs[i].location = a.location;
             attrs[i].binding  = desc.is_instance ? 1 : 0;
@@ -698,7 +712,7 @@ struct VulkanBackend {
 
         // --- Color blend ---
         VkPipelineColorBlendAttachmentState cb_attachments[4]{};
-        for (uint8_t i = 0; i < desc.color_count && i < 4; ++i) {
+        for (u8 i = 0; i < desc.color_count && i < 4; ++i) {
             cb_attachments[i].blendEnable         = VK_TRUE;
             cb_attachments[i].srcColorBlendFactor = to_vk_blend(desc.src_blend);
             cb_attachments[i].dstColorBlendFactor = to_vk_blend(desc.dst_blend);
@@ -731,7 +745,7 @@ struct VulkanBackend {
 
         // --- Descriptor set layout ---
         VkDescriptorSetLayoutBinding dsl_bindings[8];
-        for (uint8_t i = 0; i < desc.descriptor_count; ++i) {
+        for (u8 i = 0; i < desc.descriptor_count; ++i) {
             auto &db                           = desc.descriptor_bindings[i];
             dsl_bindings[i].binding            = db.binding;
             dsl_bindings[i].descriptorType     = to_vk_descriptor_type(db.type);
@@ -774,7 +788,7 @@ struct VulkanBackend {
 
         // --- Dynamic rendering format ---
         VkFormat color_fmts[4];
-        for (uint8_t i = 0; i < desc.color_count && i < 4; ++i) {
+        for (u8 i = 0; i < desc.color_count && i < 4; ++i) {
             color_fmts[i] = to_vk_format(desc.color_formats[i]);
         }
         VkPipelineRenderingCreateInfo rd{};
@@ -887,7 +901,7 @@ struct VulkanBackend {
         pipelines.free(h.handle);
     }
 
-    Expected<void, RHIError> update_buffer(BufferHandle h, const void *data, uint32_t offset, uint32_t size) noexcept {
+    Expected<void, RHIError> update_buffer(BufferHandle h, const void *data, u32 offset, u32 size) noexcept {
         auto *buf = buffers.get(h.handle);
         if (!buf) {
             return make_unexpected(RHIError::InvalidHandle);
@@ -897,18 +911,18 @@ struct VulkanBackend {
         vmaGetAllocationInfo(allocator, buf->alloc, &info);
 
         if (info.pMappedData) {
-            memcpy(static_cast<uint8_t *>(info.pMappedData) + offset, data, size);
+            memcpy(static_cast<u8 *>(info.pMappedData) + offset, data, size);
         } else {
             void *mapped;
             vmaMapMemory(allocator, buf->alloc, &mapped);
-            memcpy(static_cast<uint8_t *>(mapped) + offset, data, size);
+            memcpy(static_cast<u8 *>(mapped) + offset, data, size);
             vmaUnmapMemory(allocator, buf->alloc);
         }
         return {};
     }
 
-    Expected<void, RHIError> update_texture(TextureHandle h, const void *data, uint32_t x, uint32_t y, uint32_t w, uint32_t h_, uint32_t mip,
-                                            uint32_t slice) noexcept {
+    Expected<void, RHIError> update_texture(TextureHandle h, const void *data, u32 x, u32 y, u32 w, u32 h_, u32 mip,
+                                            u32 slice) noexcept {
         //        MM_LOG("update_texture entering: handle=%u %ux%u", h.handle.id, w, h_);
         auto *tex = textures.get(h.handle);
         if (!tex) {
@@ -917,7 +931,7 @@ struct VulkanBackend {
         }
 
         // Create staging buffer
-        uint32_t           bpp        = get_format_size(tex->format);
+        u32           bpp        = get_format_size(tex->format);
         VkDeviceSize       image_size = static_cast<VkDeviceSize>(w) * h_ * bpp;
         VkBufferCreateInfo buf_info{};
         buf_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -986,7 +1000,7 @@ struct VulkanBackend {
         region.imageSubresource.mipLevel       = mip;
         region.imageSubresource.baseArrayLayer = slice;
         region.imageSubresource.layerCount     = 1;
-        region.imageOffset                     = {static_cast<int32_t>(x), static_cast<int32_t>(y), 0};
+        region.imageOffset                     = {static_cast<i32>(x), static_cast<i32>(y), 0};
         region.imageExtent                     = {w, h_, 1};
         //        MM_LOG("update_texture: recording copy command");
         vkCmdCopyBufferToImage(transfer_cmd, staging_buf, tex->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
@@ -1064,35 +1078,58 @@ struct VulkanBackend {
         return {};
     }
 
-    void resize() noexcept {
-        vkDeviceWaitIdle(device);
+    Expected<void, RHIError> resize(SurfaceInfo s) noexcept {
+        if (!s.native_handle) {
+            return make_unexpected(RHIError::InvalidHandle);
+        }
+        // Android sends 0x0 while backgrounding — ignore, keep old swapchain.
+        if (s.width == 0 || s.height == 0) {
+            return {};
+        }
 
-        // Rebuild swapchain ก่อน (pass old swapchain)
-        vkb::SwapchainBuilder swap_builder(vkb_device, surface);
-        auto                  swap_ret = swap_builder.set_desired_format({VK_FORMAT_B8G8R8A8_SRGB, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR})
-                            .set_desired_present_mode(VK_PRESENT_MODE_FIFO_KHR)
+        // Wait only for in-flight frames, not the whole device.
+        for (u32 i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+            vkWaitForFences(device, 1, &inFlightFences[i], VK_TRUE, UINT64_MAX);
+        }
+
+        // Rebuild swapchain, passing the old one so the driver can reuse it.
+        vkb::SwapchainBuilder builder(vkb_device, surface);
+        auto                  swap_ret = builder.set_desired_format({VK_FORMAT_B8G8R8A8_SRGB, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR})
+                            .set_desired_present_mode(VK_PRESENT_MODE_FIFO_KHR) // never MAILBOX on Android (battery)
+                            .set_desired_extent(s.width, s.height)
                             .set_old_swapchain(vkb_swapchain)
                             .build();
 
         if (!swap_ret) {
-            MM_ERROR("resize: swapchain recreation failed, keeping existing swapchain");
-            return; // ไม่ destroy อะไรเลย — swapchain เดิมยังใช้ได้
+            MM_ERROR("resize: %s", swap_ret.error().c_str());
+            // Keep rendering on the old swapchain — destroy nothing.
+            return make_unexpected(RHIError::BackendError);
         }
 
-        // สำเร็จ — destroy old views แล้วค่อย swap
+        // Destroy old views only after the replacement exists.
         for (auto v : swap_views) {
             vkDestroyImageView(device, v, nullptr);
         }
         swap_views.clear();
         swap_images.clear();
-
         vkb::destroy_swapchain(vkb_swapchain);
+
         vkb_swapchain = swap_ret.value();
         swapchain     = vkb_swapchain.swapchain;
         swap_extent   = vkb_swapchain.extent;
         swap_format   = vkb_swapchain.image_format;
-        swap_images   = vkb_swapchain.get_images().value();
-        swap_views    = vkb_swapchain.get_image_views().value();
+
+        auto img_res  = vkb_swapchain.get_images();
+        auto view_res = vkb_swapchain.get_image_views();
+        if (!img_res || !view_res) {
+            return make_unexpected(RHIError::BackendError);
+        }
+        swap_images = img_res.value();
+        swap_views  = view_res.value();
+
+        // NOTE: no framebuffer/depth rebuild needed — begin_frame() uses
+        // dynamic rendering with swap_views[swap_index] + swap_extent directly.
+        return {};
     }
 
     Expected<void, RHIError> end_frame() noexcept {
@@ -1156,7 +1193,7 @@ struct VulkanBackend {
         color_attach.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         color_attach.loadOp      = (pass.color_load == LoadOp::Clear) ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
         color_attach.storeOp     = VK_ATTACHMENT_STORE_OP_STORE;
-        memcpy(&color_attach.clearValue.color.float32[0], pass.clear_color, 4 * sizeof(float));
+        memcpy(&color_attach.clearValue.color.float32[0], pass.clear_color, 4 * sizeof(f32));
 
         VkRenderingInfo render_info{};
         render_info.sType                = VK_STRUCTURE_TYPE_RENDERING_INFO;
@@ -1167,7 +1204,7 @@ struct VulkanBackend {
 
         vkCmdBeginRenderingKHR(cmd_buf, &render_info);
 
-        VkViewport viewport{0, 0, static_cast<float>(swap_extent.width), static_cast<float>(swap_extent.height), 0, 1};
+        VkViewport viewport{0, 0, static_cast<f32>(swap_extent.width), static_cast<f32>(swap_extent.height), 0, 1};
         VkRect2D   scissor{{0, 0}, swap_extent};
         vkCmdSetViewport(cmd_buf, 0, 1, &viewport);
         vkCmdSetScissor(cmd_buf, 0, 1, &scissor);
@@ -1202,7 +1239,7 @@ struct VulkanBackend {
         }
 
         if (pl->descriptor_dirty) {
-            uint32_t              write_count = 0;
+            u32              write_count = 0;
             VkWriteDescriptorSet  writes[8]   = {};
 
             VkDescriptorImageInfo img_info{};
@@ -1221,7 +1258,7 @@ struct VulkanBackend {
             }
 
             VkDescriptorBufferInfo ubo_infos[8]{};
-            for (uint32_t i = 0; i < 8 && write_count < 8; ++i) {
+            for (u32 i = 0; i < 8 && write_count < 8; ++i) {
                 if (!pl->current_ubos[i]) {
                     continue;
                 }
@@ -1248,11 +1285,11 @@ struct VulkanBackend {
         vkCmdBindDescriptorSets(cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS, pl->layout, 0, 1, &pl->desc_set, 0, nullptr);
     }
 
-    Expected<void, RHIError> bind_vertex_buffers(BufferHandle *handles, uint32_t count, const uint64_t *offsets, const uint64_t *strides,
-                                                 const uint32_t *bindings = nullptr) noexcept {
+    Expected<void, RHIError> bind_vertex_buffers(BufferHandle *handles, u32 count, const u64 *offsets, const u64 *strides,
+                                                 const u32 *bindings = nullptr) noexcept {
         VkBuffer     vk_bufs[16];
         VkDeviceSize vk_offsets[16];
-        for (uint32_t i = 0; i < count && i < 16; ++i) {
+        for (u32 i = 0; i < count && i < 16; ++i) {
             auto *buf = this->buffers.get(handles[i].handle);
             if (!buf) {
                 return make_unexpected(RHIError::InvalidHandle);
@@ -1260,12 +1297,12 @@ struct VulkanBackend {
             vk_bufs[i]    = buf->buffer;
             vk_offsets[i] = offsets ? offsets[i] : 0;
         }
-        uint32_t first = bindings ? bindings[0] : 0;
+        u32 first = bindings ? bindings[0] : 0;
         vkCmdBindVertexBuffers(cmd_buf, first, count, vk_bufs, vk_offsets);
         return {};
     }
 
-    Expected<void, RHIError> bind_index_buffer(BufferHandle h, IndexType type, uint64_t offset = 0) noexcept {
+    Expected<void, RHIError> bind_index_buffer(BufferHandle h, IndexType type, u64 offset = 0) noexcept {
         auto *buf = buffers.get(h.handle);
         if (!buf) {
             return make_unexpected(RHIError::InvalidHandle);
@@ -1274,14 +1311,14 @@ struct VulkanBackend {
         return {};
     }
 
-    Expected<void, RHIError> bind_uniform_buffer(BufferHandle handle, uint32_t binding) noexcept {
+    Expected<void, RHIError> bind_uniform_buffer(BufferHandle handle, u32 binding) noexcept {
         auto *buf = buffers.get(handle.handle);
         if (!buf) {
             return make_unexpected(RHIError::InvalidHandle);
         }
         auto *pl = pipelines.get(current_pipeline_handle.handle);
         if (pl) {
-            uint32_t physical_binding = binding + 1;
+            u32 physical_binding = binding + 1;
             if (physical_binding < 8) {
                 pl->current_ubos[physical_binding] = buf->buffer;
                 pl->descriptor_dirty               = true;
@@ -1290,19 +1327,19 @@ struct VulkanBackend {
         return {};
     }
 
-    Expected<void, RHIError> draw(uint32_t vertex_count, uint32_t instance_count, uint32_t first_vertex, uint32_t first_instance) noexcept {
+    Expected<void, RHIError> draw(u32 vertex_count, u32 instance_count, u32 first_vertex, u32 first_instance) noexcept {
         flush_descriptors();
         vkCmdDraw(cmd_buf, vertex_count, instance_count, first_vertex, first_instance);
         return {};
     }
 
-    Expected<void, RHIError> draw_indexed(uint32_t index_count, uint32_t instance_count, uint32_t first_index, int32_t vertex_offset = 0) noexcept {
+    Expected<void, RHIError> draw_indexed(u32 index_count, u32 instance_count, u32 first_index, i32 vertex_offset = 0) noexcept {
         flush_descriptors();
         vkCmdDrawIndexed(cmd_buf, index_count, instance_count, first_index, vertex_offset, 0);
         return {};
     }
 
-    Expected<void, RHIError> bind_fragment_texture(TextureHandle handle, uint32_t binding) noexcept {
+    Expected<void, RHIError> bind_fragment_texture(TextureHandle handle, u32 binding) noexcept {
         auto *tex = textures.get(handle.handle);
         if (!tex) {
             return make_unexpected(RHIError::InvalidHandle);
@@ -1315,7 +1352,7 @@ struct VulkanBackend {
         return {};
     }
 
-    Expected<void, RHIError> bind_fragment_sampler(SamplerHandle handle, uint32_t binding) noexcept {
+    Expected<void, RHIError> bind_fragment_sampler(SamplerHandle handle, u32 binding) noexcept {
         auto *samp = samplers.get(handle.handle);
         if (!samp) {
             return make_unexpected(RHIError::InvalidHandle);
@@ -1328,14 +1365,14 @@ struct VulkanBackend {
         return {};
     }
 
-    Expected<void, RHIError> set_scissor(int16_t x, int16_t y, uint16_t w, uint16_t h) noexcept {
-        VkRect2D scissor{{static_cast<int32_t>(x), static_cast<int32_t>(y)}, {w, h}};
+    Expected<void, RHIError> set_scissor(i16 x, i16 y, u16 w, u16 h) noexcept {
+        VkRect2D scissor{{static_cast<i32>(x), static_cast<i32>(y)}, {w, h}};
         vkCmdSetScissor(cmd_buf, 0, 1, &scissor);
         return {};
     }
 
   private:
-    static uint32_t get_format_size(PixelFormat fmt) noexcept {
+    static u32 get_format_size(PixelFormat fmt) noexcept {
         switch (fmt) {
         case PixelFormat::R8_UNORM:
             return 1;
@@ -1383,7 +1420,7 @@ struct VulkanBackend {
             // Engine vertex colors are packed 0xAARRGGBB u32s (NOT raw RGBA
             // bytes) — swizzle to BGRA for Metal parity (Metal maps this to
             // UChar4Normalized_BGRA). Applies to SpriteVertex color +
-            // border_color; float vertex data never uses this format.
+            // border_color; f32 vertex data never uses this format.
             return VK_FORMAT_B8G8R8A8_UNORM;
         case PixelFormat::R16G16B16A16_FLOAT:
             return VK_FORMAT_R16G16B16A16_SFLOAT;
@@ -1479,7 +1516,7 @@ struct VulkanBackend {
         }
     }
 
-    static VkShaderStageFlags to_vk_shader_stage(uint32_t mask) noexcept {
+    static VkShaderStageFlags to_vk_shader_stage(u32 mask) noexcept {
         VkShaderStageFlags flags = 0;
         if (mask & 1) {
             flags |= VK_SHADER_STAGE_VERTEX_BIT;

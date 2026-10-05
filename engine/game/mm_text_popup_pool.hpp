@@ -3,6 +3,7 @@
 
 #pragma once
 #include <cstdint>
+#include "core/mm_types.h"
 #include <cstddef>
 #include <cstring>
 #include <cmath>
@@ -17,32 +18,32 @@
 //   - Text buffer: 15 UTF-8 bytes + null (short strings only)
 //   - Swap-with-last despawn
 
-static constexpr uint16_t MAX_POPUP = 64;
+static constexpr u16 MAX_POPUP = 64;
 
 struct TextPopup {
-    float    px, py;
-    float    vy;           // float-up velocity
-    float    alpha;        // 1.0 → 0.0 fade
-    float    scale;        // animate scale pop
-    uint8_t  text[16];     // max 15 char + null
-    uint8_t  text_len;
-    uint32_t color;        // RGBA tint
-    uint8_t  active;
+    f32    px, py;
+    f32    vy;           // f32-up velocity
+    f32    alpha;        // 1.0 → 0.0 fade
+    f32    scale;        // animate scale pop
+    u8  text[16];     // max 15 char + null
+    u8  text_len;
+    u32 color;        // RGBA tint
+    u8  active;
 };
 
 struct alignas(64) TextPopupPool {
     // SoA layout
-    alignas(64) float    px     [MAX_POPUP];
-    alignas(64) float    py     [MAX_POPUP];
-    alignas(64) float    vy     [MAX_POPUP];
-    alignas(64) float    alpha  [MAX_POPUP];
-    alignas(64) float    scale  [MAX_POPUP];
-    alignas(64) uint8_t  text   [MAX_POPUP][16];
-    alignas(64) uint8_t  text_len[MAX_POPUP];
-    alignas(64) uint32_t color  [MAX_POPUP];
-    alignas(64) uint8_t  active [MAX_POPUP];
+    alignas(64) f32    px     [MAX_POPUP];
+    alignas(64) f32    py     [MAX_POPUP];
+    alignas(64) f32    vy     [MAX_POPUP];
+    alignas(64) f32    alpha  [MAX_POPUP];
+    alignas(64) f32    scale  [MAX_POPUP];
+    alignas(64) u8  text   [MAX_POPUP][16];
+    alignas(64) u8  text_len[MAX_POPUP];
+    alignas(64) u32 color  [MAX_POPUP];
+    alignas(64) u8  active [MAX_POPUP];
 
-    uint16_t count;
+    u16 count;
 
     TextPopupPool() { reset(); }
 
@@ -52,13 +53,13 @@ struct alignas(64) TextPopupPool {
     }
 
     // Spawn a score popup — O(1), no alloc
-    void spawn(float x, float y, const char* str, uint8_t len,
-               uint32_t col, float sc = 1.0f) noexcept {
+    void spawn(f32 x, f32 y, const char* str, u8 len,
+               u32 col, f32 sc = 1.0f) noexcept {
         if (count >= MAX_POPUP || len > 15) return;
 
         px[count]        = x;
         py[count]        = y;
-        vy[count]        = -80.0f;  // float up
+        vy[count]        = -80.0f;  // f32 up
         alpha[count]     = 1.0f;
         scale[count]     = sc;
         color[count]     = col;
@@ -72,17 +73,17 @@ struct alignas(64) TextPopupPool {
     }
 
     // Spawn with formatted score
-    void spawn_score(float x, float y, uint32_t score, uint32_t col) noexcept {
+    void spawn_score(f32 x, f32 y, u32 score, u32 col) noexcept {
         // Convert score to ASCII — small buffer on stack
         char buf[16];
-        uint8_t len = 0;
-        uint32_t s = score;
+        u8 len = 0;
+        u32 s = score;
         do {
             buf[len++] = '0' + static_cast<char>(s % 10);
             s /= 10;
         } while (s > 0);
         // Reverse
-        for (uint8_t i = 0; i < len / 2; ++i) {
+        for (u8 i = 0; i < len / 2; ++i) {
             char tmp = buf[i];
             buf[i] = buf[len - 1 - i];
             buf[len - 1 - i] = tmp;
@@ -91,10 +92,10 @@ struct alignas(64) TextPopupPool {
     }
 
     // Spawn combo text
-    void spawn_combo(float x, float y, uint8_t combo, uint32_t col) noexcept {
+    void spawn_combo(f32 x, f32 y, u8 combo, u32 col) noexcept {
         // Format: "COMBO x3"
         char buf[16] = "COMBO x";
-        uint8_t len = 7;
+        u8 len = 7;
         if (combo >= 10) {
             buf[len++] = '0' + (combo / 10);
         }
@@ -103,8 +104,8 @@ struct alignas(64) TextPopupPool {
     }
 
     // Update all popups
-    void update(float dt) noexcept {
-        for (uint16_t i = 0; i < count; ++i) {
+    void update(f32 dt) noexcept {
+        for (u16 i = 0; i < count; ++i) {
             if (!active[i]) continue;
 
             // Decelerate upward: fast start, slow fade out
@@ -119,9 +120,9 @@ struct alignas(64) TextPopupPool {
         }
     }
 
-    void deswap(uint16_t idx) noexcept {
+    void deswap(u16 idx) noexcept {
         if (idx >= count) return;
-        uint16_t last = count - 1;
+        u16 last = count - 1;
         if (idx != last) {
             px[idx]        = px[last];
             py[idx]        = py[last];

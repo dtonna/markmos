@@ -6,6 +6,7 @@
 // User handles: game init/update/render via AppCallbacks
 
 #include "mm_app.hpp"
+#include "core/mm_types.h"
 #include "../rhi/mm_rhi_concept.hpp"
 #include "../rhi/mm_metal_backend.hpp"
 #include "../render/mm_sprite_batch.hpp"
@@ -15,6 +16,7 @@
 #include "../core/mm_vfs.hpp"
 #include "../core/mm_pool.hpp"
 #include "../core/mm_job_system.hpp"
+#include "../game/mm_event_bus.hpp"
 
 #include "../core/mm_log.hpp"
 
@@ -26,16 +28,19 @@
 #include <unistd.h>
 
 // Engine globals (accessible to user code via extern)
+// Note: g_event_bus is defined once in engine/game/mm_event_bus.cpp,
+// declared extern via ../game/mm_event_bus.hpp — do NOT redefine here.
 MetalBackend*    g_backend       = nullptr;
 InputEventQueue* g_input_queue   = nullptr;
 InputState*      g_input_state   = nullptr;
-float            g_content_scale = 1.0f;
+f32            g_content_scale = 1.0f;
+EventBus*        g_event_bus_ptr = nullptr;
 
 // App callbacks (set by main() from user's markmos_main())
 static AppCallbacks g_callbacks{};
 
 // macOS NSEvent keyCode → engine KeyCode
-static KeyCode keycode_from_ns(uint16_t kc) noexcept {
+static KeyCode keycode_from_ns(u16 kc) noexcept {
     switch (kc) {
         case 0x00: return KeyCode::A; case 0x0B: return KeyCode::B;
         case 0x08: return KeyCode::C; case 0x02: return KeyCode::D;
@@ -54,7 +59,7 @@ static KeyCode keycode_from_ns(uint16_t kc) noexcept {
         case 0x13: return KeyCode::D2; case 0x14: return KeyCode::D3;
         case 0x15: return KeyCode::D4; case 0x17: return KeyCode::D5;
         case 0x16: return KeyCode::D6; case 0x1A: return KeyCode::D7;
-        case 0x18: return KeyCode::D8; case 0x19: return KeyCode::D9;
+        case 0x1C: return KeyCode::D8; case 0x19: return KeyCode::D9; // 0x1C='8' (0x18 is '=' — must stay Unknown so typed +/- reaches text_input)
         case 0x7B: return KeyCode::Left;  case 0x7C: return KeyCode::Right;
         case 0x7E: return KeyCode::Up;    case 0x7D: return KeyCode::Down;
         case 0x38: return KeyCode::Shift; case 0x3B: return KeyCode::Ctrl;
@@ -62,6 +67,16 @@ static KeyCode keycode_from_ns(uint16_t kc) noexcept {
         case 0x31: return KeyCode::Space;   case 0x24: return KeyCode::Enter;
         case 0x35: return KeyCode::Escape;  case 0x33: return KeyCode::Backspace;
         case 0x30: return KeyCode::Tab;
+        case 0x75: return KeyCode::Delete;  // kVK_ForwardDelete (0x7F is kVK_Delete = Backspace)
+        case 0x73: return KeyCode::Home;    case 0x77: return KeyCode::End;
+        // Values from the SDK's HIToolbox/Events.h, not guessed:
+        //   kVK_PageUp = 0x74, kVK_F4 = 0x76, kVK_PageDown = 0x79
+        // PageUp/PageDown have their OWN keycodes and do NOT collide with the
+        // arrows (kVK_Down = 0x7D). A Mac laptop keyboard sends PageUp/PageDown
+        // for Fn+Up / Fn+Down, and the OS delivers 0x74 / 0x79 - so mapping them
+        // is safe and there is no "Fn+Down is just Down" trap to document around.
+        case 0x74: return KeyCode::PageUp;  case 0x79: return KeyCode::PageDown;
+        case 0x76: return KeyCode::F4;
         default:   return KeyCode::Unknown;
     }
 }
@@ -76,6 +91,13 @@ static KeyCode keycode_from_ns(uint16_t kc) noexcept {
 @interface MetalView : NSView {
     CADisplayLink* _displayLink;
     CFTimeInterval _lastFrameTime;
+    bool _initialized;
+    bool _init_done;
+    // Modifier state, mirrored from flagsChanged: (see that method for why it
+    // cannot be read off the keyboard events). One flag per KeyCode we map.
+    bool _mod_shift;
+    bool _mod_ctrl;
+    bool _mod_alt;
 }
 //- (void)tick;
 - (void)renderLoopStep:(CADisplayLink *)sender;
@@ -87,7 +109,7 @@ static KeyCode keycode_from_ns(uint16_t kc) noexcept {
     CAMetalLayer* metalLayer = [CAMetalLayer layer];
     metalLayer.device = MTLCreateSystemDefaultDevice();
     metalLayer.pixelFormat = MTLPixelFormatBGRA8Unorm_sRGB;
-    metalLayer.maximumDrawableCount = 3;
+    // NOTE: maximumDrawableCount left at the system default (triple buffering).
     return metalLayer;
 }
 
@@ -97,6 +119,8 @@ static KeyCode keycode_from_ns(uint16_t kc) noexcept {
         self.wantsLayer = YES;
         self.allowedTouchTypes = NSTouchTypeMaskDirect;
         _lastFrameTime = CACurrentMediaTime();
+        _initialized = false;
+        _init_done = false;
 
         // 1. Setup system input boundaries
         NSTrackingArea* tracking = [[NSTrackingArea alloc]
@@ -106,40 +130,12 @@ static KeyCode keycode_from_ns(uint16_t kc) noexcept {
                 userInfo:nil];
         [self addTrackingArea:tracking];
 
-        // 2. Initialize graphics systems
-        CAMetalLayer* layer = (CAMetalLayer*)self.layer;
-        g_backend = new MetalBackend();
-        if (!g_backend->init((__bridge void*)layer)) {
-            return nil;
-        }
+        // NOTE: viewport updates are driven directly via setFrameSize: /
+        // viewDidEndLiveResize / viewDidMoveToWindow — no NSNotification
+        // observer needed (avoids dangling-observer crash on teardown).
 
-        g_input_queue = new InputEventQueue();
-        g_input_state = new InputState();
-        g_input_state->init();
-        g_audio_system.init();
-
-        // Init pool allocator, job system
-        PoolInit();
-        JobSystemInit(0);
-
-        // 3. Setup VFS and environment paths
-        NSString* bundlePath = [[NSBundle mainBundle] resourcePath];
-        NSArray* docPaths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
-        g_vfs.init([bundlePath UTF8String], docPaths.count > 0 ? [docPaths[0] UTF8String] : nullptr);
-        chdir([bundlePath UTF8String]);
-        
-//        char cwd[512];
-//        getcwd(cwd, sizeof(cwd));
-//        NSLog(@"[app] cwd = %s", cwd);
-//        NSLog(@"[app] bundlePath = %@", bundlePath);
-//        
-//        NSArray* contents = [[NSFileManager defaultManager]
-//            contentsOfDirectoryAtPath:bundlePath error:nil];
-//        NSLog(@"[app] bundle contents = %@", contents);
-        
-        if (g_callbacks.init) {
-            g_callbacks.init(g_callbacks.user_data);
-        }
+        // NOTE: g_callbacks.init is NOT called here — backend/systems do not
+        // exist yet. One-time init happens in viewDidMoveToWindow below.
     }
     return self;
 }
@@ -149,30 +145,62 @@ static KeyCode keycode_from_ns(uint16_t kc) noexcept {
     [super viewDidMoveToWindow];
     
     if (self.window) {
+        // One-time initialization
+        if (!_initialized) {
+            _initialized = true;
+            
+            CAMetalLayer* layer = (CAMetalLayer*)self.layer;
+            g_backend = new MetalBackend();
+            if (!g_backend->init((__bridge void*)layer)) {
+                return;
+            }
+            
+            g_input_queue = new InputEventQueue();
+            g_input_state = new InputState();
+            g_input_state->init();
+            g_audio_system.init();
+            
+            PoolInit();
+            JobSystemInit(0);
+            g_event_bus.clear();
+            g_event_bus_ptr = &g_event_bus;
+            
+            NSString* bundlePath = [[NSBundle mainBundle] resourcePath];
+            NSArray* docPaths = NSSearchPathForDirectoriesInDomains(
+                NSDocumentDirectory, NSUserDomainMask, YES);
+            g_vfs.init([bundlePath UTF8String],
+                      docPaths.count > 0 ? [docPaths[0] UTF8String] : nullptr);
+            chdir([bundlePath UTF8String]);
+            
+            if (g_callbacks.init) {
+                g_callbacks.init(g_callbacks.user_data);
+            }
+            _init_done = true;
+        }
+        
+        // Update viewport (called every time)
         [self updateViewportDimensions];
         
-        /// FIX 2: Modern macOS 15+ NSDisplayLink creation
-        _displayLink = [self displayLinkWithTarget:self selector:@selector(renderLoopStep:)];
-        // 2. FIX: You MUST unpause the link explicitly on macOS to kick off the frame loop!
-                
-        //_displayLink. = NO;
-                
-        // 3. Optional but highly recommended: Keep ticking during live window resizing/menu navigation
-        [_displayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
-                
-        // FIX 3: Automatically capture focus so keyboard events register immediately without clicking
+        // Start display link
+        if (!_displayLink) {
+            _displayLink = [self displayLinkWithTarget:self selector:@selector(renderLoopStep:)];
+            [_displayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+        }
+        
         [self.window makeFirstResponder:self];
     } else {
-        // Safe tear down if view gets disconnected
         [_displayLink invalidate];
         _displayLink = nil;
     }
 }
-
 - (void)renderLoopStep:(CADisplayLink *)sender {
+    // One OR per frame; the message send only happens while a modifier is held.
+    if ((_mod_shift || _mod_ctrl || _mod_alt) && self.window && ![self.window isKeyWindow]) {
+        [self release_held_modifiers];
+    }
     @autoreleasepool {
         CFTimeInterval currentTime = CACurrentMediaTime();
-        float dt = static_cast<float>(currentTime - _lastFrameTime);
+        f32 dt = static_cast<f32>(currentTime - _lastFrameTime);
         _lastFrameTime = currentTime;
         
         if (dt > 0.1f) dt = 0.1f; // Cap frame hiccups
@@ -198,23 +226,34 @@ static KeyCode keycode_from_ns(uint16_t kc) noexcept {
 - (void)updateViewportDimensions {
     NSSize size = self.bounds.size;
     CGFloat scale = self.window ? self.window.backingScaleFactor : 1.0f;
-    g_content_scale = static_cast<float>(scale);
+    g_content_scale = static_cast<f32>(scale);
     
-    uint32_t w = static_cast<uint32_t>(size.width * scale);
-    uint32_t h = static_cast<uint32_t>(size.height * scale);
+    u32 w = static_cast<u32>(size.width * scale);
+    u32 h = static_cast<u32>(size.height * scale);
     
     // Explicitly update matching backing store dimensions
     CAMetalLayer* layer = (CAMetalLayer*)self.layer;
     layer.drawableSize = CGSizeMake(w, h);
     layer.contentsScale = scale;
 
+    SurfaceInfo info{
+        .native_handle = (__bridge void*)layer,
+        .width         = w,
+        .height        = h,
+        .content_scale = static_cast<f32>(scale > 1.0f ? scale : 1.0f),
+    };
     if (g_backend) {
-        g_backend->resize(w, h);
+        g_backend->resize(info);
     }
-    if (g_callbacks.resize) {
+    // setContentView: resizes the view, so setFrameSize: -> here fires while
+    // the app is still uninitialized (g_callbacks.init has not run yet, so a
+    // per-app resize handler may dereference state that does not exist yet).
+    // viewDidMoveToWindow calls us again right after init, which is where the
+    // app learns its real size.
+    if (g_callbacks.resize && _init_done) {
         g_callbacks.resize(g_callbacks.user_data,
-            static_cast<uint32_t>(size.width),
-            static_cast<uint32_t>(size.height));
+            static_cast<u32>(size.width),
+            static_cast<u32>(size.height));
     }
 }
 
@@ -244,72 +283,17 @@ static KeyCode keycode_from_ns(uint16_t kc) noexcept {
     }
     
     if (g_callbacks.cleanup) g_callbacks.cleanup(g_callbacks.user_data);
-        
+
     g_audio_system.shutdown();
-    
-//    if (g_backend) {
-//        g_backend->shutdown();
-//        delete g_backend;
-//        
-//    }
+
     delete g_backend;       g_backend = nullptr;
     delete g_input_queue;   g_input_queue = nullptr;
     delete g_input_state;   g_input_state = nullptr;
+    g_event_bus.clear();
+    JobSystemShutdown();
     
     [super removeFromSuperview];
 }
-//
-//static CVReturn displayCallback(CVDisplayLinkRef displayLink,
-//                                const CVTimeStamp* now,
-//                                const CVTimeStamp* outputTime,
-//                                CVOptionFlags flagsIn,
-//                                CVOptionFlags* flagsOut,
-//                                void* context) {
-//    (void)displayLink; (void)now; (void)outputTime; (void)flagsIn; (void)flagsOut;
-//    
-//    // 5. Thread Safety Fix: Leap safely back to AppKit main thread loop
-//    dispatch_async(dispatch_get_main_queue(), ^{
-//        @autoreleasepool {
-//            [(__bridge MetalView*)context tick];
-//        }
-//    });
-//    return kCVReturnSuccess;
-//}
-//
-//- (void)tick {
-//    // 6. High-Precision Frame Timing (No longer hardcoded 1/60s)
-//    CFTimeInterval currentTime = CACurrentMediaTime();
-//    float dt = static_cast<float>(currentTime - _lastFrameTime);
-//    _lastFrameTime = currentTime;
-//    
-//    // Smooth over extreme outliers (e.g. system freezes or window drags)
-//    if (dt > 0.1f) dt = 0.1f;
-//    
-//    // Process internal input mutations
-//    if (g_input_state && g_input_queue) {
-//        g_input_state->process(*g_input_queue, dt);
-//    }
-//    
-//    MM_LOG("tick update audio");
-//    g_audio_system.update(dt);
-//    
-//    if (!g_backend) return;
-//    
-//    MM_LOG("tick begin frame");
-//    auto begin_ret = g_backend->begin_frame();
-//    if (!begin_ret) {
-//        return;
-//    }
-//    
-//    MM_LOG("tick callbacks frame");
-//    // 7. Fixed Truncation: Clean execution flow and terminal frame presentation passes
-//    if (g_callbacks.frame) {
-//        g_callbacks.frame(g_callbacks.user_data, dt, *g_input_state);
-//    }
-//    
-//    MM_LOG("tick end frame");
-//    g_backend->end_frame(); // Signal your RHI to swap buffers and present command encoders
-//}
 
 // Mouse → InputEventQueue (finger 0)
 // macOS origin is bottom-left; engine origin is top-left → flip Y
@@ -321,13 +305,13 @@ static KeyCode keycode_from_ns(uint16_t kc) noexcept {
 - (void)mouseDown:(NSEvent*)event {
     if (!g_input_queue) return;
     NSPoint pt = [self flipY:[self convertPoint:event.locationInWindow fromView:nil]];
-    g_input_queue->push(InputEvent::make_touch_down(0, (float)pt.x, (float)pt.y));
+    g_input_queue->push(InputEvent::make_touch_down(0, (f32)pt.x, (f32)pt.y));
 }
 
 - (void)mouseDragged:(NSEvent*)event {
     if (!g_input_queue) return;
     NSPoint pt = [self flipY:[self convertPoint:event.locationInWindow fromView:nil]];
-    g_input_queue->push(InputEvent::make_touch_move(0, (float)pt.x, (float)pt.y));
+    g_input_queue->push(InputEvent::make_touch_move(0, (f32)pt.x, (f32)pt.y));
 }
 
 - (void)mouseUp:(NSEvent*)event {
@@ -338,15 +322,15 @@ static KeyCode keycode_from_ns(uint16_t kc) noexcept {
 - (void)mouseMoved:(NSEvent*)event {
     if (!g_input_queue) return;
     NSPoint pt = [self flipY:[self convertPoint:event.locationInWindow fromView:nil]];
-    g_input_queue->push(InputEvent::make_mouse_move((float)pt.x, (float)pt.y));
+    g_input_queue->push(InputEvent::make_mouse_move((f32)pt.x, (f32)pt.y));
 }
 
 - (void)rightMouseDown:(NSEvent*)event {}
 
 - (void)scrollWheel:(NSEvent*)event {
     if (!g_input_queue) return;
-    g_input_queue->push(InputEvent::make_mouse_scroll((float)event.scrollingDeltaX,
-                                                       (float)event.scrollingDeltaY));
+    g_input_queue->push(InputEvent::make_mouse_scroll((f32)event.scrollingDeltaX,
+                                                       (f32)event.scrollingDeltaY));
 }
 
 // Keyboard → InputEventQueue
@@ -373,15 +357,69 @@ static KeyCode keycode_from_ns(uint16_t kc) noexcept {
     }
 }
 
+// Modifier keys arrive as flagsChanged:, NOT keyDown:.
+//
+// This is the AppKit contract and getting it wrong is silent: keyDown:/keyUp: are
+// never sent for Shift / Control / Option / Command, so with only those two
+// implemented `keys_down[Shift]` stayed false forever and every Shift+Tab was
+// delivered as FocusNext - the FocusPrev half of the focus contract did not exist
+// on the only desktop platform, and nothing failed, it just walked forwards. The
+// same hole swallowed Alt+Down.
+//
+// Two details that are load-bearing:
+// - Compare against STORED state and push only on a change. One event can flip
+//   several flags at once (Shift+Option), and flagsChanged: fires again for every
+//   later key event's flag set, so re-pushing on every event would re-arm a
+//   modifier that is merely being HELD.
+// - Only the three modifiers that exist as KeyCodes are mirrored. Command has no
+//   KeyCode, so Cmd-shortcuts are still invisible to the engine (unchanged).
+
+- (void)flagsChanged:(NSEvent*)event {
+    if (!g_input_queue) return;
+    const NSEventModifierFlags f = event.modifierFlags;
+    bool* slot[3] = {&_mod_shift, &_mod_ctrl, &_mod_alt};
+    const NSEventModifierFlags mask[3] = {NSEventModifierFlagShift, NSEventModifierFlagControl, NSEventModifierFlagOption};
+    const KeyCode kc[3] = {KeyCode::Shift, KeyCode::Ctrl, KeyCode::Alt};
+    for (int i = 0; i < 3; ++i) {
+        const bool down = (f & mask[i]) != 0;
+        if (down == *slot[i]) {
+            continue;
+        }
+        *slot[i] = down;
+        g_input_queue->push(down ? InputEvent::make_key_down(kc[i]) : InputEvent::make_key_up(kc[i]));
+    }
+}
+
+// Release every modifier still marked down. Called when the window is not the key
+// window: macOS does NOT guarantee a final flagsChanged with cleared flags when
+// focus is lost, and a stuck Shift means every later Tab is FocusPrev, a stuck
+// Option means every later Down is MenuToggle. Self-limiting - the guard in the
+// caller makes this a no-op once the flags are cleared.
+- (void)release_held_modifiers {
+    if (!g_input_queue) return;
+    if (_mod_shift) {
+        _mod_shift = false;
+        g_input_queue->push(InputEvent::make_key_up(KeyCode::Shift));
+    }
+    if (_mod_ctrl) {
+        _mod_ctrl = false;
+        g_input_queue->push(InputEvent::make_key_up(KeyCode::Ctrl));
+    }
+    if (_mod_alt) {
+        _mod_alt = false;
+        g_input_queue->push(InputEvent::make_key_up(KeyCode::Alt));
+    }
+}
+
 // Trackpad → InputEventQueue (finger 1+)
 - (void)touchesBeganWithEvent:(NSEvent*)event {
     if (!g_input_queue) return;
     NSSet<NSTouch*>* touches = [event touchesMatchingPhase:NSTouchPhaseBegan inView:self];
     for (NSTouch* touch in touches) {
         NSPoint pt = touch.normalizedPosition;
-        uint8_t tid = (uint8_t)([touch.identity hash] & 0xFF);
+        u8 tid = (u8)([touch.identity hash] & 0xFF);
         g_input_queue->push(InputEvent::make_touch_down(
-            tid, (float)(pt.x * self.bounds.size.width), (float)(pt.y * self.bounds.size.height)));
+            tid, (f32)(pt.x * self.bounds.size.width), (f32)(pt.y * self.bounds.size.height)));
     }
 }
 
@@ -390,9 +428,9 @@ static KeyCode keycode_from_ns(uint16_t kc) noexcept {
     NSSet<NSTouch*>* touches = [event touchesMatchingPhase:NSTouchPhaseMoved inView:self];
     for (NSTouch* touch in touches) {
         NSPoint pt = touch.normalizedPosition;
-        uint8_t tid = (uint8_t)([touch.identity hash] & 0xFF);
+        u8 tid = (u8)([touch.identity hash] & 0xFF);
         g_input_queue->push(InputEvent::make_touch_move(
-            tid, (float)(pt.x * self.bounds.size.width), (float)(pt.y * self.bounds.size.height)));
+            tid, (f32)(pt.x * self.bounds.size.width), (f32)(pt.y * self.bounds.size.height)));
     }
 }
 
@@ -400,7 +438,7 @@ static KeyCode keycode_from_ns(uint16_t kc) noexcept {
     if (!g_input_queue) return;
     NSSet<NSTouch*>* touches = [event touchesMatchingPhase:NSTouchPhaseEnded inView:self];
     for (NSTouch* touch in touches) {
-        uint8_t tid = (uint8_t)([touch.identity hash] & 0xFF);
+        u8 tid = (u8)([touch.identity hash] & 0xFF);
         g_input_queue->push(InputEvent::make_touch_up(tid));
     }
 }
@@ -409,7 +447,7 @@ static KeyCode keycode_from_ns(uint16_t kc) noexcept {
     if (!g_input_queue) return;
     NSSet<NSTouch*>* touches = [event touchesMatchingPhase:NSTouchPhaseCancelled inView:self];
     for (NSTouch* touch in touches) {
-        uint8_t tid = (uint8_t)([touch.identity hash] & 0xFF);
+        u8 tid = (u8)([touch.identity hash] & 0xFF);
         g_input_queue->push(InputEvent::make_touch_cancel(tid));
     }
 }
@@ -417,7 +455,11 @@ static KeyCode keycode_from_ns(uint16_t kc) noexcept {
 
 @implementation AppDelegate
 - (void)applicationDidFinishLaunching:(NSNotification*)notification {
-    NSRect frame = NSMakeRect(100, 200, 900, 640);
+    // Size comes from the app (AppCallbacks::width/height). 0 in either
+    // field keeps the historical 900x640 default.
+    const CGFloat w = g_callbacks.width  ? static_cast<CGFloat>(g_callbacks.width)  : 900.0;
+    const CGFloat h = g_callbacks.height ? static_cast<CGFloat>(g_callbacks.height) : 640.0;
+    NSRect        frame = NSMakeRect(100, 200, w, h);
     self.window = [[NSWindow alloc] initWithContentRect:frame
                                               styleMask:NSWindowStyleMaskTitled |
                                                        NSWindowStyleMaskClosable |
@@ -425,7 +467,21 @@ static KeyCode keycode_from_ns(uint16_t kc) noexcept {
                                                        NSWindowStyleMaskResizable
                                               backing:NSBackingStoreBuffered
                                                 defer:NO];
-    [self.window setTitle:@"Markmos"];
+    // Title comes from the app (AppCallbacks::title). nullptr - or a string
+    // that is not valid UTF-8 - falls back to the historical "Markmos", so
+    // the examples and any app that does not set it behave exactly as before.
+    // A minimum, because the window is resizable and the UI is laid out in
+    // absolute numbers. Panels are placed with things like `view_h - 230`, so
+    // below roughly that the height goes NEGATIVE - and a negative rect cast to
+    // the uint16 scissor args wraps to ~65000, i.e. a scissor covering the whole
+    // window. The engine now clamps degenerate frames too (mm_ui render), but
+    // the honest fix is not to offer a size that breaks the layout.
+    [self.window setContentMinSize:NSMakeSize(360.0, 280.0)];
+    NSString *title = nil;
+    if (g_callbacks.title) {
+        title = [NSString stringWithUTF8String:g_callbacks.title];
+    }
+    [self.window setTitle:(title.length ? title : @"Markmos")];
     MetalView* view = [[MetalView alloc] initWithFrame:frame];
     if (!view) {
         return;
@@ -452,6 +508,10 @@ static KeyCode keycode_from_ns(uint16_t kc) noexcept {
     }
     delete g_input_queue;
     delete g_input_state;
+
+    g_event_bus.clear();
+    JobSystemShutdown();
+    PoolShutdown();
 }
 @end
 

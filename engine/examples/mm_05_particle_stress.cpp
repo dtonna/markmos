@@ -12,6 +12,7 @@
 #include "../render/mm_shader_registry.hpp"
 #include "../rhi/mm_rhi_concept.hpp"
 #include "../app/mm_app.hpp"
+#include "../math/mm_mat4.h"
 #if defined(USE_METAL_BACKEND)
 #include "../rhi/mm_metal_backend.hpp"
 #elif defined(USE_VULKAN_BACKEND)
@@ -22,44 +23,6 @@
 #include <cmath>
 
 // ─── Math helpers ────────────────────────────────────────────────
-struct Mat4 {
-    float m[16];
-
-    static Mat4 ortho(float l, float r, float b, float t, float n, float f) noexcept {
-        Mat4 r_{};
-        r_.m[0]  = 2.0f / (r - l);   r_.m[4]  = 0;                r_.m[8]  = 0;  r_.m[12] = -(r + l) / (r - l);
-        r_.m[1]  = 0;                 r_.m[5]  = 2.0f / (t - b);   r_.m[9]  = 0;  r_.m[13] = -(t + b) / (t - b);
-        r_.m[2]  = 0;                 r_.m[6]  = 0;                r_.m[10] = -2.0f / (f - n); r_.m[14] = -(f + n) / (f - n);
-        r_.m[3]  = 0;                 r_.m[7]  = 0;                r_.m[11] = 0;  r_.m[15] = 1.0f;
-        return r_;
-    }
-
-    static Mat4 translate(float tx, float ty) noexcept {
-        Mat4 r = identity();
-        r.m[12] = tx;
-        r.m[13] = ty;
-        return r;
-    }
-
-    static Mat4 identity() noexcept {
-        Mat4 r{};
-        r.m[0] = r.m[5] = r.m[10] = r.m[15] = 1.0f;
-        return r;
-    }
-
-    Mat4 operator*(const Mat4& rhs) const noexcept {
-        Mat4 r{};
-        for (int i = 0; i < 4; ++i)
-            for (int j = 0; j < 4; ++j) {
-                float sum = 0.0f;
-                for (int k = 0; k < 4; ++k)
-                    sum += m[k * 4 + j] * rhs.m[i * 4 + k];
-                r.m[i * 4 + j] = sum;
-            }
-        return r;
-    }
-};
-
 // ─── Instance data layout ────────────────────────────────────────
 // Shader reads: instances[iid * 4 + 0..2] as float4[3], stride = 64 (4 float4)
 // float4[0]: pos_scale  = (px, py, unused, scale)
@@ -67,14 +30,14 @@ struct Mat4 {
 // float4[2]: rotation_alpha = (rotation, alpha, unused, unused)
 // float4[3]: padding (unused)
 struct alignas(16) ParticleInstance {
-    float px, py, _pad0, scale;
-    float r, g, b, atlas;
-    float rotation, alpha, _pad1, _pad2;
-    float _pad3[4];
+    f32 px, py, _pad0, scale;
+    f32 r, g, b, atlas;
+    f32 rotation, alpha, _pad1, _pad2;
+    f32 _pad3[4];
 };
 
-static constexpr float SCREEN_W = 1170.0f;
-static constexpr float SCREEN_H = 2532.0f;
+static constexpr f32 SCREEN_W = 1170.0f;
+static constexpr f32 SCREEN_H = 2532.0f;
 
 // GPU resources
 static BufferHandle     g_instance_buf;
@@ -86,21 +49,21 @@ static SamplerHandle    g_sampler;
 
 static ParticlePool     g_particles;
 static CameraTrauma     g_camera;
-static float            g_time;
-static uint32_t         g_frame;
+static f32            g_time;
+static u32         g_frame;
 
-static Mat4 g_view_proj;
+static mm_math::mat4 g_view_proj;
 
 // Emitters
 struct Emitter {
-    float x, y;
-    float timer, interval, lifetime;
-    uint32_t color;
-    uint8_t type;
+    f32 x, y;
+    f32 timer, interval, lifetime;
+    u32 color;
+    u8 type;
 };
 
 static Emitter g_emitters[8];
-static uint8_t g_emitter_count;
+static u8 g_emitter_count;
 
 static void init_emitters() noexcept {
     g_time = 0.0f;
@@ -112,11 +75,11 @@ static void init_emitters() noexcept {
     g_emitters[3] = { 360, 640, 0, 0.05f, 0.3f, 0xFFFF44FF, 1 };
 }
 
-static void update_emitters(float dt) noexcept {
+static void update_emitters(f32 dt) noexcept {
     g_time += dt;
     ++g_frame;
 
-    for (uint8_t i = 0; i < g_emitter_count; ++i) {
+    for (u8 i = 0; i < g_emitter_count; ++i) {
         auto& e = g_emitters[i];
         e.timer -= dt;
         if (e.timer > 0) continue;
@@ -149,7 +112,7 @@ static void game_init(void*) {
     // Instance buffer — 64 bytes × MAX_PARTICLES
     BufferDesc inst_desc = {
         .type = BufferType::Vertex,
-        .size = static_cast<uint32_t>(4096 * sizeof(ParticleInstance)),
+        .size = static_cast<u32>(4096 * sizeof(ParticleInstance)),
         .stride = 0,
         .cpu_visible = true
     };
@@ -159,7 +122,7 @@ static void game_init(void*) {
 
     BufferDesc ub_desc = {
         .type = BufferType::Uniform,
-        .size = sizeof(Mat4),
+        .size = sizeof(mm_math::mat4),
         .stride = 0,
         .cpu_visible = true
     };
@@ -182,8 +145,8 @@ static void game_init(void*) {
     auto tr = bk.create_texture(tex_desc);
     if (!tr) return;
     g_texture = *tr;
-    static const uint32_t white_pixel = 0xFFFFFFFF;
-    bk.update_texture(g_texture, &white_pixel, 0, 0, 0, 1, 1, 1);
+    static const u32 white_pixel = 0xFFFFFFFF;
+    bk.update_texture(g_texture, &white_pixel, 0, 0, 1, 1, 0, 0);
 
     SamplerDesc samp_desc = {
         .min_filter = SamplerFilter::Nearest,
@@ -220,19 +183,19 @@ static void game_init(void*) {
     g_pipeline = *pr;
 }
 
-static void game_frame(void*, float dt, InputState&) {
+static void game_frame(void*, f32 dt, InputState&) {
     update_emitters(dt);
 
     // Camera shake
-    float cam_x, cam_y, cam_angle;
+    f32 cam_x, cam_y, cam_angle;
     g_camera.get_offset(g_time, cam_x, cam_y, cam_angle);
-    Mat4 proj = Mat4::ortho(0, SCREEN_W, SCREEN_H, 0, -1, 1);
-    Mat4 view = Mat4::translate(-cam_x, -cam_y);
+    mm_math::mat4 proj = mm_math::mat4::ortho(0.0f, SCREEN_W, SCREEN_H, 0.0f, -1.0f, 1.0f);
+    mm_math::mat4 view = mm_math::mat4::translation(-cam_x, -cam_y, 0.0f);
     g_view_proj = proj * view;
 
     // Count active particles
-    uint32_t active_count = 0;
-    for (uint16_t i = 0; i < g_particles.count; ++i)
+    u32 active_count = 0;
+    for (u16 i = 0; i < g_particles.count; ++i)
         if (g_particles.active[i]) ++active_count;
 
     if (active_count == 0) return;
@@ -240,13 +203,18 @@ static void game_frame(void*, float dt, InputState&) {
     auto& bk = *g_backend;
 
     // Build instance data
-    char arena_buf[256 * 1024];
+    // alignas(64) is load-bearing: a bare char array has no alignment guarantee, and
+    // FrameArena::init asserts the buffer is 16-byte aligned (SIMD allocs need it).
+    // This was the only arena buffer in the codebase missing it - mm_01/03/04/06
+    // all declare theirs with alignas(64), and that is why mm_05 used to abort in
+    // init while the rest booted.
+    alignas(64) char arena_buf[256 * 1024];
     FrameArena arena(arena_buf, sizeof(arena_buf));
     auto* instances = arena.alloc_array<ParticleInstance>(active_count);
     if (!instances) return;
 
-    uint32_t idx = 0;
-    for (uint16_t i = 0; i < g_particles.count && idx < active_count; ++i) {
+    u32 idx = 0;
+    for (u16 i = 0; i < g_particles.count && idx < active_count; ++i) {
         if (!g_particles.active[i]) continue;
         auto& inst = instances[idx++];
         inst.px = g_particles.px[i];
@@ -254,7 +222,7 @@ static void game_frame(void*, float dt, InputState&) {
         inst.scale = g_particles.scale[i];
 
         // Unpack packed engine color (0xAARRGGBB) → float4
-        uint32_t c = g_particles.color[i];
+        u32 c = g_particles.color[i];
         mm_math::color pc = mm_math::color::from_u32_argb(c);
         inst.r = pc.r;
         inst.g = pc.g;
@@ -262,25 +230,25 @@ static void game_frame(void*, float dt, InputState&) {
         inst.atlas = 0.0f;  // atlas tile 0
         inst.rotation = g_particles.rotation[i];
         // Alpha from life ratio
-        float life_ratio = g_particles.life[i] / g_particles.life_max[i];
+        f32 life_ratio = g_particles.life[i] / g_particles.life_max[i];
         inst.alpha = life_ratio;
     }
 
     // Upload instance data
-    uint32_t upload_size = active_count * sizeof(ParticleInstance);
+    u32 upload_size = active_count * sizeof(ParticleInstance);
     bk.update_buffer(g_instance_buf, instances, 0, upload_size);
 
     // Upload camera UBO
-    bk.update_buffer(g_camera_ub, &g_view_proj, 0, sizeof(Mat4));
+    bk.update_buffer(g_camera_ub, g_view_proj.data(), 0, sizeof(mm_math::mat4));
 
     // Upload atlas info (tile_size = 1×1 for white texture, atlas_size = 1×1)
-    float atlas_data[4] = {1.0f, 1.0f, 1.0f, 1.0f};
-    bk.update_buffer(g_atlas_ub, atlas_data, 0, sizeof(atlas_data));
+    float4 atlas_data = {1.0f, 1.0f, 1.0f, 1.0f};
+    bk.update_buffer(g_atlas_ub, &atlas_data, 0, sizeof(atlas_data));
 
     // Draw
     bk.bind_pipeline(g_pipeline);
     BufferHandle bufs[3] = {g_instance_buf, g_camera_ub, g_atlas_ub};
-    uint32_t bindings[3] = {1, 2, 3};
+    u32 bindings[3] = {1, 2, 3};
     bk.bind_vertex_buffers(bufs, 3, nullptr, nullptr, bindings);
     bk.bind_fragment_texture(g_texture, 0);
     bk.bind_fragment_sampler(g_sampler, 0);
@@ -297,7 +265,7 @@ static void game_cleanup(void*) {
     bk.destroy_sampler(g_sampler);
 }
 
-AppCallbacks markmos_main(int, char**) {
+extern "C" AppCallbacks markmos_main(int, char**) {
     return {
         .user_data = nullptr,
         .init = game_init,

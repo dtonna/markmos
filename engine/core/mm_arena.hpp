@@ -3,6 +3,7 @@
 
 #pragma once
 #include <cassert>
+#include "core/mm_types.h"
 #include <cstddef>
 #include <cstdint>
 #include <new>
@@ -177,7 +178,7 @@ class alignas(64) FrameArena {
     }
 
     void rewind(Marker m) noexcept {
-        assert(m <= offset_ && "FrameArena::rewind — marker is ahead of current offset (double rewind?)");
+        assert(m <= offset_ && "FrameArena::rewind — marker is ahead of current offset (f64 rewind?)");
         offset_ = m;
     }
 
@@ -193,13 +194,13 @@ class alignas(64) FrameArena {
     }
 
     // used_pct — returns fill ratio in [0.0, 1.0].
-    // Intended for Tracy / debug overlay only; float division makes it
+    // Intended for Tracy / debug overlay only; f32 division makes it
     // inappropriate for the hot allocation path.
     // Guarded by MM_DEBUG so it compiles away completely in release.
 #ifdef MM_DEBUG
     [[nodiscard]]
-    float used_pct() const noexcept {
-        return capacity_ ? static_cast<float>(offset_) / static_cast<float>(capacity_) : 0.0f;
+    f32 used_pct() const noexcept {
+        return capacity_ ? static_cast<f32>(offset_) / static_cast<f32>(capacity_) : 0.0f;
     }
 #endif
 };
@@ -213,7 +214,7 @@ static_assert(sizeof(FrameArena) % 64 == 0, "FrameArena must be a multiple of on
                                             "add padding if new fields push it past the current boundary");
 
 // ─────────────────────────────────────────────────────────────────────────────
-// DoubleArena — double-buffered FrameArena for CPU-write / GPU-read safety
+// DoubleArena — f64-buffered FrameArena for CPU-write / GPU-read safety
 //
 // Frame N:  CPU writes to current(); GPU reads previous() (written in frame N-1).
 // swap():   1. flip active_           → old current becomes new previous (GPU safe)
@@ -229,7 +230,7 @@ static_assert(sizeof(FrameArena) % 64 == 0, "FrameArena must be a multiple of on
 
 class DoubleArena {
     FrameArena arenas_[2];
-    uint8_t    active_ = 0;
+    u8    active_ = 0;
 
   public:
     // init — attach both halves to caller-owned buffers.

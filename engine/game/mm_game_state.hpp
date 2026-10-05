@@ -3,6 +3,7 @@
 
 #pragma once
 #include "mm_board_grid.hpp"
+#include "core/mm_types.h"
 #include "../input/mm_input_state.hpp"
 #include <variant>
 #include <cstdint>
@@ -23,38 +24,38 @@ struct BoardGrid;  // forward decl
 
 // State data — flat structs, no virtual
 struct MenuState {
-    uint8_t  selected_level;
-    uint8_t  scroll_offset;
+    u8  selected_level;
+    u8  scroll_offset;
 };
 
 struct PlayState {
     BoardGrid* board;
-    uint32_t   score;
-    uint32_t   target_score;
-    uint8_t    moves_left;
-    uint8_t    combo_count;
-    float      timer;
+    u32   score;
+    u32   target_score;
+    u8    moves_left;
+    u8    combo_count;
+    f32      timer;
 };
 
 struct PauseState {};
 
 struct WinState {
-    uint32_t score;
-    uint8_t  stars;
-    float    anim_t;
-    float    duration;
+    u32 score;
+    u8  stars;
+    f32    anim_t;
+    f32    duration;
 };
 
 struct FailState {
-    uint8_t  reason;
-    float    anim_t;
-    float    duration;
+    u8  reason;
+    f32    anim_t;
+    f32    duration;
 };
 
 struct SwapAnimState {
-    uint8_t  r1, c1, r2, c2;
-    float    t;
-    float    duration;
+    u8  r1, c1, r2, c2;
+    f32    t;
+    f32    duration;
 };
 
 // All game states — tagged union
@@ -66,8 +67,8 @@ using GameStateStack = std::array<GameState, 4>;
 
 template<typename State>
 GameState update(const MenuState& s, InputState& input) noexcept {
-    uint8_t level = s.selected_level;
-    for (uint8_t i = 0; i < input.action_count; ++i) {
+    u8 level = s.selected_level;
+    for (u8 i = 0; i < input.action_count; ++i) {
         switch (input.actions[i]) {
             case InputAction::MenuUp:
                 if (level > 0) --level;
@@ -86,7 +87,7 @@ GameState update(const MenuState& s, InputState& input) noexcept {
 
 template<typename State>
 GameState update(const PlayState& s, InputState& input) noexcept {
-    for (uint8_t i = 0; i < input.action_count; ++i) {
+    for (u8 i = 0; i < input.action_count; ++i) {
         switch (input.actions[i]) {
             case InputAction::Pause:
                 return PauseState{};
@@ -101,7 +102,7 @@ GameState update(const PlayState& s, InputState& input) noexcept {
 
 template<typename State>
 GameState update(const PauseState&, InputState& input) noexcept {
-    for (uint8_t i = 0; i < input.action_count; ++i) {
+    for (u8 i = 0; i < input.action_count; ++i) {
         switch (input.actions[i]) {
             case InputAction::Select:
             case InputAction::Confirm:
@@ -119,7 +120,7 @@ GameState update(const PauseState&, InputState& input) noexcept {
 
 template<typename State>
 GameState update(const WinState& s, InputState& input) noexcept {
-    float t = s.anim_t + 1.0f / 60.0f;
+    f32 t = s.anim_t + 1.0f / 60.0f;
     // Any action dismisses early
     if (t >= s.duration || input.action_count > 0) {
         return MenuState{0, 0};
@@ -129,7 +130,7 @@ GameState update(const WinState& s, InputState& input) noexcept {
 
 template<typename State>
 GameState update(const FailState& s, InputState& input) noexcept {
-    float t = s.anim_t + 1.0f / 60.0f;
+    f32 t = s.anim_t + 1.0f / 60.0f;
     if (t >= s.duration || input.action_count > 0) {
         return MenuState{0, 0};
     }
@@ -138,7 +139,7 @@ GameState update(const FailState& s, InputState& input) noexcept {
 
 template<typename State>
 GameState update(const SwapAnimState& s, InputState&) noexcept {
-    float t = s.t + 1.0f / 60.0f;
+    f32 t = s.t + 1.0f / 60.0f;
     if (t >= s.duration) {
         return PlayState{nullptr, 0, 0, 0, 0, 0.0f};
     }
@@ -153,7 +154,7 @@ inline GameState update_state(const GameState& state, InputState& input) noexcep
 // State stack operations
 struct StateStack {
     GameStateStack stack;
-    uint8_t        depth = 0;
+    u8        depth = 0;
 
     void push(GameState s) noexcept {
         if (depth < stack.size()) {
@@ -175,7 +176,7 @@ struct StateStack {
 
     void update_all(InputState& input) noexcept {
         // Process from bottom to top; inner states don't get input if top state consumes it
-        for (uint8_t i = 0; i < depth; ++i) {
+        for (u8 i = 0; i < depth; ++i) {
             stack[i] = update_state(stack[i], input);
         }
     }

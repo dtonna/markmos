@@ -3,6 +3,7 @@
 
 #pragma once
 #include "mm_handle.hpp"
+#include "core/mm_types.h"
 #include <bit>
 #include <cassert>
 #include <cstddef>
@@ -29,43 +30,43 @@
 // @instrumentation size() / capacity() / empty() for Tracy overlay
 // @api_compat      C++20 (std::countr_zero, std::construct_at); no POSIX deps
 
-template <typename T, uint32_t ChunkSize = 64> class Slotmap {
+template <typename T, u32 ChunkSize = 64> class Slotmap {
     static_assert(ChunkSize > 0 && (ChunkSize & (ChunkSize - 1)) == 0, "ChunkSize must be a power of two");
 
     // Slot layout: value first so &slot->value == slot_ptr (no offset math).
     // gen starts at 1: invalid() handle also carries gen=1, but id=INVALID_ID
     // prevents it from ever matching a real slot.
-    // gen is uint16_t: wraps at 65536 free/reuse cycles (vs uint8_t = 256).
+    // gen is u16: wraps at 65536 free/reuse cycles (vs u8 = 256).
     struct Slot {
         T        value;
-        uint16_t gen       = 1;
+        u16 gen       = 1;
         bool     active    = false;
-        uint8_t  pad       = 0;        // explicit pad — no compiler surprise
-        uint32_t next_free = NULL_IDX; // freelist link; valid only when !active
+        u8  pad       = 0;        // explicit pad — no compiler surprise
+        u32 next_free = NULL_IDX; // freelist link; valid only when !active
     };
 
-    static constexpr uint32_t NULL_IDX     = 0xFFFF'FFFFu;
-    static constexpr uint32_t CHUNK_MASK   = ChunkSize - 1;
+    static constexpr u32 NULL_IDX     = 0xFFFF'FFFFu;
+    static constexpr u32 CHUNK_MASK   = ChunkSize - 1;
     // std::countr_zero: C++20, portable across Clang/GCC/MSVC
     // replaces __builtin_ctz which is GCC/Clang only
-    static constexpr uint32_t CHUNK_SHIFT  = std::countr_zero(ChunkSize);
+    static constexpr u32 CHUNK_SHIFT  = std::countr_zero(ChunkSize);
 
     Slot                    **chunks_      = nullptr;
-    uint32_t                  chunk_count_ = 0;
-    uint32_t                  capacity_    = 0;
-    uint32_t                  size_        = 0;
-    uint32_t                  free_head_   = NULL_IDX;
-    uint32_t                  free_tail_   = NULL_IDX; // O(1) freelist append on grow()
+    u32                  chunk_count_ = 0;
+    u32                  capacity_    = 0;
+    u32                  size_        = 0;
+    u32                  free_head_   = NULL_IDX;
+    u32                  free_tail_   = NULL_IDX; // O(1) freelist append on grow()
 
     // ── Internal helpers ─────────────────────────────────────────────────────
 
-    Slot                     *slot_at(uint32_t idx) noexcept { return &chunks_[idx >> CHUNK_SHIFT][idx & CHUNK_MASK]; }
-    const Slot               *slot_at(uint32_t idx) const noexcept { return &chunks_[idx >> CHUNK_SHIFT][idx & CHUNK_MASK]; }
+    Slot                     *slot_at(u32 idx) noexcept { return &chunks_[idx >> CHUNK_SHIFT][idx & CHUNK_MASK]; }
+    const Slot               *slot_at(u32 idx) const noexcept { return &chunks_[idx >> CHUNK_SHIFT][idx & CHUNK_MASK]; }
 
     // grow — allocate one or more new chunks; link their slots into freelist.
     // Returns false on allocation failure; existing state is preserved.
     bool                      grow() noexcept {
-        const uint32_t new_chunk_count = chunk_count_ == 0 ? 1 : chunk_count_ * 2;
+        const u32 new_chunk_count = chunk_count_ == 0 ? 1 : chunk_count_ * 2;
 
         // Resize the chunk pointer array.
         // realloc is safe here: Slot* is trivially copyable.
@@ -75,11 +76,11 @@ template <typename T, uint32_t ChunkSize = 64> class Slotmap {
         }
         chunks_                = new_chunks;
 
-        const uint32_t old_cap = capacity_;
+        const u32 old_cap = capacity_;
 
         // Allocate each new chunk. On partial failure, free already-allocated
         // new chunks and leave the slotmap in its pre-grow state.
-        for (uint32_t i = chunk_count_; i < new_chunk_count; ++i) {
+        for (u32 i = chunk_count_; i < new_chunk_count; ++i) {
             // Use posix_memalign or aligned_alloc depending on platform support.
             // On Android, posix_memalign is safer for compatibility.
             void *mem = nullptr;
@@ -92,7 +93,7 @@ template <typename T, uint32_t ChunkSize = 64> class Slotmap {
 #endif
             if (!mem) {
                 // Partial failure: free newly-allocated chunks, restore count.
-                for (uint32_t j = chunk_count_; j < i; ++j) {
+                for (u32 j = chunk_count_; j < i; ++j) {
                     std::free(chunks_[j]);
                 }
                 return false;
@@ -100,7 +101,7 @@ template <typename T, uint32_t ChunkSize = 64> class Slotmap {
             auto *s = static_cast<Slot *>(mem);
             // Initialise slots with placement-new so non-trivial T gets proper
             // default construction. gen=1 matches SlotHandle convention.
-            for (uint32_t j = 0; j < ChunkSize; ++j) {
+            for (u32 j = 0; j < ChunkSize; ++j) {
                 ::new (&s[j]) Slot{}; // value default-init; gen=1, active=false
             }
             chunks_[i] = s;
@@ -111,8 +112,8 @@ template <typename T, uint32_t ChunkSize = 64> class Slotmap {
 
         // Link all newly-added slots into a forward chain.
         // first_new is the global index of the first slot in the first new chunk.
-        const uint32_t first_new = old_cap;
-        for (uint32_t j = 0; j < (capacity_ - old_cap) - 1; ++j) {
+        const u32 first_new = old_cap;
+        for (u32 j = 0; j < (capacity_ - old_cap) - 1; ++j) {
             slot_at(first_new + j)->next_free = first_new + j + 1;
         }
         slot_at(capacity_ - 1)->next_free = NULL_IDX; // tail sentinel
@@ -135,14 +136,14 @@ template <typename T, uint32_t ChunkSize = 64> class Slotmap {
 
     ~Slotmap() noexcept {
         // Explicitly destroy active values (T may be non-trivially destructible).
-        for (uint32_t i = 0; i < capacity_; ++i) {
+        for (u32 i = 0; i < capacity_; ++i) {
             Slot *s = slot_at(i);
             if (s->active) {
                 s->value.~T();
             }
             s->~Slot(); // destroy Slot shell (gen, active, next_free are trivial)
         }
-        for (uint32_t i = 0; i < chunk_count_; ++i) {
+        for (u32 i = 0; i < chunk_count_; ++i) {
 #if defined(_WIN32)
             _aligned_free(chunks_[i]);
 #else
@@ -185,7 +186,7 @@ template <typename T, uint32_t ChunkSize = 64> class Slotmap {
             }
         }
 
-        const uint32_t idx  = free_head_;
+        const u32 idx  = free_head_;
         Slot          *slot = slot_at(idx);
 
         free_head_          = slot->next_free;
@@ -201,13 +202,13 @@ template <typename T, uint32_t ChunkSize = 64> class Slotmap {
     }
 
     // free — invalidate handle and destroy value.
-    // Returns false for stale/invalid handles (double-free safe).
+    // Returns false for stale/invalid handles (f64-free safe).
     bool free(SlotHandle h) noexcept {
         if (!h.is_valid()) {
             return false;
         }
 
-        const uint32_t idx = h.id;
+        const u32 idx = h.id;
         if (idx >= capacity_) {
             return false;
         }
@@ -243,7 +244,7 @@ template <typename T, uint32_t ChunkSize = 64> class Slotmap {
         if (!h.is_valid()) {
             return nullptr;
         }
-        const uint32_t idx = h.id;
+        const u32 idx = h.id;
         if (idx >= capacity_) {
             return nullptr;
         }
@@ -258,7 +259,7 @@ template <typename T, uint32_t ChunkSize = 64> class Slotmap {
         if (!h.is_valid()) {
             return nullptr;
         }
-        const uint32_t idx = h.id;
+        const u32 idx = h.id;
         if (idx >= capacity_) {
             return nullptr;
         }
@@ -275,10 +276,10 @@ template <typename T, uint32_t ChunkSize = 64> class Slotmap {
     // Cache-friendly: walks chunk arrays sequentially.
     //
     // For SIMD/batch update, use collect_dense_indices() to get a flat
-    // index array first, then process with span<uint32_t>.
+    // index array first, then process with span<u32>.
     struct Iter {
         Slotmap *map;
-        uint32_t idx = 0;
+        u32 idx = 0;
 
         T       *next() noexcept {
             while (idx < map->capacity_) {
@@ -297,10 +298,10 @@ template <typename T, uint32_t ChunkSize = 64> class Slotmap {
     // active slots; returns count written.
     // Hot loops should call this once per frame, then iterate the index array
     // directly (no handle validation per element).
-    uint32_t           collect_dense_indices(uint32_t *out, uint32_t out_cap) const noexcept {
+    u32           collect_dense_indices(u32 *out, u32 out_cap) const noexcept {
         assert(out != nullptr);
-        uint32_t count = 0;
-        for (uint32_t i = 0; i < capacity_ && count < out_cap; ++i) {
+        u32 count = 0;
+        for (u32 i = 0; i < capacity_ && count < out_cap; ++i) {
             if (slot_at(i)->active) {
                 out[count++] = i;
             }
@@ -310,7 +311,7 @@ template <typename T, uint32_t ChunkSize = 64> class Slotmap {
 
     // ── Accessors ────────────────────────────────────────────────────────────
 
-    [[nodiscard]] uint32_t size() const noexcept { return size_; }
-    [[nodiscard]] uint32_t capacity() const noexcept { return capacity_; }
+    [[nodiscard]] u32 size() const noexcept { return size_; }
+    [[nodiscard]] u32 capacity() const noexcept { return capacity_; }
     [[nodiscard]] bool     empty() const noexcept { return size_ == 0; }
 };

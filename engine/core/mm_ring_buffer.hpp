@@ -3,6 +3,7 @@
 
 #pragma once
 #include <atomic>
+#include "core/mm_types.h"
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
@@ -55,7 +56,7 @@ template <typename T, size_t Capacity> class RingBuffer {
     static constexpr size_t CACHELINE = 64;
 
     struct alignas(CACHELINE) Cursor {
-        std::atomic<uint32_t> value{0};
+        std::atomic<u32> value{0};
     };
     Cursor write;
     char   pad1[64];
@@ -80,8 +81,8 @@ template <typename T, size_t Capacity> class RingBuffer {
 
     bool push(const T &item) noexcept {
 
-        uint32_t w = write.value.load(std::memory_order_relaxed);
-        uint32_t r = read.value.load(std::memory_order_acquire);
+        u32 w = write.value.load(std::memory_order_relaxed);
+        u32 r = read.value.load(std::memory_order_acquire);
 
         if (w - r >= Capacity) {
             return false;
@@ -96,8 +97,8 @@ template <typename T, size_t Capacity> class RingBuffer {
 
     bool push(T &&item) noexcept {
 
-        uint32_t w = write.value.load(std::memory_order_relaxed);
-        uint32_t r = read.value.load(std::memory_order_acquire);
+        u32 w = write.value.load(std::memory_order_relaxed);
+        u32 r = read.value.load(std::memory_order_acquire);
 
         if (w - r >= Capacity) {
             return false;
@@ -112,8 +113,8 @@ template <typename T, size_t Capacity> class RingBuffer {
 
     bool pop(T &out) noexcept {
 
-        uint32_t r = read.value.load(std::memory_order_relaxed);
-        uint32_t w = write.value.load(std::memory_order_acquire);
+        u32 r = read.value.load(std::memory_order_relaxed);
+        u32 w = write.value.load(std::memory_order_acquire);
 
         if (r == w) {
             return false;
@@ -133,8 +134,8 @@ template <typename T, size_t Capacity> class RingBuffer {
     // REQUIRES:
     // producer and consumer threads must be stopped externally
     void clear() noexcept {
-        uint32_t r = read.value.load(std::memory_order_relaxed);
-        uint32_t w = write.value.load(std::memory_order_relaxed);
+        u32 r = read.value.load(std::memory_order_relaxed);
+        u32 w = write.value.load(std::memory_order_relaxed);
 
         while (r != w) {
             ptr(r & MASK)->~T();
@@ -155,8 +156,8 @@ template <typename T, size_t Capacity> class RingBuffer {
     // approximate under concurrent access
     size_t count() const noexcept {
 
-        uint32_t w = write.value.load(std::memory_order_acquire);
-        uint32_t r = read.value.load(std::memory_order_acquire);
+        u32 w = write.value.load(std::memory_order_acquire);
+        u32 r = read.value.load(std::memory_order_acquire);
 
 #ifndef NDEBUG
         assert((w - r) <= Capacity);

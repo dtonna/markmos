@@ -3,14 +3,15 @@
 
 #pragma once
 #include <cstdint>
+#include "core/mm_types.h"
 #include <type_traits>
 
 struct SlotHandle {
-    static constexpr uint32_t   INVALID_ID = 0xFFFFFFFFu;
+    static constexpr u32   INVALID_ID = 0xFFFFFFFFu;
 
-    uint32_t                    id         = INVALID_ID;
-    uint16_t                    gen        = 1;
-    uint8_t                     pad[2]{};
+    u32                    id         = INVALID_ID;
+    u16                    gen        = 1;
+    u8                     pad[2]{};
 
     static constexpr SlotHandle invalid() noexcept {
         SlotHandle h{};
