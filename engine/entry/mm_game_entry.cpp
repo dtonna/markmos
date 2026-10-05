@@ -771,9 +771,9 @@ static void game_frame(void *, float dt, InputState &input) {
                 if (len > 0) {
                     std::strncpy(g.ui.pool[g.hud_id_combo].text, buf, sizeof(g.ui.pool[g.hud_id_combo].text) - 1);
                 }
-                g.ui.pool[g.hud_id_combo].flags |= ui::WF_Visible;
+                g.ui.pool[g.hud_id_combo].flags |= ui::WF_VISIBLE;
             } else {
-                g.ui.pool[g.hud_id_combo].flags   &= ~ui::WF_Visible;
+                g.ui.pool[g.hud_id_combo].flags   &= ~ui::WF_VISIBLE;
                 g.ui.pool[g.hud_id_combo].text[0]  = '\0';
             }
         }
@@ -809,7 +809,8 @@ static void game_frame(void *, float dt, InputState &input) {
     g.renderer.ortho(0.0f, (float)g.renderer.width, (float)g.renderer.height, 0.0f, -1.0f, 1.0f);
     g.renderer.upload_camera();
 
-    g.ui.render(g.renderer, g.batch, dt);
+    g.ui.update(dt);
+    g.ui.render(g.renderer, g.batch);
 
     g.renderer.graph.end_pass();
 
@@ -914,7 +915,7 @@ static void game_cleanup(void *) {
 
 // ─────────────────────────────────────────────────────────────
 
-AppCallbacks markmos_main(int, char **) {
+AppCallbacks markmos_main(int, char *[]) {
 
     return {
         .user_data = nullptr,
