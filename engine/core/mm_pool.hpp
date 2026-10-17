@@ -420,6 +420,14 @@ extern GlobalPoolAllocator g_pool_allocator;
 void                       PoolInit() noexcept;
 void                       PoolShutdown() noexcept;
 
+// EVERY thread that can reach pool_alloc must bracket its work with these.
+// rpmalloc is per-thread: a thread with no heap of its own faults inside
+// rpmalloc(), on the first allocation over 4096 bytes, at a small offset inside
+// address 0. Not a warning - a segfault on whichever thread happens to get there
+// first. See pool_thread_initialize() in the .cpp for the full story.
+void                       pool_thread_initialize() noexcept;
+void                       pool_thread_finalize() noexcept;
+
 void                      *pool_alloc(size_t size) noexcept;
 
 void                       pool_free(void *ptr) noexcept;

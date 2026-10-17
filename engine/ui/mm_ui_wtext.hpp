@@ -49,6 +49,32 @@ inline void render_cursor(Manager &m, u16 i, f32 ax, f32 ay, Renderer &r, Sprite
     batch.add(cursor_x + 1.0f, cursor_y + cursor_h * 0.5f, 2.0f, cursor_h, 0.0f, m.theme.cursor, 0);
 }
 
+// The clear X, drawn in Pass 2 beside the cursor so it rides that pass's batch.
+//
+// PROCEDURAL, not a glyph. Two thin bars at +-45 degrees is what a cross is, and
+// the font is not a reliable source for one: mm_06 had to draw its own chevrons
+// for the same reason (no arrow in Karla), and freecell's Back button draws its
+// arrow the same way. It also keeps the control legible if the font is swapped.
+//
+// Drawn only when the field HAS text: an empty "optional" field showing a dismiss
+// control would be clutter implying there is something to dismiss. That is the same
+// rule textfield_clear_hit() applies on the tap side, and they are deliberately the
+// same rule - a control you can see is a control you expect to work.
+inline void render_clear(Manager &m, u16 i, f32 ax, f32 ay, SpriteBatch &batch) noexcept {
+    if (!m.get_textfield_clear(i) || m.pool[i].text[0] == '\0') {
+        return;
+    }
+    const f32    cx = ax + m.pool[i].frame.w - Manager::K_TEXTFIELD_CLEAR_W * 0.5f;
+    const f32    cy = ay + m.pool[i].frame.h * 0.5f;
+    const f32    arm = m.pool[i].frame.h * 0.26f; // half-length of each stroke
+    const f32    th  = 2.0f;                       // stroke thickness
+    const u32    col = (m.is_editing() || m.is_hot(i)) ? m.theme.text_primary : m.theme.text_secondary;
+    const f32    q45 = 0.7853981634f;              // PI/4
+    // Two bars crossing at the centre of the clear zone.
+    batch.add(cx, cy, arm * 2.0f, th, q45, col, 0);
+    batch.add(cx, cy, arm * 2.0f, th, -q45, col, 0);
+}
+
 } // namespace textfield
 
 // ─── label / image / panel / textfield factories (moved from mm_ui.hpp, byte-identical) ───

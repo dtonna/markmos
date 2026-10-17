@@ -33,6 +33,19 @@ class Vfs {
     bool        write_doc(const char *path, const void *data, u64 size) noexcept;
     bool        write_doc_atomic(const char *path, const void *data, u64 size) noexcept;
     bool        exists(const char *path) noexcept;
+    // Delete a file in the DOCUMENTS directory, by the same relative name
+    // write_doc/read_doc take ("fc_slot_0.bin", not a full path).
+    //
+    // Returns false when the file was not there — deleting something absent is the
+    // state the caller already wanted, so "erase my data" should treat it as
+    // success rather than as a failure to report.
+    //
+    // NOTE on exists() above: it stats the path AS GIVEN, with no doc_path_ prefix,
+    // while read_doc/write_doc/delete_doc all join doc_path_ first. Nothing in the
+    // repo calls exists() today, so the inconsistency is dormant; a caller who finds
+    // it surprising is the third name for one directory, which is how the solved
+    // browser's 62px scroll bug happened. Treat exists() as the odd one out.
+    bool        delete_doc(const char *path) noexcept;
     const char *get_bundle_path() noexcept { return bundle_path_; }
 
 #if defined(TARGET_ANDROID)

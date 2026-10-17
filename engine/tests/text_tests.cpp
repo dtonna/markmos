@@ -57,6 +57,37 @@ static void BakeThai(BitmapFont &f, u32 cp, u8 advance) noexcept {
 }
 
 int main() {
+    // ─── An unbaked glyph in ANY range reads as "no glyph" ───
+    // The suit range used to hand back a pointer to a zeroed entry, so an app
+    // with ENGINE_FONT_SYM off (or a codepoint Sarabun does not have) got a
+    // full-size blank box instead of the '?' fallback. A zeroed entry now means
+    // unbaked everywhere — including for glyphs supplied by a caller rather
+    // than by a TTF.
+    {
+        BitmapFont f = MakeFont();
+
+        // Suit glyphs, unbaked: nullptr, so resolve_glyph substitutes '?'.
+        assert(f.get_glyph(0x2660) == nullptr);
+        assert(f.get_glyph(0x2663) == nullptr);
+        const GlyphInfo *s = resolve_glyph(f, 0x2660);
+        assert(s != nullptr && s->advance == f.glyphs['?'].advance);
+
+        // The undo glyph, unbaked.
+        assert(f.get_glyph(0x238C) == nullptr);
+
+        // Baked in the suit range: found, and NOT substituted.
+        GlyphInfo &g = f.glyphs_sym[0];
+        g.u = 0; g.v = 0; g.w = 16; g.h = 32; g.bearing_x = 0; g.bearing_y = -30; g.advance = 21;
+        const GlyphInfo *hit = f.get_glyph(0x2660);
+        assert(hit != nullptr && hit->advance == 21);
+        assert(resolve_glyph(f, 0x2660)->advance == 21);
+
+        // Same rule for Thai — an unassigned Sarabun codepoint is not a glyph.
+        assert(f.get_glyph(0x0E3C) == nullptr);  // unassigned in Sarabun
+        const GlyphInfo *th = resolve_glyph(f, 0x0E3C);
+        assert(th != nullptr && th->advance == f.glyphs['?'].advance);
+    }
+
     // ─── resolve_glyph: '?' substitution is the ONE rule, shared ───
     {
         BitmapFont f = MakeFont();

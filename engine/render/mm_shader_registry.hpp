@@ -38,20 +38,11 @@ extern const u32 rounded_sprite_vert_spv_count;
 extern const u32 rounded_sprite_frag_spv[];
 extern const u32 rounded_sprite_frag_spv_count;
 
-extern const u32 screen_quad_vert_spv[];
-extern const u32 screen_quad_vert_spv_count;
-
-extern const u32 blur_frag_spv[];
-extern const u32 blur_frag_spv_count;
-
 extern const u32 color_grade_frag_spv[];
 extern const u32 color_grade_frag_spv_count;
 
 extern const u32 sprite_outline_frag_spv[];
 extern const u32 sprite_outline_frag_spv_count;
-
-extern const u32 clip_rect_frag_spv[];
-extern const u32 clip_rect_frag_spv_count;
 
 extern const u32 dissolve_frag_spv[];
 extern const u32 dissolve_frag_spv_count;
@@ -131,16 +122,6 @@ inline ShaderDesc rounded_sprite_fragment() noexcept {
              rounded_sprite_frag_spv_count * sizeof(u32), "main" };
 }
 
-inline ShaderDesc screen_quad_vertex() noexcept {
-    return { ShaderStage::Vertex, screen_quad_vert_spv,
-             screen_quad_vert_spv_count * sizeof(u32), "main" };
-}
-
-inline ShaderDesc blur_fragment() noexcept {
-    return { ShaderStage::Fragment, blur_frag_spv,
-             blur_frag_spv_count * sizeof(u32), "main" };
-}
-
 inline ShaderDesc color_grade_fragment() noexcept {
     return { ShaderStage::Fragment, color_grade_frag_spv,
              color_grade_frag_spv_count * sizeof(u32), "main" };
@@ -149,11 +130,6 @@ inline ShaderDesc color_grade_fragment() noexcept {
 inline ShaderDesc sprite_outline_fragment() noexcept {
     return { ShaderStage::Fragment, sprite_outline_frag_spv,
              sprite_outline_frag_spv_count * sizeof(u32), "main" };
-}
-
-inline ShaderDesc clip_rect_fragment() noexcept {
-    return { ShaderStage::Fragment, clip_rect_frag_spv,
-             clip_rect_frag_spv_count * sizeof(u32), "main" };
 }
 
 inline ShaderDesc dissolve_fragment() noexcept {
@@ -261,15 +237,7 @@ inline ShaderDesc rounded_sprite_fragment() noexcept {
              shader::rounded_sprite_fragment_msl_size, "rounded_sprite_fragment_main" };
 }
 
-inline ShaderDesc screen_quad_vertex() noexcept {
-    return { ShaderStage::Vertex, shader::screen_quad_vertex_msl,
-             shader::screen_quad_vertex_msl_size, "screen_quad_vertex_main" };
-}
 
-inline ShaderDesc blur_fragment() noexcept {
-    return { ShaderStage::Fragment, shader::blur_fragment_msl,
-             shader::blur_fragment_msl_size, "blur_fragment_main" };
-}
 
 inline ShaderDesc color_grade_fragment() noexcept {
     return { ShaderStage::Fragment, shader::color_grade_fragment_msl,
@@ -281,10 +249,6 @@ inline ShaderDesc sprite_outline_fragment() noexcept {
              shader::sprite_outline_fragment_msl_size, "sprite_outline_fragment_main" };
 }
 
-inline ShaderDesc clip_rect_fragment() noexcept {
-    return { ShaderStage::Fragment, shader::clip_rect_fragment_msl,
-             shader::clip_rect_fragment_msl_size, "clip_rect_fragment_main" };
-}
 
 inline ShaderDesc dissolve_fragment() noexcept {
     return { ShaderStage::Fragment, shader::dissolve_fragment_msl,

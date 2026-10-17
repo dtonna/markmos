@@ -690,6 +690,39 @@ void FillPipelineDesc(PipelineDesc &pd, const ShaderDesc &vs, const void *fs_cod
         pd.vertex_attrs[i] = va[i];
     }
     pd.vertex_attr_count = 3;
+
+    // ── Vulkan: every binding a shader samples must be DECLARED ────────────
+    //
+    // Leaving descriptor_count at 0 does not mean "no descriptors needed" — it
+    // means create_pipeline builds a pipeline layout with setLayoutCount = 0,
+    // and sprite.frag then samples binding 0 and sprite.vert reads binding 1
+    // against a set that does not exist. That is undefined behaviour, and
+    // llvmpipe turns it into the 90%-CPU spin this lab used to hang in
+    // BuildGlowPipeline. Metal has no descriptor sets, which is why the lab
+    // never needed this on macOS.
+    //
+    // These three are the bindings the embedded lab shaders actually use:
+    //   0  sampler2D u_tex    (fragment)
+    //   1  CameraUBO          (vertex — sprite.vert)
+    //   2  params block       (fragment — every effect shader's uniform block)
+    //
+    // These are PHYSICAL numbers, and they are correct for descriptor_bindings.
+    // The matching bind_uniform_buffer calls below do NOT use them: those take
+    // a LOGICAL slot that each backend shifts by +1 (physical 0 is the
+    // texture), so the camera goes in as slot 0 and params as slot 1. Passing
+    // 1 and 2 there instead double-shifts — the camera descriptor is never
+    // written and the params land on a binding this layout does not declare.
+    //
+    // Deliberately NOT copying the renderer's own default layout: it declares
+    // binding 1 twice (Camera as a vertex UBO, and a count-2 sampler array
+    // starting at binding 0 that swallows binding 1 too), and this backend
+    // hands the array straight to vkCreateDescriptorSetLayout without merging
+    // or accumulating stage flags — so that shape is invalid Vulkan. Here each
+    // binding is declared exactly once and no array overlaps another.
+    pd.descriptor_bindings[0] = {0, DescriptorType::CombinedImageSampler, 1, 2}; // fragment: texture
+    pd.descriptor_bindings[1] = {1, DescriptorType::UniformBuffer, 1, 1};        // vertex: Camera
+    pd.descriptor_bindings[2] = {2, DescriptorType::UniformBuffer, 1, 2};        // fragment: params
+    pd.descriptor_count = 3;
 }
 
 // Build a new pipeline first; swap only on success so a broken shader
@@ -2661,8 +2694,8 @@ void game_frame(void *, f32 dt, InputState &input) {
         (void)bk.bind_pipeline(g_pipeline);
         BufferHandle bufs[2] = {g_vb, g_cam_ub};
         (void)bk.bind_vertex_buffers(bufs, 2, nullptr, nullptr);
-        (void)bk.bind_uniform_buffer(g_cam_ub, 0);   // [[buffer(1)]] camera
-        (void)bk.bind_uniform_buffer(g_param_ub, 1); // [[buffer(2)]] params
+        (void)bk.bind_uniform_buffer(g_cam_ub, 0);   // logical 0 -> binding 1 = CameraUBO (vertex)
+        (void)bk.bind_uniform_buffer(g_param_ub, 1); // logical 1 -> binding 2 = params (fragment)
         // Slot 0: checker in grid modes, card art in D9/C/P. Slot 1 (logical 2):
         // normal map in D7/D8/D9/P — see Metal backend quirk note above.
         // (Cartoon samples albedo only; no slot-1 bind needed.)
@@ -2716,8 +2749,8 @@ void game_frame(void *, f32 dt, InputState &input) {
                     (void)bk.bind_pipeline(g_fw_pipe);
                     BufferHandle skbufs[2] = {g_vb, g_cam_ub};
                     (void)bk.bind_vertex_buffers(skbufs, 2, nullptr, nullptr);
-                    (void)bk.bind_uniform_buffer(g_cam_ub, 0);   // [[buffer(1)]] camera
-                    (void)bk.bind_uniform_buffer(g_fw_param_ub, 1); // [[buffer(2)]] params
+                    (void)bk.bind_uniform_buffer(g_cam_ub, 0);   // logical 0 -> binding 1 = CameraUBO (vertex)
+                    (void)bk.bind_uniform_buffer(g_fw_param_ub, 1); // logical 1 -> binding 2 = params (fragment)
                     (void)bk.bind_fragment_texture(g_texture, 0);
                     (void)bk.bind_fragment_sampler(g_sampler, 0);
                     (void)bk.draw(skcount, 1, fw_tail, 0);
@@ -2818,46 +2851,6 @@ void game_cleanup(void *) {
 
 } // namespace
 
-AppCallbacks markmos_main(int argc, char **argv) {
-    if (argc > 1 && argv && argv[1]) {
-        const char *arg = argv[1];
-        if (arg[0] == 'd' && arg[1] >= '1' && arg[1] <= '9' && arg[2] == '\0') {
-            g_mode = static_cast<LabMode>(arg[1] - '1');
-        } else if (arg[0] == 's') {
-            g_mode = LabMode::Sprite;
-        } else if (arg[0] == 'g' && arg[1] == 'r') {
-            g_mode = LabMode::Grayscale;
-        } else if (arg[0] == 'o') {
-            g_mode = LabMode::Outline;
-        } else if (arg[0] == 'c') {
-            g_mode = LabMode::ColorGrade;
-        } else if (arg[0] == 'l') {
-            g_mode = LabMode::LabFile;
-        } else if (arg[0] == 'n' && arg[1] == 'd') {
-            g_mode = LabMode::NormalDerive;
-        } else if (arg[0] == 'n' && arg[1] == 'p') {
-            g_mode = LabMode::NormalProc;
-        } else if (arg[0] == 'p' && arg[1] == 'n') {
-            g_mode = LabMode::NormalPng;
-        } else if (arg[0] == 'c' && arg[1] == 'a') {
-            g_mode = LabMode::CardNormal;
-        } else if (arg[0] == 'c' && arg[1] == 't') {
-            g_mode = LabMode::CardCartoon;
-        } else if (arg[0] == 'p' && arg[1] == 'l') {
-            g_mode = LabMode::CardPlastic;
-        } else if (arg[0] == 'g' && arg[1] == 'l') {
-            g_mode = LabMode::CardGlow;
-        } else if (arg[0] == 'g' && arg[1] == 'o') {
-            g_mode = LabMode::CardGold;
-        } else if (arg[0] == 's' && arg[1] == 't') {
-            g_mode = LabMode::CardStay;
-        } else if (arg[0] == 's' && arg[1] == 'u') {
-            g_mode = LabMode::CardSun;
-        } else if (arg[0] == 'a' && arg[1] == 'u') {
-            g_mode = LabMode::CardAura;
-        } else if (arg[0] == 'f') {
-            g_mode = LabMode::Firework;
-        }
-    }
+AppCallbacks markmos_main(int, char **) {
     return {.user_data = nullptr, .init = game_init, .frame = game_frame, .resize = game_resize, .cleanup = game_cleanup};
 }

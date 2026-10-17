@@ -213,7 +213,15 @@
 //   MM_METAL    → NDC z∈[0,1], Y-up
 //   MM_OPENGLES → NDC z∈[-1,1], Y-up  (default)
 // Define one before including this header.
-// =============================================================================
+//
+// KNOWN GAP: nothing bridges USE_METAL_BACKEND (engine/CMakeLists.txt) to
+// MM_METAL, so on macOS/iOS the `#elif MM_METAL` arm in mm_mat4.h is never
+// taken and those builds resolve to the OpenGLES variant instead. It is left
+// that way deliberately — every 2D call site passes near=-1, far=+1, where
+// ortho_gl and ortho_mt are element-identical (the -(far+near) offset vanishes),
+// so switching it on changes nothing measurable today and could change a
+// future caller that uses a real depth range. Bridge them together when
+// someone has a 3D scene that needs Metal's [0,1] depth, not before.
 #if defined(__ANDROID__) && !defined(MM_VULKAN) && !defined(MM_METAL) && !defined(MM_OPENGLES)
 #    undef MM_VULKAN
 #    define MM_VULKAN 1

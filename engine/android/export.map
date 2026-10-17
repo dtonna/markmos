@@ -1,0 +1,18 @@
+# Dynamic symbol table for the Android .so.
+#
+# The system's android.app.NativeActivity dlopen()s this library and dlsym()s
+# exactly one name. Everything else we compile is internal, but a default
+# visibility build exports all of it — 2849 names, 88 KB of .dynstr plus the
+# matching .dynsym entries, for code no other process can call.
+#
+# Keeping one name instead of hiding symbols at compile time is deliberate:
+# ANativeActivity_onCreate lives in the NDK's android_native_app_glue.c, which
+# we compile from source and do not own, so -fvisibility=hidden would bury it
+# where dlsym cannot reach. A version script works on what the linker emits,
+# whatever the compiler said.
+{
+  global:
+    ANativeActivity_onCreate;
+  local:
+    *;
+};

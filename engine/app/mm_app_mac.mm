@@ -17,6 +17,7 @@
 #include "../core/mm_pool.hpp"
 #include "../core/mm_job_system.hpp"
 #include "../game/mm_event_bus.hpp"
+#include "mm_frame_perf.hpp"
 
 #include "../core/mm_log.hpp"
 
@@ -33,7 +34,6 @@
 MetalBackend*    g_backend       = nullptr;
 InputEventQueue* g_input_queue   = nullptr;
 InputState*      g_input_state   = nullptr;
-f32            g_content_scale = 1.0f;
 EventBus*        g_event_bus_ptr = nullptr;
 
 // App callbacks (set by main() from user's markmos_main())
@@ -91,6 +91,8 @@ static KeyCode keycode_from_ns(u16 kc) noexcept {
 @interface MetalView : NSView {
     CADisplayLink* _displayLink;
     CFTimeInterval _lastFrameTime;
+    // Same probe the Android and iOS hosts use — see mm_frame_perf.hpp.
+    FramePerf     _perf;
     bool _initialized;
     bool _init_done;
     // Modifier state, mirrored from flagsChanged: (see that method for why it
@@ -204,6 +206,10 @@ static KeyCode keycode_from_ns(u16 kc) noexcept {
         _lastFrameTime = currentTime;
         
         if (dt > 0.1f) dt = 0.1f; // Cap frame hiccups
+
+        // After the clamp, so the reported worst cannot exceed what this host is
+        // able to observe.
+        _perf.record(dt * 1000.0f);
         
         // Process input
         if (g_input_state && g_input_queue) {
@@ -489,6 +495,17 @@ static KeyCode keycode_from_ns(u16 kc) noexcept {
     [self.window setContentView:view];
     [self.window makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];
+}
+
+// Both are optional NSApplicationDelegate methods. They are the macOS spelling
+// of Android's APP_CMD_PAUSE/RESUME and iOS's resign/become-active: switching
+// apps or hiding the window should not leave sound running.
+- (void)applicationDidResignActive:(NSNotification*)notification {
+    g_audio_system.pause();
+}
+
+- (void)applicationDidBecomeActive:(NSNotification*)notification {
+    g_audio_system.resume();
 }
 
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication*)sender {

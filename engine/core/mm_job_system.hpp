@@ -6,7 +6,11 @@
 #include "core/mm_types.h"
 #include <cstddef>
 #include <cstdint>
-#include <pthread.h>
+// std::thread / std::mutex / std::condition_variable throughout. See the note on
+// Worker below for why the worker array had to stop being malloc'd.
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 
 // ─── Forward Declarations ───────────────────────────────────────
 struct JobCounter;
@@ -57,6 +61,13 @@ class JobSystem {
     void     init(u32 worker_count = 0) noexcept;
     void     shutdown() noexcept;
 
+    // Joining the workers belongs to the object that owns them. Without this the
+    // global's destruction ran while workers were still looping over wake_mutex_,
+    // and a destroyed std::mutex throws on lock() — which, built -fno-exceptions,
+    // is std::terminate. The pthread version had the same bug and was invisible:
+    // pthread_mutex_lock on a destroyed mutex returns EINVAL, and nobody checked.
+    ~JobSystem() { shutdown(); }
+
     void     run(const Job &job) noexcept;
     void     run_fn(void (*fn)(void *), void *data) noexcept;
     void     run_dep(void (*fn)(void *), void *data, JobCounter *counter) noexcept;
@@ -69,18 +80,32 @@ class JobSystem {
 
   private:
     struct Worker {
-        pthread_t  thread;
-        u32   id;
-        JobSystem *system;
+        std::thread thread{};
+        u32         id     = 0;
+        JobSystem  *system = nullptr;
     };
 
+    // A FIXED array, not a malloc'd one.
+    //
+    // The workers were `Worker *workers_ = malloc(...)`, freed in shutdown(). That
+    // was legal for pthread_t — a bare handle with a trivial destructor — and is
+    // NOT for std::thread: its destructor is what joins, so free() tears the
+    // storage out from under a live thread and no destructor ever runs.
+    //
+    // Migrating the member type WITHOUT fixing the allocation is how the emulator
+    // started aborting with "Abort message: terminating" 0.4 s after
+    // android_main(), before the renderer had finished initialising. The count
+    // was already capped at 8 in init(), so this array is the same memory the
+    // malloc asked for, minus the malloc.
+    static constexpr u32 kMaxWorkers = 8;
+
     JobQueue          queue_;
-    Worker           *workers_      = nullptr;
-    u32          worker_count_ = 0;
+    Worker            workers_[kMaxWorkers]{};
+    u32               worker_count_ = 0;
     std::atomic<bool> running_{false};
 
-    pthread_mutex_t   wake_mutex_ = PTHREAD_MUTEX_INITIALIZER;
-    pthread_cond_t    wake_cond_  = PTHREAD_COND_INITIALIZER;
+    std::mutex             wake_mutex_;
+    std::condition_variable wake_cond_;
 
     static void      *worker_entry(void *arg) noexcept;
     void              worker_loop(u32 id) noexcept;

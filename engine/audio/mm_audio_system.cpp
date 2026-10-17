@@ -187,6 +187,12 @@ static void voice_release(SfxVoice &v) noexcept {
 }
 
 static bool play_entry(SfxPool &pool, u8 id, u8 priority, f32 pitch, f32 volume_scale) noexcept {
+    // Every play_id() overload funnels through here, so this is the one place
+    // the pause has to be honoured — a gate on each overload would be three
+    // copies, and the one nobody remembers is the one that plays.
+    if (pool.is_paused()) {
+        return false;
+    }
     SfxEntry &e = s_entries[id];
     if (!e.loaded) {
         return false;
@@ -308,6 +314,18 @@ void SfxPool::stop_all() noexcept {
         }
     }
 }
+
+void SfxPool::pause() noexcept {
+    if (paused) {
+        return;
+    }
+    paused = true;
+    // Stop what is sounding NOW. Leaving it running means the app makes noise
+    // for the rest of the effect's length after the player has looked away.
+    stop_all();
+}
+
+void SfxPool::resume() noexcept { paused = false; }
 
 void SfxPool::set_master_volume(f32 vol) noexcept {
     master_volume = vol;
@@ -483,11 +501,74 @@ void MusicLayer::set_volume(f32 vol) noexcept {
     }
 }
 
+void MusicLayer::pause() noexcept {
+    if (paused) {
+        return;
+    }
+    paused = true;
+    // Stop whatever is audible, but KEEP the crossfade state. Clearing it here
+    // is what used to make a mid-fade pause unrecoverable: resume() then had no
+    // way to tell "one settled track" from "two tracks at different volumes", so
+    // it restarted only one and left the transition half-finished with the fade
+    // no longer running. Both slots are stopped — pausing has to silence the
+    // incoming one too, which the old single-track stop() let keep playing.
+    for (int i = 0; i < 2; ++i) {
+        if (track[i]) {
+            ma_sound_stop(track[i]);
+        }
+    }
+}
+
+void MusicLayer::resume() noexcept {
+    if (!paused) {
+        return;
+    }
+    paused = false;
+    // The decoded buffers are still resident — pause() only stopped the sounds,
+    // it did not unload them — so resuming is a restart rather than a decode.
+    // Volume has to be restored too, or a mid-fade resume jumps to full scale.
+    auto restart = [this](int i) noexcept {
+        if (!track[i]) {
+            return;
+        }
+        ma_sound_set_volume(track[i], volume[i]);
+        ma_sound_start(track[i]);
+    };
+    if (crossfading) {
+        // A fade was in flight, so both slots hold part of it. update() picks
+        // the transition back up from crossfade_t and finishes it.
+        restart(active_track);
+        restart(1 - active_track);
+        return;
+    }
+    // stop() leaves active_track on the empty slot, which is what keeps a
+    // pause/resume around a silent layer from resurrecting music.
+    restart(active_track);
+}
+
 bool        MusicLayer::is_playing() const noexcept { return track[active_track] && ma_sound_is_playing(track[active_track]); }
+
+void AudioSystem::pause() noexcept {
+    sfx.pause();
+    music.pause();
+}
+
+void AudioSystem::resume() noexcept {
+    sfx.resume();
+    music.resume();
+}
 
 AudioSystem g_audio_system;
 
 bool        AudioSystem::init() noexcept {
+    // Idempotent. Two hosts call init() — the macOS app layer and the app's
+    // own game_init — and a second ma_engine_init overwrote `engine`, leaking
+    // the first engine whole (audio thread + device included) while shutdown()
+    // only ever uninitialised the last one. Fixed HERE, not at the call sites:
+    // the guard belongs to the thing that owns the resource.
+    if (engine) {
+        return true;
+    }
     MM_LOG("AudioSystem::init() - Initializing miniaudio engine");
 
     engine = static_cast<ma_engine *>(ma_malloc(sizeof(ma_engine), nullptr));

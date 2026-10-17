@@ -12,15 +12,9 @@
 enum class e_material_type : u8 {
     SPRITEALPHA,    // alpha blend (default)
     SPRITEADDITIVE, // additive blend
-    SPRITEMULTIPLY, // multiply blend
-    SPRITEOPAQUE,   // no blending
     SDF,            // SDF text
     PARTICLE,       // particle system
     ROUNDEDSPRITE,  // SDF rounded rect sprite
-    SPRITEOUTLINE,  // edge-detection outline
-    CLIPRECT,       // screen-space clipping
-    DISSOLVE,       // procedural dissolve transition
-    GRAYSCALE,      // desaturation
     NORMALDERIVE,   // Sobel normal from albedo + Blinn-Phong (lab D6)
     NORMALMAP,      // tangent-space normal map lighting (lab D7/D8/D9 card)
     CARTOON,        // toon bands + ink edges (lab C)

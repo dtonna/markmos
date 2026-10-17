@@ -3,6 +3,7 @@
 
 #pragma once
 #include "../input/mm_input_state.hpp"
+#include "../core/mm_log.hpp"
 #include "../math/mm_color.h"
 #include "../math/mm_rect.h"
 #include "mm_palette.hpp"
@@ -25,6 +26,15 @@ namespace ui {
 //   - key too low   -> the scissor lands before the text and never clips it.
 // Derive it from the renderer instead of hardcoding layer 1.
 inline SortKey text_key(const Renderer &r) noexcept { return SortKey{r.text_layer, 0, 0, 1.0f}; }
+
+// Toast sits one layer above the modal backdrop, and therefore above whatever
+// text_layer a host raised for its own overlay. Derived here rather than written
+// out at the call site so the canary in ui_update_tests asserts the SAME function
+// render() draws with — a test that re-derives the arithmetic proves the
+// arithmetic, not the wiring.
+inline SortKey overlay_key(const Renderer &r, u8 levels_above_text) noexcept {
+    return SortKey{static_cast<u8>(r.text_layer + levels_above_text), 0, 0, 1.0f};
+}
 
 // ─── Widget types ────────────────────────────────────────────────
 enum class widget_type : u8 {
@@ -83,6 +93,38 @@ inline f32 align_text_x(text_align a, f32 box_x, f32 box_w, f32 text_w) noexcept
 
 // The scale a widget's text is BOTH measured at and drawn at lives next to
 // measure() below - it needs Manager, which is not defined yet at this point.
+
+// ─── TextField: what the field will accept ─────────────────────────
+// TEXT is the default and means "everything", so every existing field is
+// untouched. NUMERIC refuses anything that is not '0'..'9' AT THE KEYSTROKE —
+// not at commit, and not by scrubbing the string afterwards.
+//
+// It is a MODE and not a predicate callback on purpose. A `bool(*)(char)`
+// filter is more general, but it moves a decision every app has to get right
+// into the engine's hot loop, and the two things a numeric field actually needs
+// (digits, nothing else) are one enum value. An app that needs hex, a phone
+// number format or a mask adds THAT as a mode when it exists, rather than
+// every field paying for a function pointer.
+//
+// Deliberately NOT here: a maximum VALUE. Rejecting a keystroke needs the text
+// before the caret, which is a bigger contract than "is this a digit", and a
+// silent rejection with no message reads as a broken field. Hosts that want a
+// range validate it themselves and say so (freecell's seed field does exactly
+// that, with a toast).
+enum class text_input_mode : u8 {
+    TEXT    = 0, // accept anything
+    NUMERIC = 1, // digits 0-9 only
+};
+
+// ─── Toast: which screen edge a transient message slides in from ──
+// BOTTOM is the default because that is where a thumb is not, and because the
+// thing a toast usually reports on (a field being typed into) sits mid-screen.
+enum class toast_edge : u8 {
+    BOTTOM = 0,
+    TOP,
+    LEFT,
+    RIGHT,
+};
 
 // ─── Layout alignment per axis: 0 = Start (left/top, legacy default) ──
 enum class layout_align : u8 {
@@ -291,6 +333,10 @@ using DrawCallback   = void (*)(u16 id, Renderer &r, SpriteBatch &batch, f32 abs
 // user needs context today; extend it the same way if that changes.
 using ClickCallback  = void (*)(u16 id, void *user);
 using ChangeCallback = void (*)(u16 id, f32 value);
+// A toast APPEARED, from this edge. The engine raises the event and knows nothing
+// about sound — the host decides whether it means a noise. See
+// Manager::set_toast_callback for when it fires and what it deliberately does not.
+using ToastCallback  = void (*)(toast_edge from, void *user) noexcept;
 
 struct Widget {
     mm_math::rect frame; // parent-relative pos+size (root = screen points); use .x/.y/.w/.h
@@ -407,8 +453,12 @@ struct ListboxMetrics {
     // Public because a RowCallback gets row_h but not scrollbar_w: right-aligned
     // row content has to inset by scrollbar_w itself, and that is row_h × this.
     static constexpr f32 K_BAR_RATIO = 0.36f; // scrollbar width / row_h
+    // Same reason: a row-h override has to move the indent with it, and an
+    // override that left a theme-derived indent behind would put every label at
+    // the old spacing on rows of a different height.
+    static constexpr f32 K_INDENT_RATIO = 0.28f; // row text left indent / row_h
 
-    f32 row_h;       // derived item height, px
+    f32 row_h;       // derived item height, px (or OVERRIDDEN — see set_listbox_row_h)
     f32 text_scale;  // derived row text scale
     f32 text_h;      // line-box height at text_scale, px
     f32 scrollbar_w; // px
@@ -753,6 +803,14 @@ struct Manager {
 
     // TextField data (parallel arrays)
     u8                   cursor_pos[MAX];
+    // What the field will accept. Reset by alloc() (it is written by a SETTER, and
+    // a recycled slot that kept NUMERIC would silently refuse letters in whatever
+    // app rebuilt its UI onto that slot).
+    text_input_mode      text_input[MAX];
+    // The X affordance. A bool and not a flag because it is a SETTER's value and
+    // alloc() has to clear it - a recycled slot that kept it would silently turn a
+    // plain field into one that eats taps on its right edge.
+    bool                 textfield_clear[MAX];
 
     // ListBox data (parallel arrays; the caller owns the item strings)
     const char *const        *listbox_items[MAX];
@@ -761,6 +819,11 @@ struct Manager {
     f32                     listbox_scroll[MAX];   // rows scrolled (fractional ok)
     f32                     listbox_anchor[MAX];   // body-drag anchor scroll
     ListboxMetrics            listbox_metrics[MAX];  // cached derivation (the list header)
+    // Row HEIGHT override, 0 = derive it. A setter's value, so alloc() has to
+    // clear it: a recycled slot that kept a 60px override would give a plain
+    // listbox someone else's row height, which is invisible in the pool and
+    // very visible on screen. See compute_listbox_metrics' 4-arg form.
+    f32                     listbox_row_h[MAX];
 
     // ComboBox data (parallel arrays; the caller owns the item strings).
     // Closed-field label/filter lives in Widget.text[48] (selected item
@@ -847,8 +910,32 @@ struct Manager {
     WidgetStyle               styles[MAX_STYLES];
     u16                  style_count;
 
-    u8                   register_style(const WidgetStyle &s) noexcept {
-        assert(style_count < MAX_STYLES);
+    // Register a shared visual definition and return its slot.
+    //
+    // ALWAYS allocates a fresh slot. An earlier version de-duplicated - returned
+    // the id of an equal style instead - which looked like a free fix for the
+    // pool leak below and was quietly wrong: mm_07 registers a style and then
+    // MUTATES it through the returned id (`styles[sh_st].shadow_color = ...`), so
+    // two registrations the caller meant to keep independent collapsed onto one
+    // slot and every other widget sharing that value inherited the patch. The
+    // screenshot sweep caught it (D2/D6/M/C/T all gained drop shadows); it is
+    // invisible to any unit test that only counts slots.
+    //
+    // So the leak is the HOST's to avoid, not the pool's to paper over: rebuild
+    // inside clear() (which resets style_count), or hold the id - freecell's
+    // settings dialog caches `panel_style` and drops it in the same
+    // reset_ids() that its ui_dirty path already needs.
+    //
+    // The bounds check is the one thing that stays: a host that registers without
+    // clearing can still fill the pool, and overrunning the array corrupts the
+    // Manager silently. Degrading to the last slot (wrong skin, loudly logged)
+    // beats that, and it is the failure the old `assert` was hiding - asserts are
+    // compiled out by default here.
+    u8 register_style(const WidgetStyle &s) noexcept {
+        if (style_count >= MAX_STYLES) {
+            MM_ERROR("ui: style pool exhausted (%u slots) - reusing the last one", static_cast<u32>(MAX_STYLES));
+            return static_cast<u8>(MAX_STYLES - 1);
+        }
         u8 id = static_cast<u8>(style_count++);
         styles[id] = s;
         return id;
@@ -957,6 +1044,55 @@ struct Manager {
         static const ListboxMetrics kZero{};
         return id < MAX ? listbox_metrics[id] : kZero;
     }
+    // Row height in UI points, or 0 when the list derives it. h <= 0 clears the
+    // override, which is the documented way back to the derived value.
+    //
+    // Call it EVERY time the list is built: the override lives on the widget, so
+    // a list rebuilt from scratch has to state it again exactly like every other
+    // per-widget property.
+    void set_listbox_row_h(u16 id, f32 h) noexcept {
+        if (id < MAX) {
+            listbox_row_h[id] = h > 0.0f ? h : 0.0f;
+        }
+    }
+    f32 get_listbox_row_h(u16 id) const noexcept { return id < MAX ? listbox_row_h[id] : 0.0f; }
+
+    // Refresh ONE listbox's cached metrics from its frame, its style and the two
+    // numbers only render() has (the font's line height and theme.font_scale).
+    //
+    // Public and Renderer-free on purpose. render() is the only production
+    // caller, but the refresh is pure arithmetic over data the widget already
+    // owns — and a test that cannot REACH it cannot tell an override that
+    // actually works from one that is merely stored in an array nothing reads,
+    // which is the exact shape of a feature that looks done and changes nothing.
+    //
+    // Safe to call on any id: the type check is inside, not at the call site.
+    void refresh_listbox_metrics(u16 id, f32 line_h, f32 ui_scale) noexcept {
+        if (id >= MAX || pool[id].type != (u8)widget_type::LISTBOX) {
+            return;
+        }
+        // Rows live in the content rect (inside the border bands), so the
+        // visible count derives from the inset height. Borderless styles inset
+        // 0 → identical to before.
+        f32 il = 0.0f, it = 0.0f, ir = 0.0f, ib = 0.0f;
+        ui::content_insets(styles[pool[id].style_id], pool[id].frame.w, pool[id].frame.h, il, it, ir, ib);
+        f32 inset_h = pool[id].frame.h - it - ib;
+        if (inset_h <= 0.0f) {
+            inset_h = pool[id].frame.h; // degenerate style: frame behavior
+        }
+        listbox_metrics[id] = compute_listbox_metrics(inset_h, line_h, ui_scale, listbox_row_h[id]);
+        // DataGrid: the header is exactly one row tall, so the ROW area is the
+        // content rect minus that row. row_h does not depend on the viewport
+        // height, so taking it from the full-height metrics first is not
+        // circular - only `visible` shrinks.
+        grid_header_h[id] = is_grid(id) ? listbox_metrics[id].row_h : 0.0f;
+        if (grid_header_h[id] > 0.0f) {
+            const f32 rows_h = inset_h - grid_header_h[id];
+            listbox_metrics[id] = compute_listbox_metrics(rows_h > 0.0f ? rows_h : 0.0f, line_h, ui_scale, listbox_row_h[id]);
+            const f32 content_w = pool[id].frame.w - il - ir;
+            grid_metrics[id]     = compute_grid_metrics(grid_cols[id], grid_col_count[id], content_w > 0.0f ? content_w : pool[id].frame.w);
+        }
+    }
     const ListboxMetrics &get_combobox_metrics(u16 id) const noexcept {
         static const ListboxMetrics kZero{};
         return id < MAX ? combobox_metrics[id] : kZero;
@@ -965,13 +1101,48 @@ struct Manager {
     // ui_scale is theme.font_scale (global UI size; the window's
     // content_scale is applied by the renderer, not here).
     static ListboxMetrics compute_listbox_metrics(f32 list_h, f32 line_height, f32 ui_scale) noexcept {
+        return compute_listbox_metrics(list_h, line_height, ui_scale, 0.0f);
+    }
+
+    // row_h_override <= 0 (the default, and what the 3-arg form passes) is the
+    // ORIGINAL derivation, byte-identical — every existing listbox, tree, grid
+    // and combobox takes that path.
+    //
+    // A POSITIVE override replaces row_h and everything derived from it
+    // (scrollbar_w, indent, visible) while LEAVING text_scale/text_h theme-
+    // derived. That split is the contract: "how TALL a row is" belongs to the
+    // app, "how big its text is" belongs to the theme. An app whose rows draw
+    // their own text (set_row_renderer) wants exactly this, and an app that
+    // wants a taller row with theme-sized text gets taller rows — not a row
+    // height and a font size that drift apart.
+    //
+    // It exists because theme.font_scale is the toolkit's only UI scale and an
+    // app can have another one: freecell scales every dialog by content_scale
+    // (layout_scale()) while its Theme stays at font_scale 1.0, so a browser row
+    // that must be K_BROWSER_ROW_H_UNIT × layout_scale() was inexpressible, and
+    // using the derived row_h would have silently re-introduced on a phone the
+    // exact bug that scaling was added to fix (a panel that fits, filled with
+    // rows that do not).
+    //
+    // Additive by construction: a caller that passes 0 sees the old numbers,
+    // and nothing that used to be non-zero becomes zero.
+    static ListboxMetrics compute_listbox_metrics(f32 list_h, f32 line_height, f32 ui_scale, f32 row_h_override) noexcept {
         constexpr f32 K_TEXT_RATIO   = 0.45f; // row text scale / ui_scale (gallery ratio)
         constexpr f32 K_ROW_PAD      = 4.0f;  // vertical pad per side, × ui_scale
         constexpr f32 K_MIN_ROW      = 16.0f; // min row height, × ui_scale
-        constexpr f32 K_INDENT_RATIO = 0.28f; // text indent / row_h
         ListboxMetrics  m{};
+        const bool      has_override = row_h_override > 0.0f;
         if (ui_scale <= 0.0f || line_height <= 0.0f || list_h <= 0.0f) {
-            return m; // invalid → row_h 0, callers must guard
+            // A degenerate frame still honours an override: row_h is the one
+            // number the app stated outright, and the render/hit paths already
+            // guard on it. Everything the override does NOT state stays 0.
+            if (has_override) {
+                m.row_h = row_h_override;
+                m.scrollbar_w = m.row_h * ListboxMetrics::K_BAR_RATIO;
+                m.indent      = m.row_h * ListboxMetrics::K_INDENT_RATIO;
+                m.visible     = 1;
+            }
+            return m;
         }
         m.text_scale  = ui_scale * K_TEXT_RATIO;
         m.text_h      = line_height * m.text_scale;
@@ -980,12 +1151,15 @@ struct Manager {
         if (m.row_h < min_row) {
             m.row_h = min_row;
         }
-        m.visible = static_cast<int>(list_h / m.row_h);
+        if (has_override) {
+            m.row_h = row_h_override;
+        }
+        m.scrollbar_w = m.row_h * ListboxMetrics::K_BAR_RATIO;
+        m.indent      = m.row_h * ListboxMetrics::K_INDENT_RATIO;
+        m.visible     = static_cast<int>(list_h / m.row_h);
         if (m.visible < 1) {
             m.visible = 1;
         }
-        m.scrollbar_w = m.row_h * ListboxMetrics::K_BAR_RATIO;
-        m.indent      = m.row_h * K_INDENT_RATIO;
         return m;
     }
     bool is_editing() const noexcept { return editing_id != UINT16_MAX; }
@@ -1278,6 +1452,15 @@ struct Manager {
     // call update(dt) once per frame next to handle().
     void  update(f32 dt) noexcept;
     void  render(Renderer &r, SpriteBatch &batch) noexcept;
+
+    // render_scope / in_render_scope() / scope_key() live with the modal block
+    // below - they are the modal scope, and splitting them from it only hid the
+    // relationship.
+    //
+    // Passes 1..3, run once for the screen and once for the modal subtree.
+    void  render_passes(Renderer &r, SpriteBatch &batch, u16 fw, u16 fh) noexcept;
+    // The four quads AROUND the modal root (Pass 3.5, hoisted out).
+    void  render_modal_backdrop(Renderer &r, SpriteBatch &batch, u16 fw, u16 fh) noexcept;
     f32 abs_x(u16 id) const noexcept; // screen x (resolves pos_mode chain)
     f32 abs_y(u16 id) const noexcept; // screen y (resolves pos_mode chain)
     void  set_position_mode(u16 id, mm_math::position_mode m) noexcept;
@@ -1393,7 +1576,15 @@ struct Manager {
         modal_id       = root;
         modal_dismiss  = on_dismiss;
         modal_user     = user;
-        // Focus starts inside, so Tab has somewhere to go.
+        // Focus starts inside, so Tab has somewhere to go. Note that modal_id was
+        // assigned `root` just above, so in_modal() here is exactly an ancestry
+        // test against the new root - it is NOT the "everything is inside when no
+        // modal is active" case that makes it a poor filter elsewhere.
+        //
+        // (An earlier version of this comment claimed that reading as a bug and
+        // "fixed" it with is_in_subtree. A revert check showed the two are
+        // equivalent here, so the change was reverted rather than kept as a
+        // refactor wearing a fix's clothes.)
         if (focus_id == UINT16_MAX || !in_modal(focus_id)) {
             focus_id = find_next_focus(UINT16_MAX - 1);
             if (focus_id == UINT16_MAX) {
@@ -1407,6 +1598,62 @@ struct Manager {
         modal_user    = nullptr;
     }
     bool is_modal() const noexcept { return modal_id != UINT16_MAX; }
+
+    // ── Render scope (what the drawing passes may touch right now) ──
+    //
+    // UINT16_MAX = "everything except the active modal subtree"; any other value
+    // = "only that widget and its descendants". render() sets it, runs
+    // render_passes() twice, and restores it - it is render-time state, NOT
+    // per-widget, so it lives here rather than in a parallel array.
+    //
+    // It exists because a single pass cannot put a dialog on top of the screen it
+    // covers: every fill is submitted in Pass 1 and every string in Pass 3, both
+    // at the same sort key, and submit() stable-sorts by key alone - so all text
+    // lands after all fills, and a panel can never cover a label belonging to the
+    // same Manager. freecell's settings dialog and mm_07's D1 modal both hit this:
+    // the scene's own labels drew straight through the dialog, at full brightness,
+    // over an OPAQUE panel.
+    u16   render_scope = UINT16_MAX;
+
+    // True when `id` or one of its ancestors is `root`. Unlike in_modal(), this
+    // does NOT answer "everything" when root is the sentinel - it is a plain
+    // ancestry test, so a caller can ask about an arbitrary subtree.
+    bool is_in_subtree(u16 id, u16 root) const noexcept {
+        if (root == UINT16_MAX) {
+            return true;
+        }
+        for (u8 d = 0; id < MAX && d < 65; ++d) {
+            if (id == root) {
+                return true;
+            }
+            id = pool[id].parent;
+        }
+        return false;
+    }
+
+    // Is `id` inside the scope render() is currently drawing? See render_scope.
+    // Every drawing pass asks this before it draws anything.
+    bool in_render_scope(u16 id) const noexcept {
+        if (render_scope == UINT16_MAX) {
+            // The normal scope EXCLUDES the active modal subtree, so the dialog
+            // can be drawn afterwards, on top of everything it covers.
+            return modal_id == UINT16_MAX || !is_in_subtree(id, modal_id);
+        }
+        return is_in_subtree(id, render_scope);
+    }
+
+    // Sort key for this scope's sprite batches.
+    //
+    // The modal subtree's FILLS have to sort at or above the scene's TEXT, or a
+    // host that raises text_layer puts the scene's labels back on top of the
+    // dialog - the exact bug the two-scope render exists to fix, reappearing
+    // through the other door. At text_layer 0 both keys are equal and submission
+    // order decides, so the split alone is enough; this makes it hold at any
+    // layer. The scene scope keeps the default key, so a frame with no modal open
+    // is byte-identical to before.
+    SortKey scope_key(const Renderer &r) const noexcept {
+        return render_scope == UINT16_MAX ? SortKey{0, 0, 0, 1.0f} : ui::text_key(r);
+    }
 
     // Topmost hit widget at a point. Public: apps legitimately want it (menus
     // that close on outside taps), and the tests need it to prove the modal
@@ -1436,6 +1683,104 @@ struct Manager {
     const char            *tooltip_str[MAX];
     f32                  tooltip_delay[MAX];
 
+    // ── Toast ────────────────────────────────────────────────────
+    // A transient message docked to a screen edge, slid in. NOT a widget: no id,
+    // no rect in the pool, no hit test, nothing in the focus ring - so it has no
+    // per-widget arrays and therefore nothing for alloc() to reset. It differs
+    // from the tooltip above in exactly that way, which is why its state is one
+    // slot rather than a [MAX].
+    //
+    // Two rules make it correct rather than merely present:
+    //
+    //  * the string is caller-owned (same contract as tooltip), so a toast never
+    //    copies or frees and a caller that passes a stack buffer is on the hook;
+    //  * it draws at sort key text_layer + 1 (see the pass in render()). The
+    //    modal backdrop draws at text_layer, and a host overlay that raises
+    //    text_layer draws there too - so "one above the current layer" is the only
+    //    key that is above both WITHOUT depending on submission order. Same key as
+    //    the backdrop would work today (stable sort, drawn later) and break the
+    //    day a pass is inserted - which is the 6c4da6b failure mode exactly.
+    //
+    // There is one toast, not a stack: a second toast() replaces the first. A
+    // queue would need ordering rules and a capacity for a feature whose whole
+    // purpose is to be the least important thing on screen.
+    const char            *toast_str   = nullptr;
+    f32                  toast_t      = 0.0f;  // seconds since toast()
+    f32                  toast_dur    = 0.0f;  // 0 = until toast_hide()
+    f32                  toast_anim   = 0.0f;  // 0 = just off-screen, 1 = docked
+    toast_edge           toast_from   = toast_edge::BOTTOM;
+    // Appearance event, consumed by update(). See set_toast_callback().
+    ToastCallback      toast_cb        = nullptr;
+    void              *toast_cb_user   = nullptr;
+    bool               toast_was_shown = false; // a toast was up at the last update()
+    bool               toast_appeared  = false; // ...and this update() saw it appear
+
+    // How fast the slide converges. Same family as anim_speed (10.0) but a little
+    // slower, because a toast is a larger object crossing a longer distance and
+    // the eye reads a snappier arrival as a pop rather than an arrival.
+    static constexpr f32 K_TOAST_SLIDE_SPEED = 14.0f;
+    // How long a toast is fully docked before it leaves. It starts counting at
+    // toast(), NOT at the end of the slide, so a long string does not buy extra
+    // reading time.
+    static constexpr f32 K_TOAST_MIN_DUR     = 1.2f;
+
+    // duration <= 0 means "until toast_hide()"; anything shorter than
+    // K_TOAST_MIN_DUR is raised to it, because a 0.1s toast is a flicker, which is
+    // worse than no message at all.
+    //
+    // Restarting an existing toast re-arms the clock from zero rather than
+    // ignoring the call: a validator that reports on every keystroke must be able
+    // to keep a message up without the caller tracking whether one is already up.
+    void toast(const char *text, f32 duration = 3.0f, toast_edge from = toast_edge::BOTTOM) noexcept {
+        if (text == nullptr) {
+            return;
+        }
+        toast_str = text;
+        toast_t   = 0.0f;
+        toast_dur = (duration <= 0.0f) ? 0.0f : fmaxf(duration, K_TOAST_MIN_DUR);
+        toast_from = from;
+        // A REPLACEMENT does not re-slide (toast_anim is left alone): it is already
+        // on screen, and a message that jumps back to the edge every time the user
+        // types reads as flicker. A FIRST toast starts at 0 from the dismissed run
+        // in update(), so it does slide.
+    }
+    void toast_hide() noexcept { toast_str = nullptr; }
+    bool toast_visible() const noexcept { return toast_str != nullptr; }
+
+    // ── Toast appearance event ─────────────────────────────────────
+    // A toast is the one thing in this file that APPEARS, and it appeared
+    // silently. The engine deliberately knows nothing about sound — it says "a
+    // toast appeared, from this edge" and the host decides whether that means a
+    // noise. Adding a sound parameter to toast() would have grown the signature
+    // at every call site and put audio in a toolkit that has none.
+    //
+    // `from` is passed because a toast's arrival direction is the only handle a
+    // host has on WHERE it came from, and both callers here (seed out of range)
+    // use it.
+    //
+    // Fires ONCE per appearance, from update():
+    //   * not on toast_hide() — a message leaving is not an event
+    //   * not on a REPLACEMENT toast() — a validator that re-reports on every
+    //     keystroke would otherwise tick once per character typed, which is the
+    //     opposite of a notification
+    //   * not on the first update after one, so holding the same message up does
+    //     not re-announce it
+    //
+    // The flag is consume-once: true for the update() that saw the transition and
+    // false every frame after, exactly like the land events freecell drains. A
+    // host polls it after handle()/update() and does not need to clear anything.
+    void set_toast_callback(ToastCallback cb, void *user) noexcept {
+        toast_cb        = cb;
+        toast_cb_user   = user;
+        toast_was_shown = toast_str != nullptr;
+    }
+    bool toast_just_appeared() const noexcept { return toast_appeared; }
+
+    // 0..1 slide progress. Public because a test can only pin a transition by
+    // reading it, and "the toast is up" and "the toast has finished sliding in"
+    // are different questions.
+    f32 toast_progress() const noexcept { return toast_anim; }
+    
     // ── Long text override ───────────────────────────────────────
     // Widget::text is a 48-byte inline buffer (Widget is locked at 128B), so a
     // long string used to be silently truncated mid-word by the factories'
@@ -1812,16 +2157,45 @@ struct Manager {
     // and scroll legal. Called on attach and on every expand/collapse: a closed
     // node can REMOVE the selected row, and a selection index past the end is how
     // a listbox ends up rendering a highlight for a row that is not there.
+    //
+    // The tail is listbox_sync() — a count that shrank has to take the selection
+    // and the scroll with it, whether the count came from a tree, a grid or a
+    // filtered list, and one listbox whose filter left a stale selection is
+    // exactly the same bug as a tree whose collapsed branch did.
+    void listbox_sync(u16 id) noexcept {
+        if (id >= MAX) {
+            return;
+        }
+        if (listbox_selected[id] >= static_cast<i8>(listbox_count[id])) {
+            listbox_selected[id] = static_cast<i8>(listbox_count[id] > 0 ? listbox_count[id] - 1 : -1);
+        }
+        ui::listbox::clamp_scroll(listbox_scroll[id], listbox_count[id], listbox_metrics[id]);
+    }
+
+    // Hand the widget a NEW item set. The factory takes one at construction, but
+    // a list whose rows are FILTERED changes its count on every tap, and before
+    // this there was no way to say so: the count could only be written at
+    // construction or by poking the parallel array from the app.
+    //
+    // `items` may be nullptr with a non-zero count — that is the row-renderer
+    // shape, where the array belongs to nobody and render_rows() deliberately
+    // does not gate on it.
+    void set_listbox_items(u16 id, const char *const *items, u8 count) noexcept {
+        if (id >= MAX) {
+            return;
+        }
+        listbox_items[id] = items;
+        listbox_count[id] = count;
+        listbox_sync(id);
+    }
+
     void tree_sync(u16 id) noexcept {
         if (id >= MAX || tree_nodes[id] == nullptr) {
             return;
         }
         const u32 vis = tree_visible_count(tree_nodes[id], tree_count[id], tree_expanded[id]);
         listbox_count[id] = static_cast<u8>(vis > 255 ? 255 : vis);
-        if (listbox_selected[id] >= static_cast<i8>(listbox_count[id])) {
-            listbox_selected[id] = static_cast<i8>(listbox_count[id] > 0 ? listbox_count[id] - 1 : -1);
-        }
-        ui::listbox::clamp_scroll(listbox_scroll[id], listbox_count[id], listbox_metrics[id]);
+        listbox_sync(id);
     }
 
     // ─── Accordion ────────────────────────────────────────────────
@@ -2208,6 +2582,106 @@ struct Manager {
         return id < MAX && (pool[id].flags & WF_FOCUSABLE) != 0;
     }
 
+    // What a TextField accepts. Set after the factory (like set_text_align), so
+    // the "writer is a SETTER" rule applies: alloc() resets this array too.
+    void set_text_input(u16 id, text_input_mode mode) noexcept {
+        if (id < MAX) {
+            text_input[id] = mode;
+        }
+    }
+    text_input_mode get_text_input(u16 id) const noexcept { return id < MAX ? text_input[id] : text_input_mode::TEXT; }
+
+    // Width of the X zone at the field's right end, in the same units as the
+    // frame. Wide enough to hit with a thumb, which is the only thing that
+    // matters for a control whose whole job is "get this text out of here".
+    static constexpr f32 K_TEXTFIELD_CLEAR_W = 24.0f;
+
+    // Show an X at the field's right end that clears it in one tap.
+    //
+    // This is not decoration. With the caret placed by the tap (see handle()), it
+    // is the OTHER reliable editing gesture, and the only one that works when the
+    // caret is at 0 - where Backspace is correctly a no-op - or when the player
+    // cannot see where the caret is. A field with no way to empty itself is a
+    // field you cannot correct.
+    //
+    // The X is drawn only when the field has text (see render); an empty
+    // "optional" field showing a dismiss control would be clutter implying there
+    // is something to dismiss.
+    void set_textfield_clear(u16 id, bool on) noexcept {
+        if (id < MAX) {
+            textfield_clear[id] = on;
+        }
+    }
+    bool get_textfield_clear(u16 id) const noexcept { return id < MAX && textfield_clear[id]; }
+
+    // True when (px, py) inside field `id`'s rect lands on its clear zone.
+    // Public and pure so the tap path and the draw path can agree about where the
+    // control is - two hand-computed rectangles is the shape that drifts.
+    bool textfield_clear_hit(u16 id, f32 px, f32 py) const noexcept {
+        if (id >= MAX || !textfield_clear[id] || pool[id].text[0] == '\0') {
+            return false;
+        }
+        const f32 ax = abs_x(id);
+        const f32 ay = abs_y(id);
+        const f32 w  = pool[id].frame.w;
+        const f32 h  = pool[id].frame.h;
+        if (px < ax || px >= ax + w || py < ay || py >= ay + h) {
+            return false; // outside the field entirely
+        }
+        return px >= ax + w - K_TEXTFIELD_CLEAR_W;
+    }
+
+    // What a tap inside field `id` does: clear it if the tap landed on the X,
+    // otherwise place the caret where the tap was.
+    //
+    // ONE helper for both tap paths, because there are two and they used to
+    // disagree: the click path below (a field not yet being edited) and the
+    // early-return path in handle() (a field already being edited, which never
+    // reaches the click path at all). Two hand-written copies of "clear or place"
+    // is how they would drift.
+    void textfield_tap_action(u16 id, f32 px, f32 py) noexcept {
+        if (id >= MAX) {
+            return;
+        }
+        if (textfield_clear_hit(id, px, py)) {
+            pool[id].text[0] = '\0';
+            cursor_pos[id]   = 0;
+            text_ext[id]     = nullptr;
+            measure_dirty    = true;
+            emit_event(ui_event_type::CHANGE, id, 0.0f);
+            return;
+        }
+        cursor_pos[id] = textfield_caret_at(id, px);
+    }
+
+    // Caret index for a tap at `px` inside field `id`.
+    //
+    // AN ESTIMATE, and deliberately so: handle() has no Renderer, and the engine
+    // keeps no font of its own outside one (the same reason update() may not
+    // measure). So the advance is a nominal fraction of the field height rather
+    // than the real glyph advances.
+    //
+    // What matters, and what the test pins, is that it is MONOTONIC and reaches
+    // both ends: a caret that lands in roughly the right place is what makes
+    // "tap then Backspace" delete what the player aimed at. An exact index would
+    // be testing the estimate, not the behaviour, and would rot with the font.
+    u16 textfield_caret_at(u16 id, f32 px) const noexcept {
+        if (id >= MAX) {
+            return 0;
+        }
+        const u32 len = static_cast<u32>(std::strlen(pool[id].text));
+        if (len == 0) {
+            return 0;
+        }
+        const f32 w = pool[id].frame.w;
+        if (w <= 0.0f) {
+            return 0;
+        }
+        const f32 t = (px - abs_x(id)) / w;
+        u32       c = static_cast<u32>((t * static_cast<f32>(len)) + 0.5f);
+        return static_cast<u16>(c > len ? len : c);
+    }
+
     // Which widget the pointer is over this frame (UINT16_MAX for none). Public
     // because "no pointer at all" is a real state - see InputState::has_pointer
     // - and the hover colour, the toggle thumb's hot shade and the tooltip are
@@ -2388,6 +2862,9 @@ inline void Manager::init() noexcept {
     focus_anchor   = UINT16_MAX;
     editing_id     = UINT16_MAX;
     scroll_dragging = false;
+    // render_scope is render-time state, but a Manager that is re-initialised
+    // mid-frame must not come back narrowed to a subtree nobody set.
+    render_scope   = UINT16_MAX;
     cursor_timer   = 0.0f;
     event_head = event_tail = event_count = 0;
     prev_focus                            = UINT16_MAX;
@@ -2413,6 +2890,7 @@ inline void Manager::init() noexcept {
         listbox_scroll[i]                                         = 0.0f;
         listbox_anchor[i]                                         = 0.0f;
         listbox_metrics[i]                                        = ListboxMetrics{};
+        listbox_row_h[i]                                          = 0.0f;
         combobox_items[i]                                         = nullptr;
         combobox_count[i]                                         = 0;
         combobox_selected[i]                                      = -1;
@@ -2435,6 +2913,8 @@ inline void Manager::init() noexcept {
         progressbar_celebrated[i]                                  = false;
         on_color[i]                                               = 0;
         text_ext[i]                                             = nullptr;
+        text_input[i]                                          = text_input_mode::TEXT;
+        textfield_clear[i]                                     = false;
         listbox_row_cb[i]                                        = nullptr;
         align[i]                                                 = text_align::LEFT;
         text_box[i]                                              = 0;
@@ -2476,6 +2956,15 @@ inline void Manager::clear() noexcept {
     hot            = UINT16_MAX;
     active         = UINT16_MAX;
     clicked        = UINT16_MAX;
+    // The modal scope dies with the widgets it pointed at. clear() did NOT reset
+    // modal_id, so a clear() during a modal left modal_id naming a slot that the
+    // next allocation hands straight back - pick() would then scope input to an
+    // unrelated widget and render() would defer an unrelated subtree. Same reason
+    // the style pool resets below.
+    modal_id       = UINT16_MAX;
+    modal_dismiss  = nullptr;
+    modal_user     = nullptr;
+    render_scope   = UINT16_MAX;
     focus_id       = UINT16_MAX;
     focus_anchor   = UINT16_MAX;
     editing_id     = UINT16_MAX;
@@ -2484,6 +2973,24 @@ inline void Manager::clear() noexcept {
     prev_hot                              = UINT16_MAX;
     measure_dirty                         = true;
     abs_cache_dirty                       = true;
+    // Toast is NOT per-widget, so clear() is the only place it can die: the pool
+    // dropping says nothing about a message that outlives the screen that raised
+    // it. Every app that rebuilds its UI per frame calls clear(), so without this
+    // a toast outlives the very widget it was talking about.
+    toast_str                             = nullptr;
+    toast_t                               = 0.0f;
+    toast_dur                             = 0.0f;
+    toast_anim                            = 0.0f;
+    // ...so the next update() sees "nothing was shown" and a toast raised after
+    // this frame counts as a fresh appearance. Resetting it to TRUE instead would
+    // swallow the event for a toast() called later in the same frame.
+    toast_was_shown                       = false;
+    toast_appeared                        = false;
+    // toast_cb / toast_cb_user are deliberately NOT reset here: they are a host
+    // binding, not pool state, and every app that rebuilds per frame calls
+    // clear() — resetting them would silently unbind the host after the first
+    // rebuild. The same reason text_of()/listbox_items are caller-owned.
+    //
     // Style pool resets with the widget pool (no widgets remain, so no
     // style_id can dangle). Without this every rebuild leaks slots until
     // register_style() hits MAX_STYLES and aborts.
@@ -2559,6 +3066,13 @@ inline u16 Manager::alloc() noexcept {
     text_ext[id]                 = nullptr;
     tooltip_str[id]              = nullptr;
     tooltip_delay[id]            = K_TOOLTIP_DEFAULT_DELAY;
+    text_input[id]               = text_input_mode::TEXT;
+    textfield_clear[id]          = false;
+    // The caret too: alloc() resets nothing per-widget, and the factory only sets
+    // it for a field it just created. A slot that arrives from the freelist as a
+    // NON-field carries the old value, and the editor block reads it as soon as
+    // anything makes it the editing widget.
+    cursor_pos[id]               = 0;
     combobox_anim_mode[id]       = popup_anim_mode::SCALE_FADE;
     progressbar_stripe_t[id]     = 0.0f;
 
@@ -2574,6 +3088,7 @@ inline u16 Manager::alloc() noexcept {
     acc_content_h[id]        = 0.0f;
     grid_cols[id]            = nullptr;
     grid_order[id]           = nullptr;
+    listbox_row_h[id]        = 0.0f;
     grid_col_count[id]       = 0;
     grid_header_h[id]        = 0.0f;
     grid_sort_col[id]        = UINT8_MAX;

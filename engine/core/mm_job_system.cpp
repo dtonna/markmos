@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: MIT
 
 #include "mm_job_system.hpp"
+#include "core/mm_pool.hpp"
 #include "core/mm_types.h"
 #include "mm_tracy.hpp"
+#include <chrono>
 #include <cstdlib>
 #include <ctime>
 #include <unistd.h>
@@ -53,21 +55,24 @@ void JobSystem::init(u32 worker_count) noexcept {
             worker_count = 8;
         }
     }
-    worker_count_ = worker_count;
-    workers_      = static_cast<Worker *>(std::malloc(sizeof(Worker) * worker_count_));
-    if (!workers_) {
-        return;
+    // kMaxWorkers, not worker_count: init() clamps below, but a clamp that only
+    // exists in one place is a clamp that gets forgotten.
+    if (worker_count > kMaxWorkers) {
+        worker_count = kMaxWorkers;
     }
+    worker_count_ = worker_count;
 
     running_.store(true, std::memory_order_release);
 
-    pthread_mutex_init(&wake_mutex_, nullptr);
-    pthread_cond_init(&wake_cond_, nullptr);
 
     for (u32 i = 0; i < worker_count_; ++i) {
         workers_[i].id     = i;
         workers_[i].system = this;
-        pthread_create(&workers_[i].thread, nullptr, worker_entry, &workers_[i]);
+        // Fatal on failure, same reasoning as the save worker: the pthread version
+        // ignored the return value and left running_ true with fewer workers than
+        // init() was asked for, which on a device that cannot spare a thread looks
+        // exactly like a slow load rather than a failure.
+        workers_[i].thread = std::thread(worker_entry, &workers_[i]);
     }
 }
 
@@ -76,20 +81,21 @@ void JobSystem::shutdown() noexcept {
         return;
     }
 
-    pthread_mutex_lock(&wake_mutex_);
-    pthread_cond_broadcast(&wake_cond_);
-    pthread_mutex_unlock(&wake_mutex_);
-
-    for (u32 i = 0; i < worker_count_; ++i) {
-        pthread_join(workers_[i].thread, nullptr);
+    {
+        std::lock_guard<std::mutex> lock(wake_mutex_);
+        wake_cond_.notify_all();
     }
 
-    std::free(workers_);
-    workers_      = nullptr;
-    worker_count_ = 0;
+    for (u32 i = 0; i < worker_count_; ++i) {
+        if (workers_[i].thread.joinable()) {
+            workers_[i].thread.join();
+        }
+        workers_[i] = Worker{}; // runs ~std::thread on a joined handle
+    }
 
-    pthread_mutex_destroy(&wake_mutex_);
-    pthread_cond_destroy(&wake_cond_);
+    worker_count_ = 0;
+    // No frees and no destroys: the array is inline, and the mutex and condvar
+    // clean themselves up.
 }
 
 void JobSystem::run(const Job &job) noexcept {
@@ -101,9 +107,11 @@ void JobSystem::run(const Job &job) noexcept {
         }
     }
     // Wake one worker
-    pthread_mutex_lock(&wake_mutex_);
-    pthread_cond_signal(&wake_cond_);
-    pthread_mutex_unlock(&wake_mutex_);
+        // Notified inside the lock: the 1 ms poll in worker_loop() makes a lost
+        // wakeup cost latency rather than a stall, and holding the lock keeps that
+        // true without having to reason about the window either way.
+        std::lock_guard<std::mutex> lock(wake_mutex_);
+        wake_cond_.notify_one();
 }
 
 void JobSystem::run_fn(void (*fn)(void *), void *data) noexcept {
@@ -128,7 +136,12 @@ void JobSystem::wait(JobCounter *counter) noexcept {
 
 void *JobSystem::worker_entry(void *arg) noexcept {
     auto *worker = static_cast<Worker *>(arg);
+    // rpmalloc is per-thread and jobs here touch the VFS, which allocates. A
+    // worker with no heap of its own faults inside rpmalloc() on the first
+    // allocation over 4096 bytes.
+    pool_thread_initialize();
     worker->system->worker_loop(worker->id);
+    pool_thread_finalize();
     return nullptr;
 }
 
@@ -143,14 +156,14 @@ void JobSystem::worker_loop(u32 id) noexcept {
             execute(job);
         } else {
             // No work — wait on condition
-            pthread_mutex_lock(&wake_mutex_);
+            // No work — wait on the condition, but only briefly. The 1 ms timeout
+            // is a POLL, not a latency budget: it is how a worker notices running_
+            // going false without needing shutdown() to wake every thread exactly
+            // once, so join() can never outlive the flag it is waiting on.
+            std::unique_lock<std::mutex> lock(wake_mutex_);
             if (queue_.empty()) {
-                struct timespec ts{};
-                clock_gettime(CLOCK_REALTIME, &ts);
-                ts.tv_nsec += 1'000'000; // 1ms timeout
-                pthread_cond_timedwait(&wake_cond_, &wake_mutex_, &ts);
+                wake_cond_.wait_for(lock, std::chrono::milliseconds(1));
             }
-            pthread_mutex_unlock(&wake_mutex_);
         }
     }
 }
@@ -173,9 +186,8 @@ void JobSystem::execute(const Job &job) noexcept {
                     execute(j);
                 }
             }
-            pthread_mutex_lock(&wake_mutex_);
-            pthread_cond_signal(&wake_cond_);
-            pthread_mutex_unlock(&wake_mutex_);
+            std::lock_guard<std::mutex> lock(wake_mutex_);
+            wake_cond_.notify_one();
         }
     }
 }

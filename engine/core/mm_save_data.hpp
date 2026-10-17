@@ -6,7 +6,6 @@
 #include "core/mm_types.h"
 #include <cstddef>
 #include <cstring>
-#include <type_traits>
 #include <bit>
 
 // SaveData — binary flat struct, CRC32 verified
@@ -107,7 +106,7 @@ private:
 };
 
 static_assert(sizeof(SaveData) <= 1024, "SaveData should fit in 1KB");
-static_assert(std::is_trivially_copyable<SaveData>::value, "SaveData must be POD");
+static_assert(std::is_trivially_copyable_v<SaveData>, "SaveData must be POD");
 
 // Global instance — init() at app start, load() on first access
 extern SaveData g_save_data;

@@ -109,7 +109,7 @@ inline void render_pass(Manager &m, SpriteBatch &batch, Renderer &r) noexcept {
     // "per-widget state, one flush" shape as the Pass 1 bug.
     for (u16 i = 0; i < m.count; ++i) {
         auto &w = m.pool[i];
-        if (!m.is_visible(i)) {
+        if (!m.is_visible(i) || !m.in_render_scope(i)) {
             continue;
         }
         if (w.type != (u8)widget_type::LISTBOX) {
@@ -203,7 +203,7 @@ inline void render_pass(Manager &m, SpriteBatch &batch, Renderer &r) noexcept {
         }
         // Drain HERE, while this listbox's scissor is the active one.
         if (batch.count > 0) {
-            r.flush_sprites(batch, r.white_tex, r.default_sampler);
+            r.flush_sprites(batch, r.white_tex, r.default_sampler, m.scope_key(r));
             batch.reset();
         }
     }
