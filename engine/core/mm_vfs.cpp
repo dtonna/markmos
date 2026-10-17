@@ -337,3 +337,14 @@ void AssetLoader::load_job(void *data) noexcept {
 
     pool_free_sized(jd, sizeof(LoadJobData));
 }
+
+
+bool Vfs::delete_doc(const char *path) noexcept {
+    char full[1024];
+    int  n = std::snprintf(full, sizeof(full), "%s/%s", doc_path_, path);
+    if (n < 0 || static_cast<size_t>(n) >= sizeof(full)) {
+        return false;
+    }
+    // std::remove is C's file delete; <cstdio> is already included for fopen above.
+    return std::remove(full) == 0;
+}

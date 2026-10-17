@@ -281,11 +281,72 @@ int main() {
         InputState esc;
         esc.init();
         esc.action_count = 1;
-        esc.actions[0]    = InputAction::Back;
+        // Pause, NOT Back. Backspace maps to InputAction::Back, and a modal that
+        // treated `Back` as a synonym for Escape closed the dialog every time the
+        // player deleted a character in a text field inside it. Escape is Pause;
+        // keymap_tests pins that separation and this test used to contradict it.
+        esc.actions[0]    = InputAction::Pause;
         m.handle(esc);
         assert(g_modal_dismiss == 1 && !m.is_modal());
         m.handle(esc); // no scope any more
         assert(g_modal_dismiss == 1);
+    }
+
+    // ─── Modal: Backspace must NOT close it ───
+    // InputAction::Back is Backspace. The modal dismiss used to accept it as a
+    // synonym for Pause, so deleting one character in a text field inside a modal
+    // closed the dialog - and "type a seed, backspace to fix a typo, dialog gone"
+    // is the worst possible reading of a text field. The keymap separates the two
+    // on purpose (keymap_tests: Escape -> Pause and NOT Back, Backspace -> Back
+    // and NOT Pause), so the consumer was the bug.
+    {
+        ui::Manager m;
+        m.init();
+        g_modal_dismiss = 0;
+        u16 root  = m.panel(10.0f, 10.0f, 200.0f, 120.0f, 0xFF2D2D2D, UINT16_MAX);
+        u16 field = m.textfield(20.0f, 30.0f, 160.0f, 28.0f, "1234", 0xFF111111, 0xFFFFFFFF, root);
+        assert(field != UINT16_MAX);
+        m.begin_modal(root, ModalDismissCb, nullptr);
+
+        InputState bksp;
+        bksp.init();
+        bksp.action_count = 1;
+        bksp.actions[0]   = InputAction::Back;
+        m.handle(bksp);
+        assert(g_modal_dismiss == 0);      // did not dismiss
+        assert(m.is_modal());               // and the scope is intact
+        assert(m.pool[root].flags & ui::WF_VISIBLE);
+
+        // Escape still does close it, so the fix did not just disable dismissal.
+        InputState esc;
+        esc.init();
+        esc.action_count = 1;
+        esc.actions[0]   = InputAction::Pause;
+        m.handle(esc);
+        assert(g_modal_dismiss == 1 && !m.is_modal());
+    }
+
+    // ─── A focused open ComboBox is not closed by Backspace either ───
+    // The same conflation in the widget branch: Backspace cancelled the popup
+    // instead of deleting the character before the caret.
+    {
+        ui::Manager m;
+        m.init();
+        g_modal_dismiss = 0;
+        static const char *const kItems[] = {"a", "b"};
+        u16                 field = m.combobox(10.0f, 10.0f, 160.0f, 28.0f, kItems, 2, true, NoopCb);
+        assert(field != UINT16_MAX);
+        m.begin_modal(field, ModalDismissCb, nullptr);
+        m.combobox_open_now(field);
+        assert(m.is_combobox_open(field));
+
+        InputState bksp;
+        bksp.init();
+        bksp.action_count = 1;
+        bksp.actions[0]   = InputAction::Back;
+        m.handle(bksp);
+        assert(g_modal_dismiss == 0);
+        assert(m.is_combobox_open(field)); // still open
     }
 
     // ─── Modal: end_modal() without a callback is safe + idempotent ───
@@ -335,6 +396,273 @@ int main() {
         m.set_text_ext(lbl, nullptr);
         assert(std::strcmp(m.text_of(lbl), "a bit longer but still under 48") == 0);
         assert(!m.set_text(9999, "x"));
+    }
+
+    // ─── Toast: raised, slid, dismissed, and dt == 0 does nothing ───
+    // Timing lives in update() and nothing is drawn by it, so all of this is
+    // observable without a Renderer - which is the same contract the tooltip's
+    // timing has, and the reason a toast needs no widget to be testable.
+    {
+        ui::Manager m;
+        m.init();
+        static const char *kMsg = "Seed must be 2147483647 or less";
+
+        assert(!m.toast_visible());
+        assert(m.toast_progress() == 0.0f);
+
+        m.toast(kMsg, 2.0f, ui::toast_edge::BOTTOM);
+        assert(m.toast_visible());
+        assert(m.toast_str == kMsg);
+        assert(m.toast_from == ui::toast_edge::BOTTOM);
+        // Starts OFF-SCREEN: a toast that appears at its docked position on the
+        // first frame has no slide at all.
+        assert(m.toast_progress() == 0.0f);
+
+        // dt == 0 is a no-op - the guard every driven value in this file carries.
+        m.update(0.0f);
+        assert(m.toast_progress() == 0.0f);
+        assert(m.toast_t == 0.0f);
+
+        // It rises, and it SNAPS - exponential smoothing alone approaches 1 forever,
+        // and a toast that never quite arrives is a toast parked a pixel out.
+        //
+        // Stepped UNTIL it lands, with a bound: the frame count is an accumulated
+        // float (0.44 x 20 lands just under 0.99, not on 1.0), so a fixed count here
+        // would be asserting a number that depends on the snap threshold rather than
+        // on the behaviour.
+        f32  prev    = 0.0f;
+        int  frames  = 0;
+        bool arrived = false;
+        for (int i = 0; i < 120; ++i) {
+            m.update(1.0f / 60.0f);
+            assert(m.toast_progress() >= prev); // monotonic: it never slides back
+            prev = m.toast_progress();
+            ++frames;
+            if (m.toast_progress() == 1.0f) {
+                arrived = true;
+                break;
+            }
+        }
+        assert(arrived);
+        // ...and it took real frames, i.e. it slid rather than teleporting.
+        assert(frames > 2);
+        printf("  toast slid in over %d frames\n", frames);
+
+        // Duration counts from toast(), not from the end of the slide: the clock is
+        // already running while it is still arriving, and the toast outlives the
+        // slide because 2s is longer than the slide.
+        assert(m.toast_visible());
+        assert(m.toast_t > 0.0f);
+        assert(m.toast_t < 2.0f);
+
+        // Gone after its duration.
+        for (int i = 0; i < 200 && m.toast_visible(); ++i) {
+            m.update(1.0f / 60.0f);
+        }
+        assert(!m.toast_visible());
+        assert(m.toast_progress() == 0.0f);
+    }
+
+    // ─── Toast: duration 0 stays until hidden, and a short one is raised ───
+    // duration <= 0 is "sticky", which is what a message with no natural end
+    // should be. And a 0.1s toast is a flicker, worse than no message - so it is
+    // raised to the floor rather than left to the caller to guess.
+    {
+        ui::Manager m;
+        m.init();
+        static const char *kMsg = "sticky";
+        m.toast(kMsg, 0.0f);
+        assert(m.toast_dur == 0.0f);
+        for (int i = 0; i < 600; ++i) {
+            m.update(1.0f / 60.0f);
+        }
+        assert(m.toast_visible()); // 10 seconds later, still here
+
+        m.toast_hide();
+        assert(!m.toast_visible());
+
+        m.toast(kMsg, 0.1f);
+        assert(m.toast_dur == ui::Manager::K_TOAST_MIN_DUR);
+    }
+
+    // ─── Toast: a replacement re-arms the clock and does NOT re-slide ───
+    // A validator that reports on every keystroke calls toast() repeatedly. If
+    // each call reset the slide, the message would jump back to the screen edge
+    // on every character; if each call were ignored, the message could not be
+    // kept up without the caller tracking state of its own.
+    {
+        ui::Manager m;
+        m.init();
+        static const char *kA = "first";
+        static const char *kB = "second";
+        m.toast(kA, 5.0f);
+        for (int i = 0; i < 120 && m.toast_progress() < 1.0f; ++i) {
+            m.update(1.0f / 60.0f);
+        }
+        assert(m.toast_progress() == 1.0f);
+        const f32 armed = m.toast_t;
+
+        m.toast(kB, 5.0f);
+        assert(m.toast_str == kB);
+        assert(m.toast_progress() == 1.0f); // did not jump back to the edge
+        assert(m.toast_t == 0.0f);          // but the clock did restart
+        assert(armed > 0.0f);
+    }
+
+    // ─── Toast: dismissing slides it back OUT before it disappears ───
+    // A message that vanishes on the frame it is dismissed reads as a glitch -
+    // the same defect the win-panel note records for a dialog that "vanishes the
+    // instant a button is pressed".
+    {
+        ui::Manager m;
+        m.init();
+        static const char *kMsg = "bye";
+        m.toast(kMsg, 0.0f);
+        for (int i = 0; i < 120 && m.toast_progress() < 1.0f; ++i) {
+            m.update(1.0f / 60.0f);
+        }
+        assert(m.toast_progress() == 1.0f);
+
+        m.toast_hide();
+        // Still drawn this frame - update() runs the slide out, and render() only
+        // skips it once the slide has actually finished.
+        m.update(1.0f / 60.0f);
+        assert(m.toast_progress() > 0.0f && m.toast_progress() < 1.0f);
+        for (int i = 0; i < 60 && m.toast_progress() > 0.0f; ++i) {
+            m.update(1.0f / 60.0f);
+        }
+        assert(m.toast_progress() == 0.0f);
+    }
+
+    // ─── Toast appearance event ────────────────────────────────────
+    // The engine knows nothing about sound; it says "a toast appeared, from this
+    // edge" and the host decides. Four rules, each of which is a way the sound
+    // can go wrong in a way a screenshot cannot show:
+    //
+    //   * it fires ONCE, on the frame the transition is observed
+    //   * it does NOT fire on a replacement — the seed validator calls toast()
+    //     every frame while the field is bad, and a sound per character typed is
+    //     the opposite of a notification
+    //   * it does NOT fire on toast_hide() — a message leaving is not an event
+    //   * it survives clear(), because every app rebuilds its UI per frame and a
+    //     binding that died on the first rebuild would be silent forever
+    {
+        static int         fires      = 0;
+        static ui::toast_edge last_edge = ui::toast_edge::BOTTOM;
+        auto cb            = [](ui::toast_edge from, void *user) noexcept {
+            ++fires;
+            last_edge = from;
+            if (user != nullptr) {
+                ++*static_cast<int *>(user);
+            }
+        };
+        int via_user = 0;
+
+        ui::Manager m;
+        m.init();
+        m.set_toast_callback(cb, &via_user);
+
+        // Nothing up: nothing announced.
+        m.update(1.0f / 60.0f);
+        assert(fires == 0 && "an idle frame raises no event");
+
+        // Raised but not yet observed: the event belongs to update(), so a host
+        // that calls toast() after update() pays one frame of latency rather than
+        // getting an event that depends on where in the frame it was called.
+        m.toast("out of range", 5.0f, ui::toast_edge::TOP);
+        assert(fires == 0 && "toast() alone does not raise it — update() owns it");
+        m.update(1.0f / 60.0f);
+        assert(fires == 1 && "the update() that sees the appearance raises it");
+        assert(via_user == 1 && "the userdata pointer reached the callback");
+        assert(last_edge == ui::toast_edge::TOP && "the edge came through");
+        assert(m.toast_just_appeared() && "and the flag is readable this frame");
+
+        // Consume-once: the next frame with the same toast still up is silent.
+        m.update(1.0f / 60.0f);
+        assert(fires == 1 && "holding the same message up does not re-announce it");
+        assert(!m.toast_just_appeared() && "the flag cleared itself");
+
+        // A replacement — the same toast() call the seed validator makes every
+        // frame while the field stays invalid. This is the group that would make
+        // a notification tick once per keystroke.
+        for (int i = 0; i < 30; ++i) {
+            m.toast("out of range", 5.0f, ui::toast_edge::TOP);
+            m.update(1.0f / 60.0f);
+        }
+        assert(fires == 1 && "a REPLACEMENT toast is silent — 30 re-reports, 1 sound");
+
+        // Hiding is not an event.
+        m.toast_hide();
+        m.update(1.0f / 60.0f);
+        assert(fires == 1 && "toast_hide() raises nothing");
+
+        // A toast raised AFTER a hide IS a fresh appearance.
+        m.toast("back in range", 5.0f);
+        m.update(1.0f / 60.0f);
+        assert(fires == 2 && "a toast after a hide announces again");
+
+        // dt == 0 must still raise it, or a paused frame swallows the event and
+        // the message appears with no sound at all.
+        m.toast_hide();
+        m.update(1.0f / 60.0f);
+        m.toast("third", 5.0f);
+        m.update(0.0f);
+        assert(fires == 3 && "update(0) still observes the appearance");
+
+        // clear() must NOT unbind: freecell and mm_07 both call it every frame.
+        m.clear();
+        m.toast("after a rebuild", 5.0f);
+        m.update(1.0f / 60.0f);
+        assert(fires == 4 && "the binding survives clear()");
+        printf("  toast appearance event: %d announcements, replacements and hides silent\n", fires);
+    }
+
+    // ─── A toast that TIMES OUT re-announces the next one ──────────
+    // toast_was_shown has to follow the expiry, not just the hide: if a toast
+    // that ran out of duration still read as "shown", the next toast() would be
+    // silent and the failure would only show up when two bad messages arrive
+    // more than 3 seconds apart.
+    {
+        static int fires = 0;
+        auto       cb    = [](ui::toast_edge, void *) noexcept { ++fires; };
+        ui::Manager m;
+        m.init();
+        m.set_toast_callback(cb, nullptr);
+
+        m.toast("first", 0.2f); // short enough to expire quickly
+        m.update(1.0f / 60.0f);
+        assert(fires == 1);
+        for (int i = 0; i < 200 && m.toast_visible(); ++i) {
+            m.update(1.0f / 60.0f);
+        }
+        assert(!m.toast_visible() && "it expired");
+
+        m.toast("second", 0.2f);
+        m.update(1.0f / 60.0f);
+        assert(fires == 2 && "the toast after an EXPIRED one is announced, not swallowed");
+        printf("  a toast after an expiry announces (%d)\n", fires);
+    }
+
+    // ─── Toast: null text is a no-op, and clear() kills a live one ───
+    {
+        ui::Manager m;
+        m.init();
+        static const char *kMsg = "hi";
+        m.toast(nullptr, 3.0f);
+        assert(!m.toast_visible()); // a null message must not leave a live toast
+
+        m.toast(kMsg, 0.0f);
+        for (int i = 0; i < 10; ++i) {
+            m.update(1.0f / 60.0f);
+        }
+        assert(m.toast_visible());
+        // The toast is NOT per-widget, so dropping the pool says nothing about it -
+        // clear() is the only thing that can kill it, and every app that rebuilds
+        // its UI per frame calls it. Without this a message outlives the screen
+        // that raised it.
+        m.clear();
+        assert(!m.toast_visible());
+        assert(m.toast_progress() == 0.0f);
     }
 
     // ─── Tooltip: hover accumulates, dt == 0 does not, leaving resets ───
@@ -788,5 +1116,37 @@ int main() {
     assert(m.is_visible(head));
 }
 
-return 0;
+    // ─── Toast z-order canaries ────────────────────────────────────────
+    // The two cases the toast's key has to win, asked as a property of the key
+    // rather than of pixels: a toast drawn UNDER a modal dim is invisible, and a
+    // toast under a host overlay (freecell's solved browser, the win panel) is
+    // buried by whatever that overlay raises.
+    //
+    // overlay_key() is the same function render() draws with — see its comment.
+    // Re-deriving `text_layer + 1` here would pass against a render() that had
+    // been changed to something else, which is exactly the failure this catches.
+    {
+        static Renderer s_renderer; // ~2MB — the stack hazard the UI anchors document
+
+        // Canary 1: over a modal dialog's backdrop, which is at text_layer.
+        s_renderer.text_layer = 1;
+        const SortKey backdrop = ui::text_key(s_renderer);
+        const SortKey toast    = ui::overlay_key(s_renderer, 1);
+        assert(toast > backdrop && "a toast must draw above the modal backdrop");
+
+        // Canary 2: over a host overlay that RAISED text_layer. The toast's key
+        // tracks text_layer, so it follows the raise instead of landing under it —
+        // which is the whole reason the key is derived rather than constant.
+        s_renderer.text_layer = 7;
+        const SortKey host_overlay = ui::text_key(s_renderer);
+        const SortKey toast_raised = ui::overlay_key(s_renderer, 1);
+        assert(toast_raised > host_overlay && "a toast must draw above a raised host overlay");
+        assert(toast_raised > toast && "raising text_layer must move the toast with it");
+    }
+
+    // LAST statement in main(), which is the only place it belongs: a pass line
+    // printed mid-file reads as "this file passed" while later blocks are still
+    // about to abort.
+    printf("[ui_update] all tests passed\n");
+    return 0;
 }

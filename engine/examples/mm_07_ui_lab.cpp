@@ -227,6 +227,34 @@ static f32 NowMs() noexcept {
 }
 
 // ─── Callbacks ───────────────────────────────────────────────────────
+// Toast edge per button. The four edge buttons are created consecutively at the
+// bottom of BuildTextFields, so their ids are consecutive too - and taking the edge
+// from the id rather than from four near-identical callbacks is the point: four
+// copies of "g_ui.toast(..., EDGE_n)" is four places for the message text to drift.
+//
+// user is the edge index (as a void*), which is the one thing a plain
+// function-pointer callback cannot carry.
+struct ToastArgs {
+    int         edge = 0;
+    bool        sticky = false;
+};
+static ToastArgs g_toast_args[6];
+
+void OnToastEdge(u16, void *user) noexcept {
+    const ToastArgs &a = *static_cast<const ToastArgs *>(user);
+    g_ui.toast(a.sticky ? "Sticky toast - survives until replaced" : "A transient message", a.sticky ? 0.0f : 3.0f,
+               static_cast<ui::toast_edge>(a.edge));
+}
+
+// mm_07 has no audio system, so it deliberately does NOT bind the toast
+// appearance event (g_ui.set_toast_callback). The Manager's callback defaults to
+// nullptr, which IS the no-op — an empty function bound here would be a line that
+// says nothing and has to be kept in sync with the signature. The event itself is
+// still observable on this page: g_ui.toast_just_appeared() is true for exactly
+// one update() after any of the four edge buttons, which is the contract freecell
+// binds a sound to. ui_update_tests covers the event; this page covers the four
+// edges.
+
 void OnLabButton(u16 id, void *) noexcept {
     // Map widget id -> 0..7 bucket by order of creation on button pages.
     // (Coarse but enough for a click counter HUD.)
@@ -342,26 +370,119 @@ u8 GalleryTexStyle(TextureHandle tex) noexcept {
     return g_ui.register_style(s);
 }
 
+// ─── The top strip ──────────────────────────────────────────────────
+//
+// Three numbers, in the order they depend on each other, because a display
+// cutout is part of the SCREEN on Android (g_ui_inset_top, queried by the
+// platform and 0 everywhere else) and the strip has to start below it. The nav
+// row used to sit at y=8 and the HUD text at y=8, which on a phone put both
+// underneath the camera — the buttons were there, drawn into the notch, and
+// the top two HUD lines were gone.
+//
+// g_ui_inset_top is read rather than passed because it is the same global
+// freecell reads (ui_top_inset()) and it is 0 on every platform that has no
+// cutout, so the desktop layout is unchanged by construction rather than by a
+// branch.
+static constexpr f32 kNavBtnH   = 36.0f;
+static constexpr f32 kNavBtnW   = 108.0f;
+static constexpr f32 kTopMargin = 8.0f;
+
+// The camera sits between these two, not above them.
+static f32 NavTop() noexcept { return g_ui_inset_top + kTopMargin; }
+// HUD text starts below the nav row, which is why this is not just the inset.
+static f32 HudTop() noexcept { return NavTop() + kNavBtnH + kTopMargin; }
+
 // Persistent page nav: rebuilt with every page (BuildPage clears the pool).
-// Top-right of the window; HUD text lines start at x=10 and are short.
+//
+// < Prev on the far LEFT and Next > on the far RIGHT, both on the cutout's own
+// row, so the camera sits between them. That is deliberate rather than a
+// layout compromise: the platform exposes the cutout's DEPTH and not its left
+// and right edges (query_cutout_inset_top returns one number), so any attempt
+// to place a button at "the left of the camera" would need a second number the
+// engine does not have — and a fixed guess at where a notch is would be wrong
+// on every device that is not this one. Opposite ends of the row need nothing
+// and clear every cutout shape.
+//
+// On the desktop this is the same two buttons in the same places: the strip is
+// 36 + 16 tall either way and both ends are inside a 900pt window.
 void BuildNav() noexcept {
-    u8 st = GalleryStyle();
-    f32 bx = g_view_w - 232.0f;
-    if (bx < 8.0f) bx = 8.0f;
-    g_ui.button(bx, 8.0f, 108.0f, 36.0f, "< Prev", palette::BUTTON_BG, palette::WHITE, OnPrevPage, UINT16_MAX, 0.36f, st);
-    g_ui.button(bx + 116.0f, 8.0f, 108.0f, 36.0f, "Next >", palette::BUTTON_BG, palette::WHITE, OnNextPage, UINT16_MAX, 0.36f, st);
+    u8         st = GalleryStyle();
+    const f32  y  = NavTop();
+    const f32  x0 = kTopMargin;
+    const f32  x1 = g_view_w - kNavBtnW - kTopMargin;
+    g_ui.button(x0, y, kNavBtnW, kNavBtnH, "< Prev", palette::BUTTON_BG, palette::WHITE, OnPrevPage, UINT16_MAX, 0.36f, st);
+    g_ui.button(x1, y, kNavBtnW, kNavBtnH, "Next >", palette::BUTTON_BG, palette::WHITE, OnNextPage, UINT16_MAX, 0.36f, st);
 }
 
-// HUD reserves the top strip; pages live below it (no overlap).
+// HUD reserves the top strip; pages live below it (no overlap). Both are
+// FUNCTIONS now, not constants: PageY() was a fixed 210 that happened to clear a
+// top strip measured from y=0, so on a phone the strip grew by the cutout depth
+// and the page under it moved down by nothing.
 static constexpr f32 HUD_H  = 196.0f;
-static constexpr f32 PAGE_Y = 210.0f;
+static f32          PageY() noexcept { return HudTop() + HUD_H; }
 
 // ─── Page builders ───────────────────────────────────────────────────
 // Modal demo state: the root id of the open dialog, or UINT16_MAX. Kept as a
 // file global (not a widget field) because the engine scopes input by it.
 static u16 s_modal_root = UINT16_MAX;
-static void OnLabOpenModal(u16, void *) noexcept { s_modal_root = 1; } // any non-invalid id
-static void OnLabCloseModal(u16, void *) noexcept { s_modal_root = UINT16_MAX; }
+// A click cannot rebuild the page itself: the callbacks run INSIDE handle(), which
+// is walking the pool, and BuildPage() starts with g_ui.clear() - recycling every
+// widget id the rest of handle() is about to read. So the click only raises a flag
+// and the rebuild happens at the top of the next update, before handle().
+//
+// This is why the modal demo did nothing when clicked: OnLabOpenModal set
+// s_modal_root, and the ONLY thing that ever called BuildPanelsLabels() was
+// SetMode() - reachable from a key press or the Prev/Next buttons, never from a
+// tap. The dialog had never once been openable by click.
+static bool s_modal_dirty = false;
+
+// ── TextField modes + length validation demo (D5) ────────────────────
+// The two fields the demo drives, and the latch that makes the validation fire on
+// the TRANSITION rather than every frame.
+static u16 s_seed_field = UINT16_MAX; // NUMERIC + clear X, validated live
+static u16 s_text_field = UINT16_MAX; // plain TEXT + clear X, nothing validated
+static bool s_seed_invalid = false;
+
+// The freecell rule, verbatim: a seed is a number, so NUMERIC already refuses
+// letters; the field is full width at 10 digits, and only then is the RANGE worth
+// checking (the largest 9-digit value, 999,999,999, is below the limit). Finding
+// that out by pressing Start is a worse answer than being told while the finger is
+// still on the digits.
+//
+// This is APP-side validation on purpose and it is the point of the demo: the
+// engine's NUMERIC mode answers "is this a digit", and every app still owes the
+// "is this a legal VALUE" half.
+//
+// THE SECOND COPY of this rule in the repo. The first is freecell's
+// ValidateSeedField() in apps/freecell/game/mm_entry_game.hpp, and mm_07 cannot
+// include freecell headers - so the rule is pinned by a test in
+// new_game_dialog_tests instead of shared, and if one changes without the other
+// that test is where it shows.
+static bool SeedValueOk(const char *t) noexcept {
+    static constexpr u32 kMax = 2147483647u; // = kMaxDealSeed, freecell's
+    u8                   n     = 0;
+    for (const char *q = t; *q != '\0'; ++q) {
+        if (*q >= '0' && *q <= '9') {
+            ++n;
+        }
+    }
+    if (n < 10) {
+        return true;
+    }
+    u32 v = 0;
+    for (const char *q = t; *q != '\0'; ++q) {
+        v = v * 10 + static_cast<u32>(*q - '0');
+    }
+    return v <= kMax;
+}
+static void OnLabOpenModal(u16, void *) noexcept {
+    s_modal_root  = 1; // any non-invalid id
+    s_modal_dirty = true;
+}
+static void OnLabCloseModal(u16, void *) noexcept {
+    s_modal_root  = UINT16_MAX;
+    s_modal_dirty = true;
+}
 
 // Tab strip demo state: the app swaps its own content (the engine knows
 // nothing about pages - the strip is only a row of cells + one active index).
@@ -381,7 +502,7 @@ static void OnLabTab(u16, f32 tab) noexcept {
 void BuildPanelsLabels() noexcept {
     u8 st = GalleryStyle();
     u8 bgst = GalleryBgStyle();
-    u16 root = g_ui.panel(40.0f, PAGE_Y, g_view_w - 80.0f, g_view_h - PAGE_Y - 20.0f, palette::PANEL, UINT16_MAX, bgst);
+    u16 root = g_ui.panel(40.0f, PageY(), g_view_w - 80.0f, g_view_h - PageY() - 20.0f, palette::PANEL, UINT16_MAX, bgst);
     g_ui.label(20.0f, 12.0f, "Panels + Labels (D1)", palette::WHITE, 0.50f, root);
     g_ui.label(20.0f, 44.0f, "nested panel below has WF_CLIP", palette::GRAY_LIGHT, 0.36f, root);
     u16 inner = g_ui.panel(20.0f, 76.0f, 300.0f, 150.0f, 0xFF3A3A4A, root, st);
@@ -418,14 +539,46 @@ void BuildPanelsLabels() noexcept {
     g_ui.button(20.0f, 240.0f, 190.0f, 40.0f, "Open modal dialog", palette::BLUE_DARK, palette::WHITE, OnLabOpenModal, root, 0.40f, st);
     g_ui.label(220.0f, 246.0f, "backdrop, focus trap, Back / outside = close", palette::GRAY_LIGHT, 0.32f, root);
     if (s_modal_root != UINT16_MAX) {
-        u16 dlg = g_ui.panel(260.0f, 120.0f, 320.0f, 220.0f, 0xFF33334A, UINT16_MAX, st);
+        // 250 tall, not 220: set_clip(true) above means the children are clipped to
+        // the panel's CONTENT rect, which insets by border_width * frame.h - 0.04 * 220
+        // is 8.8px a side, so content ends at y=211. The canary caption sat at 202 and
+        // was cut off mid-glyph. Growing the panel is the fix that does not move the
+        // rows above it.
+        // Centred on the VIEW, not hardcoded. It was 260,120 in a 1000x900 window,
+        // which put it 80px left and 205px high of centre - a dialog is the one thing
+        // on the page that is expected to be centred, and the page resizes.
+        constexpr f32 kDlgW = 320.0f, kDlgH = 270.0f;
+        u16          dlg    = g_ui.panel((g_view_w - kDlgW) * 0.5f, (g_view_h - kDlgH) * 0.5f, kDlgW, kDlgH, 0xFF33334A, UINT16_MAX, st);
         g_ui.set_clip(dlg, true);
         g_ui.label(16.0f, 12.0f, "Modal dialog", palette::WHITE, 0.44f, dlg);
         g_ui.label(16.0f, 40.0f, "Tab stays in here; outside is dead", palette::GRAY_LIGHT, 0.32f, dlg);
-        g_ui.button(16.0f, 80.0f, 130.0f, 36.0f, "Confirm", palette::TOGGLE_GREEN, palette::WHITE, OnLabButton, dlg, 0.36f, st);
-        g_ui.button(170.0f, 80.0f, 130.0f, 36.0f, "Cancel", 0xFFB85C5C, palette::WHITE, OnLabCloseModal, dlg, 0.36f, st);
-        g_ui.toggle(16.0f, 130.0f, 80.0f, 28.0f, "focusable", palette::TOGGLE_GREEN, palette::GRAY_DARK, palette::WHITE, true, OnLabButton, dlg, st);
-        g_ui.slider(120.0f, 130.0f, 180.0f, 24.0f, 0.6f, OnLabSlider, dlg, st);
+        g_ui.button(16.0f, 78.0f, 130.0f, 36.0f, "Confirm", palette::TOGGLE_GREEN, palette::WHITE, OnLabButton, dlg, 0.36f, st);
+        g_ui.button(170.0f, 78.0f, 130.0f, 36.0f, "Cancel", 0xFFB85C5C, palette::WHITE, OnLabCloseModal, dlg, 0.36f, st);
+        // The toggle's label is drawn at frame.x + frame.w + 6, i.e. x=102. The slider
+        // used to start at x=120 on the SAME row, and a label at the default scale of
+        // 1.0 is ~100px wide, so "focusable" ran straight across the slider. Two fixes
+        // at once: the slider gets its own row, and the label gets the scale parameter
+        // that toggle/checkbox/radiobox grew for exactly this.
+        g_ui.toggle(16.0f, 128.0f, 80.0f, 28.0f, "focusable", palette::TOGGLE_GREEN, palette::GRAY_DARK, palette::WHITE, true, OnLabButton, dlg, st, 0.34f);
+        // ── The toast-over-modal CANARY ──────────────────────────
+        // This is the one z-order case that fails SILENTLY, and it is why the toast
+        // draws at sort key text_layer + 1 rather than "the same key as the
+        // backdrop, drawn later":
+        //
+        //   the modal backdrop is four quads flushed at ui::text_key(r), i.e. at
+        //   text_layer, in Pass 3.5. A toast panel flushed at the DEFAULT key (0)
+        //   is below it whenever text_layer is 0 - which is correct today only
+        //   because the toast is recorded later in the same pass and the sort is
+        //   stable. Raise text_layer (which every overlay host does) and the
+        //   backdrop moves to 1 while the panel stays at 0: the message appears as
+        //   TEXT FLOATING WITH NO PANEL UNDER IT.
+        //
+        // Open the modal, press this, and the toast must land ON the dim.
+        g_toast_args[5].edge = static_cast<int>(ui::toast_edge::BOTTOM);
+        g_ui.button(16.0f, 198.0f, 288.0f, 34.0f, "Toast over this modal", palette::BLUE_DARK, palette::WHITE, OnToastEdge, dlg, 0.34f, st, 0,
+                    nullptr, &g_toast_args[5]);
+        g_ui.label(16.0f, 234.0f, "canary: it must sit ON the dim, not under it", palette::GRAY_LIGHT, 0.26f, dlg);
+        g_ui.slider(16.0f, 164.0f, 288.0f, 24.0f, 0.6f, OnLabSlider, dlg, st);
         g_ui.begin_modal(dlg, OnLabCloseModal, nullptr);
         s_modal_root = dlg;
     }
@@ -434,7 +587,7 @@ void BuildPanelsLabels() noexcept {
 void BuildButtons() noexcept {
     u8 st = GalleryStyle();
     u8 bgst = GalleryBgStyle();
-    u16 root = g_ui.panel(40.0f, PAGE_Y, g_view_w - 80.0f, g_view_h - PAGE_Y - 20.0f, palette::PANEL, UINT16_MAX, bgst);
+    u16 root = g_ui.panel(40.0f, PageY(), g_view_w - 80.0f, g_view_h - PageY() - 20.0f, palette::PANEL, UINT16_MAX, bgst);
     g_ui.label(20.0f, 10.0f, "Buttons (D2) - hover/press/click", palette::WHITE, 0.50f, root);
     g_ui.button(20.0f, 40.0f, 160.0f, 44.0f, "Normal", palette::BUTTON_BG, palette::WHITE, OnLabButton, root, 0.40f, st);
     g_ui.button(200.0f, 40.0f, 160.0f, 44.0f, "Accent", palette::BLUE_DARK, palette::WHITE, OnLabButton, root, 0.40f, st);
@@ -532,7 +685,7 @@ static void OnLabRichRow(u16, Renderer &r, SpriteBatch &b, f32 row_x, f32 row_y,
 void BuildListboxes() noexcept {
     u8 st = GalleryStyle();
     u8 bgst = GalleryBgStyle();
-    u16 root = g_ui.panel(40.0f, PAGE_Y, g_view_w - 80.0f, g_view_h - PAGE_Y - 20.0f, palette::PANEL, UINT16_MAX, bgst);
+    u16 root = g_ui.panel(40.0f, PageY(), g_view_w - 80.0f, g_view_h - PageY() - 20.0f, palette::PANEL, UINT16_MAX, bgst);
     g_ui.label(20.0f, 12.0f, "Listboxes (D0) - tap select, wheel/drag scroll", palette::WHITE, 0.50f, root);
     // Item storage is static: the widget keeps pointers, caller owns memory.
     static const char* deals[] = {
@@ -570,8 +723,21 @@ void BuildListboxes() noexcept {
     };
     u16 rich = g_ui.listbox(280.0f, 310.0f, 300.0f, 100.0f, rows, 12, OnLabListbox, root, st);
     g_ui.set_row_renderer(rich, OnLabRichRow, nullptr);
+    // APP-DECLARED ROW HEIGHT, next to the derived list on the left of this
+    // page so the two can be compared without changing pages.
+    //
+    // row_h normally derives from theme.font_scale, which is the toolkit's ONLY
+    // UI scale. An app can have another one - freecell scales every dialog by
+    // content_scale while its Theme stays at 1.0 - and then its rows are
+    // inexpressible. Only row_h and what derives from it move; text_scale stays
+    // the theme's, which is why the 0.34 the row callback draws with is unchanged
+    // and the rows simply get more air.
+    g_ui.set_listbox_row_h(rich, 48.0f);
     g_ui.label(20.0f, 262.0f, "right: custom row renderer", palette::GRAY_LIGHT, 0.32f, root);
     g_ui.label(20.0f, 284.0f, "(engine keeps scroll + select)", palette::GRAY_LIGHT, 0.32f, root);
+    g_ui.label(600.0f, 310.0f, "row_h", palette::GRAY_LIGHT, 0.30f, root);
+    g_ui.label(600.0f, 334.0f, "48 set", palette::TOGGLE_GREEN, 0.30f, root);
+    g_ui.label(600.0f, 358.0f, "left: derived", palette::GRAY_LIGHT, 0.30f, root);
 
     // set_text_align: heading centred, stat right-aligned. Both pin their
     // width - a label is AUTO_W, so an unpinned box hugs the text and every
@@ -594,7 +760,7 @@ void BuildListboxes() noexcept {
 void BuildComboboxes() noexcept {
     u8 st = GalleryStyle();
     u8 bgst = GalleryBgStyle();
-    u16 root = g_ui.panel(40.0f, PAGE_Y, g_view_w - 80.0f, g_view_h - PAGE_Y - 20.0f, palette::PANEL, UINT16_MAX, bgst);
+    u16 root = g_ui.panel(40.0f, PageY(), g_view_w - 80.0f, g_view_h - PageY() - 20.0f, palette::PANEL, UINT16_MAX, bgst);
     g_ui.label(20.0f, 12.0f, "Comboboxes (C) - tap field, pick row, Esc closes", palette::WHITE, 0.50f, root);
     // Item storage is static: the widget keeps pointers, caller owns memory.
     static const char* deals[] = {
@@ -642,7 +808,7 @@ void BuildComboboxes() noexcept {
 void BuildRadioboxes() noexcept {
     u8 st = GalleryStyle();
     u8 bgst = GalleryBgStyle();
-    u16 root = g_ui.panel(40.0f, PAGE_Y, g_view_w - 80.0f, g_view_h - PAGE_Y - 20.0f, palette::PANEL, UINT16_MAX, bgst);
+    u16 root = g_ui.panel(40.0f, PageY(), g_view_w - 80.0f, g_view_h - PageY() - 20.0f, palette::PANEL, UINT16_MAX, bgst);
     g_ui.label(20.0f, 12.0f, "Radioboxes (O) - one selected per group", palette::WHITE, 0.50f, root);
     // Group 1: difficulty (Easy pre-selected). Group 2: theme (System pre-selected).
     g_ui.label(20.0f, 46.0f, "Difficulty", palette::GRAY_LIGHT, 0.40f, root);
@@ -666,7 +832,7 @@ static u16 s_anim_c1  = UINT16_MAX;
 void BuildProgressbars() noexcept {
     u8 st = GalleryPillStyle(); // pill: the bars' radius normalizes against their short axis
     u8 bgst = GalleryBgStyle();
-    u16 root = g_ui.panel(40.0f, PAGE_Y, g_view_w - 80.0f, g_view_h - PAGE_Y - 20.0f, palette::PANEL, UINT16_MAX, bgst);
+    u16 root = g_ui.panel(40.0f, PageY(), g_view_w - 80.0f, g_view_h - PageY() - 20.0f, palette::PANEL, UINT16_MAX, bgst);
     g_ui.label(20.0f, 12.0f, "Progressbars (P) - display-only, values ease via update()", palette::WHITE, 0.50f, root);
     g_ui.set_clip(root, true); // a page is a container: its children clip to it
     g_ui.progressbar(20.0f, 52.0f, 400.0f, 28.0f, 0.0f, root, 1.0f, st);
@@ -742,7 +908,7 @@ void BuildProgressbars() noexcept {
 void BuildTogglesChecks() noexcept {
     u8 st = GalleryPillStyle(); // a pill toggle wants corner_r 0.5
     u8 bgst = GalleryBgStyle();
-    u16 root = g_ui.panel(40.0f, PAGE_Y, g_view_w - 80.0f, g_view_h - PAGE_Y - 20.0f, palette::PANEL, UINT16_MAX, bgst);
+    u16 root = g_ui.panel(40.0f, PageY(), g_view_w - 80.0f, g_view_h - PageY() - 20.0f, palette::PANEL, UINT16_MAX, bgst);
     g_ui.label(20.0f, 12.0f, "Toggles + Checkboxes (D3)", palette::WHITE, 0.50f, root);
     // NOTE: toggle()/checkbox() have no scale param; text size follows the
     // pool scale field (default 1.0), like freecell does for shape.
@@ -762,7 +928,7 @@ void BuildTogglesChecks() noexcept {
 void BuildSliders() noexcept {
     u8 st = GalleryPillStyle(); // pill: a bar's radius normalizes against its short axis
     u8 bgst = GalleryBgStyle();
-    u16 root = g_ui.panel(40.0f, PAGE_Y, g_view_w - 80.0f, g_view_h - PAGE_Y - 20.0f, palette::PANEL, UINT16_MAX, bgst);
+    u16 root = g_ui.panel(40.0f, PageY(), g_view_w - 80.0f, g_view_h - PageY() - 20.0f, palette::PANEL, UINT16_MAX, bgst);
     g_ui.label(20.0f, 12.0f, "Sliders (D4) - drag the thumbs", palette::WHITE, 0.50f, root);
     g_ui.slider(20.0f, 56.0f, 400.0f, 28.0f, 0.0f, OnLabSlider, root, st);
     g_ui.slider(20.0f, 100.0f, 400.0f, 28.0f, 0.5f, OnLabSlider, root, st);
@@ -799,9 +965,14 @@ void BuildSliders() noexcept {
 }
 
 void BuildTextFields() noexcept {
+    // The per-frame check fires on a TRANSITION, so its latch has to be re-armed
+    // here or a rebuilt page keeps the old value: come back from another page with an
+    // invalid seed and the toast can never re-raise, because nothing changed.
+    s_seed_invalid = false;
+
     u8 st = GalleryStyle();
     u8 bgst = GalleryBgStyle();
-    u16 root = g_ui.panel(40.0f, PAGE_Y, g_view_w - 80.0f, g_view_h - PAGE_Y - 20.0f, palette::PANEL, UINT16_MAX, bgst);
+    u16 root = g_ui.panel(40.0f, PageY(), g_view_w - 80.0f, g_view_h - PageY() - 20.0f, palette::PANEL, UINT16_MAX, bgst);
     g_ui.label(20.0f, 12.0f, "TextFields (D5) - click then type", palette::WHITE, 0.50f, root);
     // 0.52, not the 1.0 default: a field is a FIXED-height box and the value is
     // drawn at the widget's own scale, so 1.0 in a 40pt box is a text box with
@@ -822,6 +993,60 @@ void BuildTextFields() noexcept {
     g_ui.label(20.0f, 250.0f, "Tab commits and moves focus (Enter commits", palette::GRAY_LIGHT, 0.30f, root);
     g_ui.label(20.0f, 272.0f, "in place, Escape reverts), cursor blinks", palette::GRAY_LIGHT, 0.30f, root);
     g_ui.label(20.0f, 294.0f, "via cursor_timer - Up/Down tunes the value", palette::GRAY_LIGHT, 0.30f, root);
+
+    // ── Input modes and live validation ──────────────────────────
+    // The four combinations a field can be in, in one column so the point is the
+    // MATRIX and not any one row: mode (digits or not) x clear button (or not).
+    g_ui.label(20.0f, 330.0f, "Input modes + live validation", palette::WHITE, 0.40f, root);
+
+    // NUMERIC + clear X. The freecell seed field, exactly.
+    g_ui.label(20.0f, 368.0f, "NUMERIC + X", palette::GRAY_LIGHT, 0.30f, root);
+    // Pre-filled with a value that is ALREADY out of range, on purpose. Every new
+    // feature on this page is invisible at rest - the X only draws on non-empty text
+    // and the toast only fires on a transition - so an empty field would leave the
+    // page looking exactly as it did before this change. Same rule the rest of the
+    // lab follows: the page has to contain the case.
+    s_seed_field = g_ui.textfield(180.0f, 362.0f, 240.0f, 40.0f, "2147483648", palette::GRAY_1D1D1D, palette::WHITE, root, st, vscale);
+    g_ui.set_text_input(s_seed_field, ui::text_input_mode::NUMERIC);
+    g_ui.set_textfield_clear(s_seed_field, true);
+    g_ui.label(432.0f, 372.0f, "digits only; checks at 10 digits", palette::GRAY_MID, 0.28f, root);
+
+    // TEXT + clear X: the same clear affordance with no mode, so the two differ in
+    // exactly one thing.
+    g_ui.label(20.0f, 416.0f, "TEXT + X", palette::GRAY_LIGHT, 0.30f, root);
+    // Filled too, so the row named "+ X" actually shows an X. An empty field in that
+    // row would advertise the feature and then not display it.
+    s_text_field = g_ui.textfield(180.0f, 410.0f, 240.0f, 40.0f, "letters & symbols", palette::GRAY_1D1D1D, palette::WHITE, root, st, vscale);
+    g_ui.set_text_input(s_text_field, ui::text_input_mode::TEXT);
+    g_ui.set_textfield_clear(s_text_field, true);
+    g_ui.label(432.0f, 420.0f, "anything; same one-tap clear", palette::GRAY_MID, 0.28f, root);
+
+    // Plain, to show what every other field in this toolkit is by default: no mode
+    // worth naming and no X.
+    g_ui.label(20.0f, 464.0f, "default", palette::GRAY_LIGHT, 0.30f, root);
+    g_ui.textfield(180.0f, 458.0f, 240.0f, 40.0f, "no X", palette::GRAY_1D1D1D, palette::WHITE, root, st, vscale);
+    g_ui.label(432.0f, 468.0f, "TEXT, no X - unchanged default", palette::GRAY_MID, 0.28f, root);
+
+    // ── Toast, from all four edges ───────────────────────────────
+    // Buttons rather than a timed demo: the toast's whole contract is
+    // show/hide/slide, and a script cannot show the middle of it. The modal canary
+    // lives on the Panels page (D1), where begin_modal() is.
+    g_ui.label(20.0f, 512.0f, "Toast (lasts until replaced)", palette::WHITE, 0.40f, root);
+    // The four edges, then a sticky one. `edge` is the toast_edge VALUE, so it
+    // maps straight onto the enum rather than through a lookup.
+    static const int kEdgeOrder[4] = {static_cast<int>(ui::toast_edge::BOTTOM), static_cast<int>(ui::toast_edge::TOP),
+                                      static_cast<int>(ui::toast_edge::LEFT), static_cast<int>(ui::toast_edge::RIGHT)};
+    const char *const kEdgeName[4] = {"from bottom", "from top", "from left", "from right"};
+    for (int i = 0; i < 4; ++i) {
+        g_toast_args[i].edge = kEdgeOrder[i];
+        g_ui.button(20.0f + static_cast<f32>(i) * 160.0f, 540.0f, 150.0f, 34.0f, kEdgeName[i], palette::BLUE_DARK, palette::WHITE,
+                    OnToastEdge, root, 0.34f, st, 0, nullptr, &g_toast_args[i]);
+    }
+    g_toast_args[4].edge   = static_cast<int>(ui::toast_edge::BOTTOM);
+    g_toast_args[4].sticky = true;
+    g_ui.button(660.0f, 540.0f, 150.0f, 34.0f, "sticky", palette::BLUE_DARK, palette::WHITE, OnToastEdge, root, 0.34f, st, 0, nullptr,
+                &g_toast_args[4]);
+    g_ui.label(20.0f, 582.0f, "that seed is out of range: toast already live", palette::GRAY_LIGHT, 0.28f, root);
 }
 
 void BuildStylesShapes() noexcept {
@@ -882,7 +1107,7 @@ void BuildStylesShapes() noexcept {
         ui::gradient_style(g_r.make_gradient_texture(8, 64, 0xFF33334A, 0xFF6A6AA0, true), g_corner));
 
     u8 bgst0 = GalleryBgStyle();
-    u16 root = g_ui.panel(40.0f, PAGE_Y, g_view_w - 80.0f, g_view_h - PAGE_Y - 20.0f, palette::PANEL, UINT16_MAX, bgst0);
+    u16 root = g_ui.panel(40.0f, PageY(), g_view_w - 80.0f, g_view_h - PageY() - 20.0f, palette::PANEL, UINT16_MAX, bgst0);
 
     // ── Layout: five caption + row bands, laid out top to bottom ────────
     // Every band is (caption, then widgets) and the numbers below are the ONLY
@@ -946,13 +1171,13 @@ void BuildLayout() noexcept {
     // root-level; nested containers under plain panels work too now.
     u8 st = GalleryStyle();
     u8 bgst = GalleryBgStyle();
-    u16 bg = g_ui.panel(40.0f, PAGE_Y, g_view_w - 80.0f, g_view_h - PAGE_Y - 20.0f, palette::PANEL, UINT16_MAX, bgst);
+    u16 bg = g_ui.panel(40.0f, PageY(), g_view_w - 80.0f, g_view_h - PageY() - 20.0f, palette::PANEL, UINT16_MAX, bgst);
     g_ui.label(20.0f, 12.0f, "Align + Percent + Margin (D7)", palette::WHITE, 0.50f, bg);
     g_ui.label(20.0f, 44.0f, "rows: Start / Center / End + 30/40/20% + margins", palette::GRAY_LIGHT, 0.36f, bg);
 
     f32 row_w = g_view_w - 80.0f - 40.0f; // inside bg (20px inset each side)
     f32 row_x = 40.0f + 20.0f;
-    f32 row_y = PAGE_Y + 84.0f;
+    f32 row_y = PageY() + 84.0f;
     auto demo_row = [&](const char *b1, const char *b2, const char *b3, u8 main_a, u8 cross_a) noexcept {
         u16 row = g_ui.panel(row_x, row_y, row_w, 56.0f, 0xFF222233, UINT16_MAX, st);
         g_ui.set_layout(row, 1, 8, static_cast<u8>(g_spacing));
@@ -983,7 +1208,7 @@ void BuildLayout() noexcept {
 void BuildFocusNav() noexcept {
     u8 st = GalleryStyle();
     u8 bgst = GalleryBgStyle();
-    u16 root = g_ui.panel(40.0f, PAGE_Y, g_view_w - 80.0f, g_view_h - PAGE_Y - 20.0f, palette::PANEL, UINT16_MAX, bgst);
+    u16 root = g_ui.panel(40.0f, PageY(), g_view_w - 80.0f, g_view_h - PageY() - 20.0f, palette::PANEL, UINT16_MAX, bgst);
     g_ui.label(20.0f, 12.0f, "Focus nav (D8) - Tab / Shift-Tab", palette::WHITE, 0.50f, root);
     // Row 1: toggle label draws right of its track — keep the space right
     // of it empty so it never overlaps the textfield (was: label ran into
@@ -1057,7 +1282,7 @@ void BuildFocusNav() noexcept {
 void BuildScrollviews() noexcept {
     u8 st = GalleryStyle();
     u8 bgst = GalleryBgStyle();
-    u16 root = g_ui.panel(40.0f, PAGE_Y, g_view_w - 80.0f, g_view_h - PAGE_Y - 20.0f, palette::PANEL, UINT16_MAX, bgst);
+    u16 root = g_ui.panel(40.0f, PageY(), g_view_w - 80.0f, g_view_h - PageY() - 20.0f, palette::PANEL, UINT16_MAX, bgst);
     g_ui.label(20.0f, 12.0f, "ScrollViews (V)", palette::WHITE, 0.50f, root);
     g_ui.label(20.0f, 46.0f, "content coords are independent of the window", palette::GRAY_LIGHT, 0.30f, root);
 
@@ -1221,7 +1446,7 @@ static void OnLabTreeRow(u16, Renderer &r, SpriteBatch &b, f32 row_x, f32 row_y,
 void BuildTreeviews() noexcept {
     u8 st = GalleryStyle();
     u8 bgst = GalleryBgStyle();
-    u16 root = g_ui.panel(40.0f, PAGE_Y, g_view_w - 80.0f, g_view_h - PAGE_Y - 20.0f, palette::PANEL, UINT16_MAX, bgst);
+    u16 root = g_ui.panel(40.0f, PageY(), g_view_w - 80.0f, g_view_h - PageY() - 20.0f, palette::PANEL, UINT16_MAX, bgst);
     g_ui.label(20.0f, 12.0f, "TreeView (T) - tap the triangle, or tap a row", palette::WHITE, 0.50f, root);
 
     // Array order IS row order (siblings are a contiguous index range), so the
@@ -1265,7 +1490,7 @@ void BuildTreeviews() noexcept {
 void BuildAccordions() noexcept {
     u8 st = GalleryStyle();
     u8 bgst = GalleryBgStyle();
-    u16 root = g_ui.panel(40.0f, PAGE_Y, g_view_w - 80.0f, g_view_h - PAGE_Y - 20.0f, palette::PANEL, UINT16_MAX, bgst);
+    u16 root = g_ui.panel(40.0f, PageY(), g_view_w - 80.0f, g_view_h - PageY() - 20.0f, palette::PANEL, UINT16_MAX, bgst);
     g_ui.label(20.0f, 12.0f, "Accordions (A) - tap a header", palette::WHITE, 0.50f, root);
 
     struct Section {
@@ -1282,7 +1507,7 @@ void BuildAccordions() noexcept {
         // own flag leaves a checkbox floating where the section used to be.
         // This section is the only thing that makes that visible - before it,
         // every section held buttons and Pass 1 already tested is_visible().
-        // It sits SECOND on purpose: PAGE_Y=210 leaves 410pt of page, so the
+        // It sits SECOND on purpose: PageY()=210 leaves 410pt of page, so the
         // last section has always been off-screen and a canary there would
         // never be looked at.
         {"second section (CLOSED, with toggles)", 90.0f, false, false, true},
@@ -1290,7 +1515,7 @@ void BuildAccordions() noexcept {
         // Closed proves an empty clip draws nothing; open proves the clip is a
         // real boundary and not just "hide everything" - the boxes must stop at
         // the section band instead of hanging below it. Three sections, same as
-        // before: PAGE_Y=210 leaves 410pt of page and a fourth never fit.
+        // before: PageY()=210 leaves 410pt of page and a fourth never fit.
         {"third section (open, with toggles)", 110.0f, true, false, true},
     };
 
@@ -1466,7 +1691,7 @@ void BuildDatagrids() noexcept {
     u8    bgst  = GalleryBgStyle();
     const f32 gw   = 700.0f;
     const f32 gh   = 300.0f;
-    u16 root   = g_ui.panel(40.0f, PAGE_Y, g_view_w - 80.0f, g_view_h - PAGE_Y - 20.0f, palette::PANEL, UINT16_MAX, bgst);
+    u16 root   = g_ui.panel(40.0f, PageY(), g_view_w - 80.0f, g_view_h - PageY() - 20.0f, palette::PANEL, UINT16_MAX, bgst);
     g_ui.label(20.0f, 12.0f, "DataGrid (G) - tap a column title to sort", palette::WHITE, 0.50f, root);
     // Under 48 chars: Widget::text is an inline buffer and the factory strncpy's,
     // so a longer sentence is silently cut mid-word (it reads as a layout bug).
@@ -1533,7 +1758,7 @@ void BuildImages() noexcept {
     u8     st   = GalleryStyle();
     u8     bgst = GalleryBgStyle();
     const f32 pw   = g_view_w - 80.0f;
-    u16     root = g_ui.panel(40.0f, PAGE_Y, pw, g_view_h - PAGE_Y - 20.0f, palette::PANEL, UINT16_MAX, bgst);
+    u16     root = g_ui.panel(40.0f, PageY(), pw, g_view_h - PageY() - 20.0f, palette::PANEL, UINT16_MAX, bgst);
     g_ui.label(20.0f, 12.0f, "Images (I) - image(), set_material(), set_style()", palette::WHITE, 0.50f, root);
 
     // image() with no texture: the bg_color is the fill, so this is a flat quad.
@@ -1602,11 +1827,11 @@ void BuildImages() noexcept {
 
 void BuildStress() noexcept {
     u8 st = GalleryStyle();
-    u16 title_root = g_ui.panel(40.0f, PAGE_Y, g_view_w - 80.0f, 44.0f, palette::PANEL, UINT16_MAX, st);
+    u16 title_root = g_ui.panel(40.0f, PageY(), g_view_w - 80.0f, 44.0f, palette::PANEL, UINT16_MAX, st);
     g_ui.label(20.0f, 8.0f, "Stress (D9) - full pool, every widget type", palette::WHITE, 0.50f, title_root);
     // Fill the pool with a repeating mix of every widget type.
     u16 n = 0;
-    f32    x = 20.0f, y = PAGE_Y + 54.0f;
+    f32    x = 20.0f, y = PageY() + 54.0f;
     while (n < ui::Manager::MAX - 4) {
         if (x + 130.0f > g_view_w - 20.0f) {
             x = 20.0f;
@@ -1722,7 +1947,7 @@ void BuildPage(LabMode m) noexcept {
 // ─── Materials demo (key M): one quad per engine-ported lab shader ───
 void RenderMaterials(f32 dt) noexcept {
     // Title heading (this page has no widgets, so no title label).
-    g_r.draw_text(g_r.default_font, "Materials (M) - engine ports of mm_06 lab shaders", 40.0f, PAGE_Y + 2.0f, palette::WHITE,
+    g_r.draw_text(g_r.default_font, "Materials (M) - engine ports of mm_06 lab shaders", 40.0f, PageY() + 2.0f, palette::WHITE,
                   0.50f);
     // 2 rows x 3 + 1 wide quad, below the heading.
     const f32 qw = 230.0f, qh = 150.0f, gx = 250.0f, gy = 176.0f;
@@ -1799,10 +2024,28 @@ void RenderMaterials(f32 dt) noexcept {
 // ─── HUD ─────────────────────────────────────────────────────────────
 void DrawHud() noexcept {
     char buf[160];
-    f32 y = 8.0f;
+    f32 y = HudTop();
+
+    // The HUD's scale is the one number that has to fit BOTH a 900pt desktop
+    // window and a 411pt phone, and 0.34 does not: the "hot=… editing=…" line is
+    // 61 characters and about a third of it ran off the right edge, which is
+    // worse than a small number — 65535 is UINT_MAX, so the truncated tail read
+    // as "editing=65" and the ids it reports are the ones you go looking for.
+    //
+    // Measured against the widest line the HUD can produce rather than against
+    // an average, because an average fits every line but the one that is widest,
+    // and the widest is the one that gets cut. The floor keeps it legible on a
+    // very narrow screen, where wrapping is the honest answer and this lab is not
+    // going to start re-flowing its own debug output to provide it.
+    constexpr const char *kWidestHudLine = "hot=65535 active=65535 clicked=65535 focus=65535 editing=65535";
+    f32                     hud_w = 0.0f, hud_h = 0.0f;
+    g_r.measure_text(g_r.default_font, kWidestHudLine, 1.0f, hud_w, hud_h);
+    const f32 hud_scale = fminf(0.34f, hud_w > 0.0f ? (g_view_w - 20.0f) / hud_w : 0.34f);
+
     auto line = [&](const char *s) noexcept {
-        g_r.draw_text(g_r.default_font, s, 10.0f, y, palette::WHITE, 0.34f);
-        y += 20.0f;
+        g_r.draw_text(g_r.default_font, s, 10.0f, y, palette::WHITE, hud_scale);
+        y += hud_scale * 58.0f; // line pitch tracks the scale, so the strip's
+                                 // height does not change when the text shrinks
     };
     // FIRST, and reporting the PREVIOUS frame's drops (Renderer clears the counter
     // in end_frame). Both halves are load-bearing. The shared text budget is
@@ -1881,7 +2124,8 @@ void game_resize(void *, u32 w, u32 h) {
 
 void SetMode(LabMode m) noexcept {
     g_mode = m;
-    s_modal_root = UINT16_MAX; // leaving the page closes the demo dialog
+    s_modal_root  = UINT16_MAX; // leaving the page closes the demo dialog
+    s_modal_dirty = false;      // ...and drops any rebuild it had queued
     BuildPage(g_mode);
 }
 
@@ -1987,8 +2231,33 @@ void game_frame(void *, f32 dt, InputState &input) noexcept {
         }
     }
 
+    // Deferred modal rebuild (see s_modal_dirty). BEFORE handle(): handle() walks the
+    // pool, and BuildPage() clears it.
+    if (s_modal_dirty) {
+        s_modal_dirty = false;
+        BuildPage(g_mode);
+    }
+
     g_ui.handle(input);
     g_ui.update(udt);
+
+    // TextField live validation (D5). AFTER handle(), or it validates the previous
+    // frame's text - the same ordering freecell's two call sites have, for the same
+    // reason.
+    //
+    // Fires on the TRANSITION, not on the state: wired to "is it invalid" alone, it
+    // re-raised the toast on every keystroke and the message flickered.
+    if (g_mode == LabMode::TextFields && s_seed_field != UINT16_MAX && s_seed_field < g_ui.count) {
+        const bool bad = !SeedValueOk(g_ui.pool[s_seed_field].text);
+        if (bad != s_seed_invalid) {
+            s_seed_invalid = bad;
+            if (bad) {
+                g_ui.toast("Seed must be 2147483647 or less", 0.0f, ui::toast_edge::BOTTOM);
+            } else {
+                g_ui.toast_hide();
+            }
+        }
+    }
 
     // Up/Down tune the font, but ONLY when no focused widget owns them: a
     // focused ListBox/ComboBox/TabBar consumes them for selection, and a text
@@ -2119,7 +2388,20 @@ void game_frame(void *, f32 dt, InputState &input) noexcept {
     g_r.upload_camera();
 
     g_batch.reset();
+    // Raise text_layer while a modal is up, so the toast-over-modal CANARY on the
+    // Panels page is the real case instead of a coincidence.
+    //
+    // Without this the lab leaves text_layer at 0, the modal backdrop is recorded at
+    // key 0 and the toast at key 1 - and the page passes for a reason that has
+    // nothing to do with the fix. Every real overlay host does raise it (freecell
+    // does it around its own overlay block), and THAT is the arrangement where a
+    // toast flushed at the default key ends up under the dim. Only the raised state
+    // exercises it.
+    if (g_mode == LabMode::PanelsLabels && s_modal_root != UINT16_MAX) {
+        g_r.text_layer = 1;
+    }
     g_ui.render(g_r, g_batch);
+    g_r.text_layer = 0;
     f32 t3 = NowMs();
 
     // HUD backing strip: full width so long lines never clip off the rect.

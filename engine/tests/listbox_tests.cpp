@@ -96,6 +96,9 @@ int main() {
         // right-aligned row content insets by K_BAR_RATIO * row_h itself. If the
         // constant stops matching the derivation this is where it shows.
         assert(Near(mt.scrollbar_w, ui::ListboxMetrics::K_BAR_RATIO * mt.row_h));
+        // Same reason for the indent: an override moves the row height, and a
+        // theme-derived indent left behind would re-space every label.
+        assert(Near(mt.indent, ui::ListboxMetrics::K_INDENT_RATIO * mt.row_h));
         // ui_scale flows through: 2x window scale doubles everything
         ui::ListboxMetrics mt2 = ui::Manager::compute_listbox_metrics(560.0f, 50.0f, 2.0f);
         assert(Near(mt2.row_h, 61.0f));
@@ -103,6 +106,184 @@ int main() {
         // invalid inputs → zero (guarded downstream)
         ui::ListboxMetrics bad = ui::Manager::compute_listbox_metrics(0.0f, 0.0f, 0.0f);
         assert(bad.row_h == 0.0f);
+    }
+
+    // ─── Row-height override: height is the app's, text size is the theme's ───
+    //
+    // freecell scales every dialog by content_scale while its Theme stays at
+    // font_scale 1.0, so its browser rows had to be K_*_UNIT × layout_scale() and
+    // the derived row_h could not express it. The contract that makes the
+    // override usable is the SPLIT: row_h and everything derived from it move,
+    // text_scale / text_h do not.
+    {
+        const f32 kRow = 60.0f;
+        ui::ListboxMetrics base = ui::Manager::compute_listbox_metrics(280.0f, 50.0f, 1.0f);
+        ui::ListboxMetrics ov = ui::Manager::compute_listbox_metrics(280.0f, 50.0f, 1.0f, kRow);
+        assert(Near(ov.row_h, kRow));
+        assert(ov.row_h != base.row_h);                       // it really is an override
+        assert(Near(ov.text_scale, base.text_scale));         // theme's business...
+        assert(Near(ov.text_h, base.text_h));                 // ...entirely
+        assert(Near(ov.scrollbar_w, ui::ListboxMetrics::K_BAR_RATIO * kRow));
+        assert(Near(ov.indent, ui::ListboxMetrics::K_INDENT_RATIO * kRow));
+        assert(ov.visible == 4);                              // 280 / 60, floor
+
+        // 0 (and anything negative) is the derived path, BYTE-identical to the
+        // 3-arg form — that is what keeps every existing listbox, tree, grid and
+        // combobox unchanged, so it is asserted rather than assumed.
+        ui::ListboxMetrics zero = ui::Manager::compute_listbox_metrics(280.0f, 50.0f, 1.0f, 0.0f);
+        assert(Near(zero.row_h, base.row_h) && Near(zero.text_scale, base.text_scale) && Near(zero.text_h, base.text_h) &&
+               Near(zero.scrollbar_w, base.scrollbar_w) && Near(zero.indent, base.indent) && zero.visible == base.visible);
+        ui::ListboxMetrics neg = ui::Manager::compute_listbox_metrics(280.0f, 50.0f, 1.0f, -5.0f);
+        assert(Near(neg.row_h, base.row_h) && neg.visible == base.visible);
+
+        // A row TALLER than its viewport is the case that breaks naive
+        // arithmetic: floor(280/400) is 0, and a list that can show no rows
+        // cannot be scrolled to the one it has.
+        ui::ListboxMetrics tall = ui::Manager::compute_listbox_metrics(280.0f, 50.0f, 1.0f, 400.0f);
+        assert(tall.visible == 1);
+
+        // Additive: a degenerate frame still reports the height the app stated
+        // outright, and nothing the override does NOT state is invented.
+        ui::ListboxMetrics deg = ui::Manager::compute_listbox_metrics(0.0f, 0.0f, 0.0f, kRow);
+        assert(Near(deg.row_h, kRow) && deg.visible == 1 && deg.text_scale == 0.0f);
+    }
+
+    // ─── set_listbox_row_h: round-trip, clear, and the recycled slot ───
+    {
+        ui::Manager m;
+        m.init();
+        u16 lb = m.listbox(0.0f, 0.0f, 240.0f, 280.0f, kItems, kCount, NoopLb);
+        assert(m.get_listbox_row_h(lb) == 0.0f);            // factory default
+        m.set_listbox_row_h(lb, 60.0f);
+        assert(Near(m.get_listbox_row_h(lb), 60.0f));
+        m.set_listbox_row_h(lb, 0.0f);                       // the documented way back
+        assert(m.get_listbox_row_h(lb) == 0.0f);
+        m.set_listbox_row_h(lb, -1.0f);                      // and negative clears too
+        assert(m.get_listbox_row_h(lb) == 0.0f);
+
+        // The alloc() rule: clear() moves `count` and touches no per-widget
+        // array, so a recycled slot arrives holding whatever the PREVIOUS widget
+        // stored. A listbox that kept a 60px override would hand the next widget
+        // on that slot a row height nobody asked for — invisible in the pool,
+        // very visible on screen.
+        m.set_listbox_row_h(lb, 60.0f);
+        m.remove(lb);
+        u16 recycled = m.button(0.0f, 0.0f, 40.0f, 40.0f, "x", 0xFF000000, 0xFFFFFFFF, NoopCb);
+        assert(recycled == lb);                               // the same slot came back
+        assert(m.get_listbox_row_h(recycled) == 0.0f);
+    }
+
+    // ─── The override reaches the geometry the TAP uses ───
+    //
+    // A metrics value nothing reads would satisfy every assertion above and
+    // change no behaviour. These go through refresh_listbox_metrics — the SAME
+    // function render() calls — so this covers the wiring and not just the pure
+    // derivation; otherwise the override could be stored correctly and used by
+    // nothing.
+    //
+    // The derived expectation is COMPUTED from the metrics rather than written
+    // down: hand-copying it pins the derivation constants into this test, and a
+    // retune of K_TEXT_RATIO would then fail here for a reason that has nothing
+    // to do with the override.
+    {
+        ui::Manager m;
+        m.init();
+        u16 lb = m.listbox(0.0f, 0.0f, 240.0f, 280.0f, kItems, kCount, NoopLb);
+        const f32 y = 90.0f;
+        m.refresh_listbox_metrics(lb, kLineH, 1.0f);
+        const f32 derived_row_h = m.get_listbox_metrics(lb).row_h;
+        assert(derived_row_h > 0.0f);                        // the refresh ran at all
+        InputState in = FreshInput();
+        Tap(in, 100.0f, y);
+        m.handle(in);
+        assert(m.get_listbox_selected(lb) == static_cast<int>(y / derived_row_h));
+
+        constexpr f32 kRow = 60.0f;
+        m.set_listbox_row_h(lb, kRow);
+        m.refresh_listbox_metrics(lb, kLineH, 1.0f);
+        assert(Near(m.get_listbox_metrics(lb).row_h, kRow));  // the WIRING
+        m.listbox_selected[lb] = -1;
+        InputState in2 = FreshInput();
+        Tap(in2, 100.0f, y);
+        m.handle(in2);
+        // Same y, same list, different row — and NOT the row the derived height
+        // picked, or the override would not be observable at all.
+        assert(m.get_listbox_selected(lb) == static_cast<int>(y / kRow));
+        assert(m.get_listbox_selected(lb) != static_cast<int>(y / derived_row_h));
+
+        // A grid's header is one row tall, so an override has to move the HEADER
+        // with it. Getting this wrong is not "rows are taller than asked" — it is
+        // a header that no longer matches its own row grid.
+        ui::Manager g;
+        g.init();
+        u16 gr = MakeGrid(g);
+        g.refresh_listbox_metrics(gr, kLineH, 1.0f);
+        assert(Near(g.grid_header_h[gr], g.get_listbox_metrics(gr).row_h));
+        g.set_listbox_row_h(gr, kRow);
+        g.refresh_listbox_metrics(gr, kLineH, 1.0f);
+        assert(Near(g.grid_header_h[gr], kRow));
+        assert(Near(g.get_listbox_metrics(gr).row_h, kRow));
+    }
+
+    // ─── set_listbox_items: a FILTERED list changes its count ───────
+    //
+    // The gap this closes: the factory takes an item set at construction, and a
+    // list whose rows are filtered has to hand the widget a new count after
+    // every tap. Before, the only ways to do that were poking the parallel array
+    // from the app or rebuilding the whole widget — so "the list shows the
+    // filtered set" had no API and therefore no test.
+    {
+        ui::Manager m;
+        m.init();
+        u16 lb = m.listbox(0.0f, 0.0f, 240.0f, 280.0f, kItems, kCount, NoopLb);
+        m.refresh_listbox_metrics(lb, kLineH, 1.0f);
+
+        // nullptr items with a non-zero count IS the row-renderer shape: the
+        // array belongs to nobody and render_rows() must not gate on it. (It
+        // used to, and the symptom was a listbox that drew a box, a scrollbar
+        // and no rows at all.)
+        m.set_listbox_items(lb, nullptr, 4);
+        assert(m.listbox_items[lb] == nullptr && m.listbox_count[lb] == 4);
+        assert(m.get_listbox_metrics(lb).visible > 0 && "a count with no items array still measures");
+
+        // Narrow the list under a selection that is about to fall off the end.
+        m.listbox_selected[lb] = 3;
+        assert(m.get_listbox_selected(lb) == 3);
+        m.set_listbox_items(lb, nullptr, 2);
+        assert(m.get_listbox_selected(lb) == 1 && "a selection past the new end is pulled back onto it");
+
+        // …and onto nothing, when the list empties. -1 is "no selection", not 0:
+        // leaving it at 0 draws a highlight on a row that is not there.
+        m.set_listbox_items(lb, nullptr, 0);
+        assert(m.get_listbox_selected(lb) == -1 && "an empty list has no selection");
+
+        // Scroll is clamped with the count, not left pointing past the end. The
+        // scroll axis is in ROWS, so the clamp is (count - visible).
+        m.set_listbox_items(lb, nullptr, 40);
+        const int vis = m.get_listbox_metrics(lb).visible;
+        m.listbox_scroll[lb] = 999.0f;
+        m.set_listbox_items(lb, nullptr, 4); // narrower than the viewport
+        assert(m.listbox_scroll[lb] == 0.0f && "a list that fits is scrolled to the top");
+        m.listbox_scroll[lb] = 999.0f;
+        m.set_listbox_items(lb, nullptr, 40);
+        assert(m.listbox_scroll[lb] == static_cast<f32>(40 - vis) && "and one that overflows is clamped to its last row");
+
+        // Out of range: no crash, no write.
+        m.set_listbox_items(UINT16_MAX, kItems, 3);
+    }
+
+    // ─── The refresh is safe on anything, checked inside ───
+    {
+        ui::Manager m;
+        m.init();
+        u16 btn = m.button(0.0f, 0.0f, 40.0f, 40.0f, "x", 0xFF000000, 0xFFFFFFFF, NoopCb);
+        assert(btn != UINT16_MAX);
+        // Not a listbox: no-op, and it must not leave a stale cache behind that a
+        // later reader mistakes for this widget's metrics.
+        ui::ListboxMetrics before = m.get_listbox_metrics(btn);
+        m.refresh_listbox_metrics(btn, kLineH, 1.0f);
+        assert(Near(m.get_listbox_metrics(btn).row_h, before.row_h));
+        m.refresh_listbox_metrics(UINT16_MAX, kLineH, 1.0f);  // out of range, no crash
     }
 
     // ─── Factory defaults ───
@@ -325,21 +506,68 @@ int main() {
         assert(Near(m.listbox_scroll[lb], 2.0f));
     }
 
-    // ─── clear() resets the style pool (no leak → no MAX_STYLES abort) ───
+    // ─── clear() + the style pool: two separate guarantees ──────────
     {
+        // (a) Rebuilding a page re-registers its styles, and clear() is what
+        //     keeps that bounded: 70 rounds x 6 styles is 420 registrations into
+        //     a 64-slot pool, so a missing reset cannot survive this. The styles
+        //     must be distinct from each other, or the block would be vacuous.
         ui::Manager m;
         m.init();
+        constexpr int kGallery = 6;
         for (int round = 0; round < 70; ++round) {
-            // Simulate a page rebuild: clear + re-register gallery styles.
-            m.clear();
-            ui::WidgetStyle s{};
-            s.bg_tex = TextureHandle::invalid();
-            s.shape = ui::shape_type::ROUNDED_RECT;
-            m.register_style(s); // must never abort
-            assert(m.style_count == 2); // default 0 + gallery 1, stable
+            m.clear(); // the page rebuild
+            for (int k = 0; k < kGallery; ++k) {
+                ui::WidgetStyle s{};
+                s.bg_tex       = TextureHandle::invalid();
+                s.shape        = ui::shape_type::ROUNDED_RECT;
+                s.corner_r     = 0.02f * static_cast<f32>(k + 1);
+                s.border_width = (k % 2) ? 0.04f : 0.0f;
+                assert(m.register_style(s) < ui::Manager::MAX_STYLES); // never wrapped
+            }
+            assert(m.style_count == 1 + kGallery); // default + gallery, stable
             u16 lb = m.listbox(0.0f, 0.0f, 240.0f, 280.0f, kItems, kCount, NoopLb);
             assert(lb != UINT16_MAX);
         }
+    }
+    {
+        // (b) clear() puts the DEFAULT back at slot 0 - not just "the count
+        //     resets". Without it, styles[0] is whichever style the previous page
+        //     registered first, so every style_id 0 in the app - the implicit
+        //     default for any factory called without a style - resolves to a
+        //     stranger's skin. Nothing in (a) can see this: (a) only counts.
+        ui::Manager       m;
+        m.init();
+        const ui::WidgetStyle dflt = m.styles[0];
+        assert(dflt.bg_tex == TextureHandle::invalid());
+        assert(dflt.shape == ui::shape_type::ROUNDED_RECT);
+        assert(dflt.corner_r == 0.0f && dflt.border_width == 0.0f);
+
+        // Fill the pool with a page's worth of styles, then rebuild.
+        for (int round = 0; round < 3; ++round) {
+            m.clear();
+            for (int k = 0; k < 6; ++k) {
+                ui::WidgetStyle s{};
+                s.bg_tex   = TextureHandle::invalid();
+                s.shape    = ui::shape_type::ROUNDED_RECT;
+                s.corner_r = 0.05f * static_cast<f32>(k + 1); // nothing like the default
+                m.register_style(s);
+            }
+        }
+        m.clear(); // the rebuild that matters
+        assert(m.style_count == 1);
+        // Field by field, not memcmp: WidgetStyle is 104 bytes with inter-member
+        // padding, and padding bytes are unspecified. (WidgetStyle has no
+        // operator== on purpose - register_style() once de-duplicated by value and
+        // silently aliased ids that mm_07 patches in place.)
+        const ui::WidgetStyle &s0 = m.styles[0];
+        assert(s0.bg_tex == dflt.bg_tex && s0.border_color == dflt.border_color && s0.border_width == dflt.border_width);
+        assert(s0.corner_r == dflt.corner_r && s0.shape == dflt.shape && s0.ring_width == dflt.ring_width);
+        assert(s0.shadow_color == dflt.shadow_color && s0.shadow_grow == dflt.shadow_grow);
+        assert(s0.stripe_pitch == dflt.stripe_pitch && s0.stripe_color == dflt.stripe_color);
+        // And a widget built with the implicit default (style_id 0) gets it.
+        u16 lb = m.listbox(0.0f, 0.0f, 240.0f, 280.0f, kItems, kCount, NoopLb);
+        assert(lb != UINT16_MAX && m.pool[lb].style_id == 0);
     }
 
     // ─── TreeView: the flatten is the whole new idea, and it is pure ───

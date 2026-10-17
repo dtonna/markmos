@@ -46,11 +46,19 @@ struct BitmapFont {
         if (codepoint < MAX_GLYPHS_EN) {
             return &glyphs[codepoint];
         }
+        // The optional font sets are gated where they are BAKED (the renderer)
+        // and where their data is LINKED (mm_font_data.hpp), not here: whether a
+        // glyph exists is a property of the atlas this font was handed, so a
+        // zeroed entry reads as "no glyph" whatever produced it — a compiled-out
+        // font set, a codepoint Sarabun does not have, or a caller that baked
+        // its own bitmaps.
         if (codepoint >= 0x0E01 && codepoint < 0x0E01 + MAX_GLYPHS_TH) {
-            return &glyphs_th[codepoint - 0x0E01];
+            const GlyphInfo &g = glyphs_th[codepoint - 0x0E01];
+            return (g.w > 0 && g.h > 0) ? &g : nullptr;
         }
         if (codepoint >= 0x2660 && codepoint < 0x2668) {
-            return &glyphs_sym[codepoint - 0x2660];
+            const GlyphInfo &g = glyphs_sym[codepoint - 0x2660];
+            return (g.w > 0 && g.h > 0) ? &g : nullptr;
         }
         if (codepoint == 0x238C) {
             if (glyphs_sym[8].w > 0 && glyphs_sym[8].h > 0) {
@@ -83,7 +91,8 @@ struct SdfFont {
         if (codepoint >= 0x0E01 && codepoint <= 0x0E7F) {
             u32 idx = MAX_GLYPHS_EN + (codepoint - 0x0E01);
             if (idx < MAX_GLYPHS_EN + MAX_GLYPHS_TH) {
-                return &glyphs[idx];
+                const GlyphInfo &g = glyphs[idx];
+                return (g.w > 0 && g.h > 0) ? &g : nullptr;
             }
         }
         return nullptr;

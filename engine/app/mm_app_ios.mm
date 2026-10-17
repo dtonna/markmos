@@ -29,7 +29,6 @@
 MetalBackend*    g_backend       = nullptr;
 InputEventQueue* g_input_queue   = nullptr;
 InputState*      g_input_state   = nullptr;
-f32            g_content_scale = 1.0f;
 EventBus*        g_event_bus_ptr = nullptr;
 
 // ─── App callbacks ────────────────────────────────────────────────────────────
@@ -80,6 +79,7 @@ void app_quit() noexcept {
 // ─── MetalView ────────────────────────────────────────────────────────────────
 @interface MetalView : UIView {
     CFTimeInterval _lastFrameTime;
+    FramePerf     _perf;
 
     // Slot-based touch ID table — avoids hash collisions from the old touch.hash approach.
     // Maps UITouch* (weak, pointer identity) → NSNumber slot index 0..4.
@@ -226,6 +226,7 @@ void app_quit() noexcept {
         auto dt = static_cast<f32>(now - _lastFrameTime);
         _lastFrameTime = now;
         if (dt > 0.1f) dt = 0.1f;
+        _perf.record(dt * 1000.0f);
 
         if (g_input_state && g_input_queue) {
             g_input_state->process(*g_input_queue, dt);
@@ -466,6 +467,11 @@ void app_quit() noexcept {
     // Clear all touch state — fingers may not send touchesEnded if interrupted
     if (g_input_state) g_input_state->touch.reset();
     if (g_input_queue) g_input_queue->reset();
+      // The counterpart of Android's APP_CMD_PAUSE, and it fires on the same
+      // events: Home, an incoming call, a Control Center pull-down. A sound
+      // that keeps playing through any of them is audible with the phone in
+      // a pocket.
+      g_audio_system.pause();
 }
 
 - (void)applicationDidEnterBackground:(UIApplication*)application {
@@ -481,6 +487,7 @@ void app_quit() noexcept {
 
 - (void)applicationDidBecomeActive:(UIApplication*)application {
     [self.metalView resumeRendering];
+      g_audio_system.resume();
 }
 
 - (void)applicationDidReceiveMemoryWarning:(UIApplication*)application {

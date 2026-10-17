@@ -27,6 +27,16 @@ extern VulkanBackend *g_backend;
 extern InputEventQueue *g_input_queue;
 extern InputState      *g_input_state;
 extern f32            g_content_scale;
+
+// Safe-area inset for the TOP edge, in points.
+//
+// Android phones put the camera in the display itself — a notch or a punch hole
+// — and that area is still screen. A fullscreen activity draws into it, so any UI
+// anchored to y=0 (a top bar, a row of buttons) lands underneath the lens and is
+// unreadable there. Hosts report how deep the obstruction reaches; everything else
+// is 0, because a desktop window has no such thing.
+extern f32            g_ui_inset_top;
+extern f32            g_ui_inset_bottom;
 extern EventBus        *g_event_bus_ptr;
 
 // App Callbacks — Sokol-style entry point
@@ -63,6 +73,19 @@ struct AppCallbacks {
     void (*pause)(void *user_data);      // optional: called when app is backgrounded
     void (*resume)(void *user_data);     // optional: called when app is foreground
     void (*low_memory)(void *user_data); // optional: called when OS signals low memory
+
+    // Optional: the graphics device went away and a new one has been created.
+    // The app is NOT being destroyed — this is followed by a second init() on the
+    // SAME user_data, and everything allocated at init() is expected to still be
+    // there. Release only what the device owned (textures, pipelines, buffers)
+    // and rebuild it; anything you free here cannot be recreated by init() if it
+    // was app state rather than device state.
+    //
+    // This exists because device recovery used to call cleanup(), which is
+    // documented above as "destroy game state" — and two of the apps implement
+    // that by deleting the object user_data points at. The next init() then wrote
+    // through the freed pointer.
+    void (*device_lost)(void *user_data) = nullptr;
 };
 
 // Request a clean app exit (platform-specific; may be a no-op on mobile)

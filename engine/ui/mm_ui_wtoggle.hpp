@@ -46,7 +46,7 @@ bool has_rounded = false;
     u16 ccw = 0, cch = 0;
 for (u16 i = 0; i < m.count; ++i) {
     auto &w = m.pool[i];
-    if (!m.is_visible(i)) {
+    if (!m.is_visible(i) || !m.in_render_scope(i)) {
         continue;
     }
     if (w.type != (u8)widget_type::CHECKBOX && w.type != (u8)widget_type::RADIOBOX) {
@@ -67,7 +67,7 @@ for (u16 i = 0; i < m.count; ++i) {
     }
     if (nclipped != clipped || (nclipped && (ncx != ccx || ncy != ccy || ncw != ccw || nch != cch))) {
         if (has_rounded) {
-            r.flush_rounded_sprites(batch);
+            r.flush_rounded_sprites(batch, m.scope_key(r));
             batch.reset();
             has_rounded = false;
         }
@@ -160,7 +160,7 @@ for (u16 i = 0; i < m.count; ++i) {
     has_rounded = true;
 }
 if (has_rounded) {
-    r.flush_rounded_sprites(batch);
+    r.flush_rounded_sprites(batch, m.scope_key(r));
     batch.reset();
 }
 }

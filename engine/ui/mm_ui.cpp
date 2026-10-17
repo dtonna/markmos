@@ -2,14 +2,22 @@
 // SPDX-License-Identifier: MIT
 
 #include "mm_ui.hpp"
-#include "../core/mm_vfs.hpp"
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+
+// Theme::load is the ONLY reason the UI toolkit needs a filesystem or a JSON
+// parser: it is the one function that reads a file, and it reads colours out of
+// it. Both are 119 KB of linked binary for a feature a game has to ask for by
+// name — and when it is off, Theme::load takes the same path it already takes
+// for a missing file and returns Theme::dark().
+#if MM_ENGINE_THEME_JSON
+#include "../core/mm_vfs.hpp"
 #include <simdjson.h>
 
 // simdjson header-only implementation
 #include "../../thirdparty/simdjson/singleheader/simdjson.cpp"
+#endif  // MM_ENGINE_THEME_JSON
 
 namespace ui {
 
@@ -103,7 +111,14 @@ void Manager::handle(const InputState &input) noexcept {
     // longer hand-rolls "if (overlay_open) return;").
     if (modal_id != UINT16_MAX) {
         for (u8 i = 0; i < input.action_count; ++i) {
-            if (input.actions[i] == InputAction::Back || input.actions[i] == InputAction::Pause) {
+            // Pause ONLY. `Back` used to be accepted here as well, which made
+            // BACKSPACE dismiss the modal - and Backspace is the single most
+            // used key in a text field. The keymap separates the two on purpose
+            // (keymap_tests asserts Escape -> Pause and NOT Back, Backspace ->
+            // Back and NOT Pause), so the modal collapsing them was the bug, not
+            // the mapping. Back has no producer on Android either, so nothing
+            // loses a real "go back" gesture.
+            if (input.actions[i] == InputAction::Pause) {
                 const u16 root = modal_id;
                 ClickCallback  cb   = modal_dismiss;
                 void          *user = modal_user;
@@ -126,9 +141,40 @@ void Manager::handle(const InputState &input) noexcept {
     if (editing_id != UINT16_MAX) {
         auto &w = pool[editing_id];
 
+        // Clamp the caret to the text, ONCE, before anything reads it.
+        //
+        // set_text() rewrites the string without moving the caret, so a shorter
+        // string leaves cursor_pos past the end - and every edit below is written
+        // as `for (j = cursor; j < len; ++j)`, which does not execute at all when
+        // cursor >= len. Backspace then decrements the caret and deletes nothing:
+        // every press is a dead key until the caret walks back into range, which
+        // is the "stuck character" this was reported as.
+        //
+        // Clamping here rather than in set_text() because the caret is the
+        // invariant, not one caller's problem - the Escape restore sets it, the
+        // factory sets it, and a future writer that forgets will land in the same
+        // place. One clamp at the top of the block fixes the class.
+        const u32 text_len = static_cast<u32>(std::strlen(w.text));
+        if (cursor_pos[editing_id] > text_len) {
+            cursor_pos[editing_id] = static_cast<u8>(text_len);
+        }
+
         // Character input
         for (u8 i = 0; i < input.text_count; ++i) {
             char    c   = input.text_input[i];
+            // NUMERIC refuses the keystroke. BEFORE the buffer-cap check on
+            // purpose: a full field has nothing to do with whether `c` is a digit,
+            // and skipping the mode test first would mean the mode is only
+            // consulted while there is room.
+            //
+            // This is also the only place paste is filtered: the loop mutates
+            // w.text and cursor_pos per character, so a multi-byte paste is
+            // validated incrementally - the first rejected character is dropped
+            // and the ones after it still land, which is what a partial paste
+            // should do rather than vanishing whole.
+            if (text_input[editing_id] == text_input_mode::NUMERIC && (c < '0' || c > '9')) {
+                continue;
+            }
             u8 len = static_cast<u8>(std::strlen(w.text));
             if (len >= sizeof(w.text) - 1) {
                 continue;
@@ -281,6 +327,19 @@ void Manager::handle(const InputState &input) noexcept {
                             if (j - 1 != editing_id) {
                                 editing_id = UINT16_MAX;
                                 finalized  = true;
+                            } else {
+                                // A tap INSIDE the field already being edited.
+                                //
+                                // This is where the caret has to be placed, and it
+                                // is NOT the click path further down: reaching here
+                                // leaves `finalized` false, and `if (!finalized)
+                                // return;` ends handle() a few lines later - so a tap
+                                // on the field you are typing in never got as far as
+                                // the code that would place it. Which is the whole
+                                // bug: the caret sat wherever the factory put it (the
+                                // end), so tapping to delete a character and pressing
+                                // Backspace deleted a DIFFERENT one.
+                                textfield_tap_action(editing_id, sx, sy);
                             }
                             break;
                         }
@@ -545,7 +604,16 @@ void Manager::handle(const InputState &input) noexcept {
                 w.state = 0;
             }
             if (w.type == (u8)widget_type::TEXT_FIELD) {
+                // The clear zone wins over everything else in the field, including
+                // "start editing here" - a tap on the X means clear, not place a
+                // caret and wait to be told twice.
                 editing_id = clicked;
+                // THE FIX for "I tapped to delete a character and Backspace
+                // deleted a different one": the tap decides where the caret goes.
+                // It did not before, so the caret stayed wherever the factory had
+                // put it - the end - and every Backspace after a tap deleted the
+                // LAST character no matter which one the finger was on.
+                cursor_pos[clicked] = textfield_caret_at(clicked, input.action_x);
                 std::memcpy(edit_snapshot[clicked], pool[clicked].text, sizeof(edit_snapshot[0]));
                 active = UINT16_MAX;
                 return;
@@ -1069,7 +1137,10 @@ void Manager::handle(const InputState &input) noexcept {
             }
             continue;
         }
-        if ((a == InputAction::Back || a == InputAction::Pause) && cb_focused && combobox_open[focus_id]) {
+        // Pause only, for the same reason as the modal dismiss above: including
+        // `Back` made Backspace close an open ComboBox popup instead of
+        // deleting the character before the caret.
+        if (a == InputAction::Pause && cb_focused && combobox_open[focus_id]) {
             combobox_close_cancel(focus_id);
             continue;
         }
@@ -1816,6 +1887,66 @@ void Manager::update(f32 dt) noexcept {
         }
     }
     cursor_timer += dt; // drives cursor blink + focus-ring pulse (read in render)
+
+    // ── Toast timing ─────────────────────────────────────────────
+    // Here for the same reason the tooltip's is: update() has no Renderer, and
+    // the panel is drawn as an overlay in render(). render() stays pure draw.
+    //
+    // Two independent clocks, because they answer different questions:
+    //   toast_anim - how far the slide has got (0..1, exponential ease like every
+    //                other driven value in this file)
+    //   toast_t    - how long it has been up, which is what DISMISSES it
+    // A toast with duration 0 stays until toast_hide(): a message with no natural
+    // end is a dialog, and a dialog should be built as one.
+    // A toast is the only thing here that APPEARS, and the appearance event is
+    // raised here rather than in toast() because toast() is called by the host
+    // at arbitrary points in the frame — including AFTER this update() — so
+    // firing there would be a frame early on some paths and on time on others.
+    // One owner, one frame, deterministic.
+    //
+    // Consume-once: cleared first, set only on the update() that saw the
+    // none -> some transition. A host polls it after update() and clears nothing.
+    toast_appeared = false;
+    if (toast_str != nullptr) {
+        if (!toast_was_shown) {
+            toast_appeared = true;
+            if (toast_cb != nullptr) {
+                toast_cb(toast_from, toast_cb_user);
+            }
+        }
+        if (dt > 0.0f) {
+            // Ease toward 1 with the file's standard smoothing, then SNAP so the
+            // toast actually reaches its docked position instead of asymptotically
+            // approaching it - the same snap-on-arrival rule the toggle thumb and
+            // the progressbar use. dt == 0 leaves it untouched (noop guard).
+            const f32 t_slide = mm_math::exp_damp(K_TOAST_SLIDE_SPEED, dt);
+            toast_anim += (1.0f - toast_anim) * t_slide;
+            if (toast_anim > 0.999f) {
+                toast_anim = 1.0f;
+            }
+            toast_t += dt;
+            if (toast_dur > 0.0f && toast_t >= toast_dur) {
+                toast_str = nullptr;
+                toast_anim = 0.0f;
+                toast_t    = 0.0f;
+            }
+        }
+    } else {
+        // Dismissed: run the slide back out so the panel leaves the way it came.
+        // Without this it would vanish on the frame it was dismissed, which reads
+        // as a glitch - and the win-panel note about "a dialog that vanishes the
+        // instant a button is pressed" is the same defect.
+        toast_anim -= toast_anim * mm_math::exp_damp(K_TOAST_SLIDE_SPEED, dt);
+        if (toast_anim < 0.001f) {
+            toast_anim = 0.0f;
+        }
+    }
+    // Read AFTER the expiry branch, not inside either arm: a toast that timed out
+    // on THIS frame must not still read as "shown", or the next toast() would be
+    // silent. One assignment at the end covers the visible, the expired, the
+    // hidden and the never-shown case — four paths that each needed to be
+    // remembered, which is how the event drifts out of sync with the widget.
+    toast_was_shown = (toast_str != nullptr);
 }
 
 // Text box for alignment: the content rect when the widget pins its own width
@@ -2001,27 +2132,7 @@ void Manager::render(Renderer &r, SpriteBatch &batch) noexcept {
                 continue;
             }
             if (pool[i].type == (u8)widget_type::LISTBOX) {
-                // Rows live in the content rect (inside the border bands),
-                // so the visible count derives from the inset height.
-                // Borderless styles inset 0 → identical to before.
-                f32 il = 0.0f, it = 0.0f, ir = 0.0f, ib = 0.0f;
-                ui::content_insets(styles[pool[i].style_id], pool[i].frame.w, pool[i].frame.h, il, it, ir, ib);
-                f32 inset_h = pool[i].frame.h - it - ib;
-                if (inset_h <= 0.0f) {
-                    inset_h = pool[i].frame.h; // degenerate style: frame behavior
-                }
-                listbox_metrics[i] = Manager::compute_listbox_metrics(inset_h, line_h, ui_scale);
-                // DataGrid: the header is exactly one row tall, so the ROW area
-                // is the content rect minus that row. row_h derives from line_h
-                // alone, so taking it from the full-height metrics first is not
-                // circular - only `visible` shrinks.
-                grid_header_h[i] = is_grid(i) ? listbox_metrics[i].row_h : 0.0f;
-                if (grid_header_h[i] > 0.0f) {
-                    const f32 rows_h = inset_h - grid_header_h[i];
-                    listbox_metrics[i] = Manager::compute_listbox_metrics(rows_h > 0.0f ? rows_h : 0.0f, line_h, ui_scale);
-                    const f32 content_w = pool[i].frame.w - il - ir;
-                    grid_metrics[i]     = compute_grid_metrics(grid_cols[i], grid_col_count[i], content_w > 0.0f ? content_w : pool[i].frame.w);
-                }
+                refresh_listbox_metrics(i, line_h, ui_scale);
             } else if (pool[i].type == (u8)widget_type::TABBAR) {
                 // Strip geometry + label scale from the frame, same place (and
                 // same line_h) as the listbox rows.
@@ -2038,778 +2149,30 @@ void Manager::render(Renderer &r, SpriteBatch &batch) noexcept {
     u16 fw = static_cast<u16>(r.width);
     u16 fh = static_cast<u16>(r.height);
 
-    // ── Pass 1: background rectangles ───────────────────────────
-    // Flush per material-group for widgets with custom shader overrides
-    bool            has_batch   = false;
-    const Material *current_mat = nullptr;   // nullptr = no per-widget material override
-    // Style-level background texture (WidgetStyle::bg_tex). Grouped like the
-    // material so a run of same-texture widgets still batches into one flush.
-    TextureHandle   current_tex = TextureHandle{};
-    current_tex.handle.id = 0; // "no texture" (see the stex comment)
+    // The drawing passes run TWICE when a modal is open. See render_scope.
+    //
+    // A single pass cannot put a dialog on top of the screen it covers: every
+    // fill is submitted in Pass 1 and every string in Pass 3, both at the same
+    // sort key, and submit() stable-sorts by key ALONE - so all text lands after
+    // all fills and a panel can never cover a label belonging to the same
+    // Manager. That is why the modal backdrop is flushed at the TEXT key (it can
+    // cover text) while the dialog's own background could not.
+    //
+    // So the modal subtree is excluded from the normal passes and drawn after
+    // them, keyed at the text key (scope_key). Scene, then dialog, then dim.
+    //
+    // The dim goes LAST and still lands under the dialog, because it is four
+    // quads AROUND the modal rect and never overlaps it - so its position in the
+    // sequence is geometrically irrelevant, and being last keeps it correct
+    // whatever text_layer the host chose.
+    render_scope = UINT16_MAX; // everything EXCEPT the active modal subtree
+    render_passes(r, batch, fw, fh);
 
-    // The clip rect is part of the batch identity, exactly like the material and
-    // the style texture. It has to be: scissors are recorded into the graph and
-    // EXECUTED at submit(), so a run of same-material widgets that all queued a
-    // scissor before one flush means only the LAST scissor in the run applies to
-    // the whole run - every earlier clipped widget drew unclipped. Invisible
-    // until now because labels are text (drawn in Pass 3, where draw_text pairs
-    // its own scissor) and panels rarely overlap; ScrollView is the first
-    // container whose CHILDREN are ordinary widgets, so it is the first thing
-    // that made a Pass 1 clip rect matter.
-    i16  cur_cx = 0, cur_cy = 0;
-    u16 cur_cw = 0, cur_ch = 0;
-    bool     cur_clipped = false;
-
-    for (u16 i = 0; i < count; ++i) {
-        auto &w = pool[i];
-        if (!is_visible(i)) {
-            continue;
-        }
-        if (w.bg_color == 0 && w.type != (u8)widget_type::IMAGE) {
-            continue;
-        }
-        if (w.type == (u8)widget_type::LABEL) {
-            continue;
-        }
-        if (w.type == (u8)widget_type::CHECKBOX || w.type == (u8)widget_type::RADIOBOX) {
-            continue; // drawn in pass 1.75 (rounded shader)
-        }
-        if (w.type == (u8)widget_type::TABBAR) {
-            continue; // drawn in pass 1.9 (bar + active cell)
-        }
-
-        f32           ax  = abs_x(i);
-        f32           ay  = abs_y(i);
-
-        // Resolve per-widget material override, else the style's bg_tex. A
-        // per-widget material wins: it can also swap the pipeline, which
-        // bg_tex deliberately does not (it keeps the rounded SDF path).
-        const Material *mat = widget_material[i].pipeline.is_valid() ? &widget_material[i] : nullptr;
-        // is_valid(), NOT handle.id != 0: TextureHandle::invalid() is
-        // 0xFFFFFFFF, so an `!= 0` test routes every style that has NO texture
-        // (every zero-init one, which is most of them) through the TEXTURED
-        // flush with a dead handle - it sampled whatever happened to be bound
-        // last, which is how a RECT button rendered as nothing at all. Same
-        // trap as WidgetStyle::fill_tex.
-        // "No texture" is a ZERO-id handle, not TextureHandle::invalid():
-        // flush_sprites_impl resolves `tid != 0` and the group test below is
-        // `handle.id != 0`, so invalid() (0xFFFFFFFF) reads as "has a texture"
-        // and binds a dead handle. That sampled whatever was bound last - which
-        // is how a RECT widget could vanish entirely.
-        TextureHandle stex;
-        stex.handle.id = 0;
-        if (mat == nullptr && styles[w.style_id].bg_tex.is_valid()) {
-            stex = styles[w.style_id].bg_tex;
-        }
-
-        // Resolve this widget's clip BEFORE the flush decision: a clip change is
-        // a batch boundary for the same reason a material change is.
-        i16  ncx, ncy;
-        u16 ncw, nch;
-        const bool nclipped = get_clip(i, ncx, ncy, ncw, nch);
-        // Needed below: after the flush decision cur_clipped has been overwritten
-        // with THIS widget's value, so the "were we clipped before" test has to
-        // be captured first.
-        const bool was_clipped = cur_clipped;
-
-        // An empty clip means draw NOTHING (see clip_draws). Skip before the
-        // flush decision so the previous widget's scissor stays in force.
-        if (!clip_draws(nclipped, ncw, nch)) {
-            continue;
-        }
-
-        // Flush previous batch if material, style texture, or CLIP changed
-        if (mat != current_mat || stex != current_tex || nclipped != cur_clipped ||
-            (nclipped && (ncx != cur_cx || ncy != cur_cy || ncw != cur_cw || nch != cur_ch))) {
-            if (has_batch) {
-                if (current_mat) {
-                    r.flush_sprites(batch, *current_mat);
-                } else if (current_tex.handle.id != 0) {
-                    // Textured, but still through the rounded SDF pipeline so
-                    // style corner radius + per-side/ring borders take effect
-                    // (the plain sprite shader ignores them).
-                    r.flush_rounded_sprites(batch, current_tex, r.default_sampler);
-                } else {
-                    // Default widgets go through the rounded SDF pipeline so
-                    // style corner radius + per-side/ring borders take effect
-                    // (the plain sprite shader ignores them).
-                    r.flush_rounded_sprites(batch);
-                }
-                batch.reset();
-                has_batch = false;
-            }
-            current_mat  = mat;
-            current_tex  = stex;
-            cur_clipped  = nclipped;
-            cur_cx       = ncx;
-            cur_cy       = ncy;
-            cur_cw       = ncw;
-            cur_ch       = nch;
-        }
-
-        // Applied after the flush decision above, so the scissor command lands
-        // immediately before this widget's own draw. Leaving a clipped run has
-        // to RESTORE the full frame: the previous widget's scissor is still the
-        // active one and would otherwise keep clipping everything after it.
-        if (nclipped) {
-            r.set_scissor(ncx, ncy, ncw, nch);
-        } else if (was_clipped) {
-            r.set_scissor(0, 0, fw, fh);
-        }
-
-        u32 color   = w.bg_color;
-        bool     has_mat = mat != nullptr;
-        if (has_mat) {
-            // With custom material: draw at full brightness, overlay state later
-            color = 0xFFFFFFFF;
-        } else if (w.type == (u8)widget_type::BUTTON) {
-            // EFFECTIVE enabled, like every other test in this file: a button
-            // inside a disabled panel is unclickable, so it must not look
-            // clickable either. The own flag answered about THIS widget only.
-            if (!is_enabled(i)) {
-                color = ui_darken(color, 80);
-            } else if (w.state == (u8)btn_state::PRESSED) {
-                color = ui_darken(color, 50);
-            } else {
-                color = ui_lerp_color(color, ui_lighten(color, 30), w.hover_factor);
-            }
-        }
-
-        // Panel fade-in: modulate alpha by anim_t
-        if (w.type == (u8)widget_type::PANEL && w.anim_t < 1.0f) {
-            mm_math::color pc = mm_math::color::from_u32_argb(color); // 0xAARRGGBB
-            color             = pc.with_alpha(pc.a * w.anim_t).to_u32_argb();
-        }
-
-        // Look up style for shape/radius/border
-        const WidgetStyle &sty       = styles[w.style_id];
-        shape_type         eff_shape = static_cast<shape_type>(w.shape);
-        if (eff_shape == shape_type::DEFAULT) {
-            eff_shape = sty.shape;
-        }
-        if (eff_shape == shape_type::CUSTOM) {
-            if (has_batch) {
-                if (current_mat) {
-                    r.flush_sprites(batch, *current_mat);
-                } else if (current_tex.handle.id != 0) {
-                    r.flush_rounded_sprites(batch, current_tex, r.default_sampler);
-                } else {
-                    // Default widgets go through the rounded SDF pipeline so
-                    // style corner radius + per-side/ring borders take effect
-                    // (the plain sprite shader ignores them).
-                    r.flush_rounded_sprites(batch);
-                }
-                batch.reset();
-                has_batch   = false;
-                current_mat = nullptr;
-                current_tex = TextureHandle{};
-                current_tex.handle.id = 0;
-            }
-            continue;
-        }
-
-        f32 ps = w.press_scale;
-        // Base rect: the frame scaled ABOUT ITS CENTRE, except Toggle which draws
-        // a half-height track. The centring is not cosmetic: anchored top-left
-        // (bx = ax, by = ay) the press animation walked the top-left corner
-        // across the widget, which on the ScrollView page read as "the row
-        // shrank and slid", and it disagreed with the checkbox/radio box in
-        // Pass 1.75, which has always scaled about its centre.
-        f32 bx = ax + w.frame.w * (1.0f - ps) * 0.5f;
-        f32 by = ay + w.frame.h * (1.0f - ps) * 0.5f;
-        f32 bw2 = w.frame.w * ps, bh2 = w.frame.h * ps;
-        if (w.type == (u8)widget_type::TOGGLE) {
-            f32 track_h = w.frame.h * 0.5f;
-            by            = ay + (w.frame.h - track_h) * 0.5f + w.frame.h * (1.0f - ps) * 0.5f;
-            bh2           = track_h * ps;
-        }
-        f32 ccx = bx + bw2 * 0.5f, ccy = by + bh2 * 0.5f;
-
-        // Hard drop shadow: one quad in the SAME batch (same rounded shader),
-        // emitted BEFORE the fill so the fill covers the overlap. Skipped for
-        // textured fills - a shadow quad would sample the fill's texture.
-        if (sty.shadow_color != 0 && stex.handle.id == 0 && mat == nullptr) {
-            const f32 sg = sty.shadow_grow;
-            f32       sr = 0.0f; // shadow keeps the widget's own silhouette
-            if (eff_shape == shape_type::CIRCLE || eff_shape == shape_type::ELLIPSE) {
-                sr = 0.5f;
-            } else if (eff_shape != shape_type::RECT) {
-                sr = fminf(fmaxf(sty.corner_r, 0.0f), 0.5f);
-            }
-            batch.add(ccx + sty.shadow_dx, ccy + sty.shadow_dy, bw2 + sg * 2.0f, bh2 + sg * 2.0f, 0.0f, sty.shadow_color, 0, 0, sr,
-                     0.0f, 0);
-        }
-
-        // Shape switch: Rect draws sharp fill + per-side geometry borders
-        // (true per-side width/color, no shader work); RoundedRect keeps
-        // corner_r with a uniform SDF border (uniform sides pass through,
-        // mixed sides degrade to max-width + first-nonzero color);
-        // Circle/Ellipse force radius 0.5 with the ring border only.
-        switch (eff_shape) {
-        case shape_type::RECT: {
-            batch.add(ccx, ccy, bw2, bh2, 0.0f, color, 0, 0, 0.0f, 0.0f, 0);
-            f32    sw[4];
-            u32 sc[4];
-            resolve_border_sides(sty, sw, sc);
-            f32 m    = (bw2 < bh2) ? bw2 : bh2; // px per normalized unit
-            f32 tT   = (sw[BORDER_T] > 0.0f && sc[BORDER_T]) ? sw[BORDER_T] * m : 0.0f;
-            f32 tB   = (sw[BORDER_B] > 0.0f && sc[BORDER_B]) ? sw[BORDER_B] * m : 0.0f;
-            f32 tL   = (sw[BORDER_L] > 0.0f && sc[BORDER_L]) ? sw[BORDER_L] * m : 0.0f;
-            f32 tR   = (sw[BORDER_R] > 0.0f && sc[BORDER_R]) ? sw[BORDER_R] * m : 0.0f;
-            f32 half = m * 0.5f;
-            if (tT > half) {
-                tT = half;
-            }
-            if (tB > half) {
-                tB = half;
-            }
-            if (tL > half) {
-                tL = half;
-            }
-            if (tR > half) {
-                tR = half;
-            }
-            // Butt joints: top/bottom span full width, left/right fit between.
-            if (tT > 0.0f) {
-                batch.add(ccx, by + tT * 0.5f, bw2, tT, 0.0f, sc[BORDER_T], 0);
-            }
-            if (tB > 0.0f) {
-                batch.add(ccx, by + bh2 - tB * 0.5f, bw2, tB, 0.0f, sc[BORDER_B], 0);
-            }
-            f32 side_h = bh2 - tT - tB;
-            if (side_h > 0.0f) {
-                f32 side_y = by + tT + side_h * 0.5f;
-                if (tL > 0.0f) {
-                    batch.add(bx + tL * 0.5f, side_y, tL, side_h, 0.0f, sc[BORDER_L], 0);
-                }
-                if (tR > 0.0f) {
-                    batch.add(bx + bw2 - tR * 0.5f, side_y, tR, side_h, 0.0f, sc[BORDER_R], 0);
-                }
-            }
-            break;
-        }
-        case shape_type::CIRCLE:
-        case shape_type::ELLIPSE: {
-            f32    rw;
-            u32 rc;
-            resolve_ring(sty, rw, rc);
-            batch.add(ccx, ccy, bw2, bh2, 0.0f, color, 0, 0, 0.5f, rw, rc);
-            break;
-        }
-        default: {
-            // RoundedRect (and Default, already resolved): uniform SDF border.
-            f32    sw[4];
-            u32 sc[4];
-            resolve_border_sides(sty, sw, sc);
-            f32    uw = sw[0];
-            u32 uc = sc[0];
-            for (int k = 1; k < 4; ++k) {
-                if (sw[k] > uw) {
-                    uw = sw[k];
-                }
-                if (!uc && sc[k]) {
-                    uc = sc[k];
-                }
-            }
-            batch.add(ccx, ccy, bw2, bh2, 0.0f, color, 0, 0, sty.corner_r, uw, uc);
-            break;
-        }
-        }
-
-        has_batch = true;
-    }
-
-    if (has_batch) {
-        if (current_mat) {
-            r.flush_sprites(batch, *current_mat);
-        } else {
-            r.flush_rounded_sprites(batch); // styled shapes (see above)
-        }
-    }
-
-    r.set_scissor(0, 0, fw, fh);
-    batch.reset();
-
-    // ── Pass 1.5: state overlays for material-backed buttons ─────
-    // The clip is part of the batch identity here, exactly as in Pass 1 / 1.8 /
-    // 2. This pass used to scissor per widget and flush ONCE at the end, so N
-    // material buttons in N different clipped containers all took the LAST
-    // rect - and a zero-area clip was handed to the backend, which is invalid
-    // (see clip_draws).
-    // (current_mat is not reset here: this pass always flushes through the plain
-    // sprite pipeline with white_tex, and Pass 1 already nulled it.)
-    has_batch = false;
-    i16  o5_cx = 0, o5_cy = 0;
-    u16 o5_cw = 0, o5_ch = 0;
-    bool     o5_clipped = false;
-    for (u16 i = 0; i < count; ++i) {
-        auto &w = pool[i];
-        if (!is_visible(i)) {
-            continue;
-        }
-        if (!widget_material[i].pipeline.is_valid()) {
-            continue;
-        }
-        if (w.type != (u8)widget_type::BUTTON) {
-            continue;
-        }
-
-        u32 overlay = 0;
-        if (!is_enabled(i)) {
-            overlay = 0x50000000;
-        } else if (w.state == (u8)btn_state::PRESSED) {
-            overlay = 0x80000000;
-        } else if (w.state == (u8)btn_state::HOVER) {
-            overlay = 0x30FFFFFF;
-        }
-        if (overlay == 0) {
-            continue;
-        }
-
-        i16  ncx, ncy;
-        u16 ncw, nch;
-        const bool nclipped = get_clip(i, ncx, ncy, ncw, nch);
-        if (!clip_draws(nclipped, ncw, nch)) {
-            continue;
-        }
-        if (nclipped != o5_clipped || (nclipped && (ncx != o5_cx || ncy != o5_cy || ncw != o5_cw || nch != o5_ch))) {
-            if (has_batch) {
-                r.flush_sprites(batch, r.white_tex, r.default_sampler);
-                batch.reset();
-                has_batch = false;
-            }
-            if (nclipped) {
-                r.set_scissor(ncx, ncy, ncw, nch);
-            } else if (o5_clipped) {
-                r.set_scissor(0, 0, fw, fh);
-            }
-            o5_clipped = nclipped;
-            o5_cx      = ncx;
-            o5_cy      = ncy;
-            o5_cw      = ncw;
-            o5_ch      = nch;
-        }
-
-        f32 ax = abs_x(i);
-        f32 ay = abs_y(i);
-        batch.add(ax + w.frame.w * 0.5f, ay + w.frame.h * 0.5f, w.frame.w, w.frame.h, 0.0f, overlay, 0);
-        has_batch = true;
-    }
-    if (has_batch) {
-        r.flush_sprites(batch, r.white_tex, r.default_sampler);
-    }
-
-    r.set_scissor(0, 0, fw, fh);
-    batch.reset();
-
-// ── Pass 1.75: checkbox/radio (see mm_ui_wtoggle.hpp) ──
-    // The pass restores a full-frame scissor when it LEAVES a clipped run, but
-    // the last widget can end inside one - same reason Pass 1.8 gets its own
-    // reset on the next line.
-    ui::togglebox::render_pass(*this, batch, r);
-    r.set_scissor(0, 0, fw, fh);
-
-    // ── Pass 1.8: listbox selection+scrollbar (see mm_ui_wlist.hpp) ──
-    ui::listbox::render_pass(*this, batch, r);
-    r.set_scissor(0, 0, fw, fh);
-
-    // ── Pass 1.9: tab strips ────────────────────────────────────
-    // Placed after Pass 1.8 on purpose: it owns its own flush, so every
-    // earlier pass must already have drained the shared batch (the
-    // drain-first rule - a reset() here would eat their pending quads).
-    for (u16 i = 0; i < count; ++i) {
-        if (pool[i].type == (u8)widget_type::TABBAR && is_visible(i)) {
-            tabbar::render_bg(*this, i, r, batch);
-        }
-    }
-    // The strip scissors itself, so the last one can leave a clip in force.
-    r.set_scissor(0, 0, fw, fh);
-
-    // ── Pass 2: toggles, sliders, checkmarks, cursor, callbacks ──
-    f32 cursor_blink  = std::fmod(cursor_timer, 0.5f) < 0.25f ? 1.0f : 0.0f;
-
-    // Clip state is part of the batch identity here too. Every primitive below
-    // (slider track/fill/thumb, toggle thumb, checkmark, progressbar, the
-    // ScrollView scrollbar, the textfield caret) queues a per-widget clip and the
-    // pass flushes once at the end, so a clipped widget followed by an unclipped
-    // one had the FIRST widget's clip applied to both. Same shape as the Pass 1
-    // and Pass 1.8 bugs.
-    bool     p2_clipped = false;
-    i16  p2_cx = 0, p2_cy = 0;
-    u16 p2_cw = 0, p2_ch = 0;
-
-    for (u16 i = 0; i < count; ++i) {
-        auto &w = pool[i];
-        if (!is_visible(i)) {
-            continue;
-        }
-
-        i16  cx, cy;
-        u16 cw, ch;
-        bool     clipped = get_clip(i, cx, cy, cw, ch);
-        // An empty clip means draw NOTHING - not "no clip", and not a zero-size
-        // scissor either (that is invalid at the backend; see clip_draws). The
-        // checkbox of a collapsed section was the live case: its box vanished in
-        // Pass 1.75 while its checkmark survived here, from the same frame.
-        if (!clip_draws(clipped, cw, ch)) {
-            continue;
-        }
-        if (clipped != p2_clipped || (clipped && (cx != p2_cx || cy != p2_cy || cw != p2_cw || ch != p2_ch))) {
-            if (batch.count > 0) {
-                r.flush_rounded_sprites(batch);
-                batch.reset();
-            }
-            if (clipped) {
-                r.set_scissor(cx, cy, cw, ch);
-            } else if (p2_clipped) {
-                r.set_scissor(0, 0, fw, fh); // leaving a clipped run
-            }
-            p2_clipped = clipped;
-            p2_cx      = cx;
-            p2_cy      = cy;
-            p2_cw      = cw;
-            p2_ch      = ch;
-        }
-
-        f32 ax = abs_x(i);
-        f32 ay = abs_y(i);
-
-        // ── Toggle switch thumb ──────────────────────────────────
-        if (w.type == (u8)widget_type::TOGGLE) {
-            f32    track_h      = w.frame.h * 0.5f;
-            f32    ps           = w.press_scale;
-            // Pass 1 draws the track about the frame's CENTRE while pressed (bx
-            // there carries the (1-ps)/2 term), so the thumb needs the same
-            // offset - otherwise it slides off the shrinking track. The TRAVEL
-            // is unchanged: same left/right margins at rest, only the whole span
-            // shifts inward by half the shrink.
-            f32    press_dx     = w.frame.w * (1.0f - ps) * 0.5f;
-            f32    track_y      = ay + (w.frame.h - track_h) * 0.5f + w.frame.h * (1.0f - ps) * 0.5f;
-            f32    base_thumb   = track_h * 0.75f;
-            f32    thumb_size   = base_thumb * ps;
-            f32    track_margin = (track_h - base_thumb) * 0.5f;
-            f32    thumb_lx     = ax + press_dx + track_margin + (w.frame.w - thumb_size - 2.0f * track_margin) * w.thumb_pos;
-            f32    thumb_ly     = track_y + track_margin;
-            u32 thumb_color  = (i == focus_id || i == hot) ? theme.toggle_thumb_hot : theme.toggle_thumb;
-            if (!is_enabled(i)) {
-                thumb_color = ui_darken(thumb_color, 80);
-            }
-            // Corner radius from the style, like the frame in Pass 1: a square
-            // knob sliding in a pill track is the "radius does not round" look.
-            const f32 thumb_r = style_corner_radius(styles[w.style_id], w.shape);
-            batch.add(thumb_lx + thumb_size * 0.5f, thumb_ly + thumb_size * 0.5f, thumb_size, thumb_size, 0.0f, thumb_color, 0, 0, thumb_r);
-            // Textured thumb: flush it on its own rather than splitting the
-            // whole Pass-2 batch by texture (one primitive per widget, so the
-            // cost is bounded). Plain sprite shader - an SDF corner radius on
-            // a bitmap thumb would clip the art.
-            TextureHandle ttex = styles[w.style_id].thumb_tex;
-            if (ttex.handle.id != 0) {
-                // Rounded pipeline, not the plain sprite shader: the SDF mask is
-                // a no-op for a radius-0 quad, so the bitmap thumb is untouched
-                // while the tracks already in this batch keep their corners.
-                r.flush_rounded_sprites(batch, ttex, r.default_sampler);
-                batch.reset();
-            }
-        }
-
-        ui::slider::render_parts(*this, i, ax, ay, batch, r);
-
-        ui::progressbar::render_parts(*this, i, ax, ay, batch, r);
-
-        ui::togglebox::render_check(*this, i, ax, ay, batch);
-
-        // ── ScrollView scrollbar ─────────────────────────────────
-        // Drawn in Pass 2 (rounded pipeline, like every other primitive here -
-        // the plain sprite shader ignores the radius). Only when there is
-        // something to scroll: a bar that cannot move is noise.
-        if (w.type == (u8)widget_type::SCROLLVIEW) {
-            const f32 max_sc = scroll_max(i);
-            if (max_sc > 0.0f && w.frame.h > 1.0f) {
-                f32 il = 0.0f, it = 0.0f, ir = 0.0f, ib = 0.0f;
-                ui::content_insets(styles[w.style_id], w.frame.w, w.frame.h, il, it, ir, ib);
-                f32 track_x1 = ax + w.frame.w - ir;
-                f32 track_y0 = ay + it;
-                f32 track_h  = w.frame.h - it - ib;
-                if (track_h <= 0.0f) { // degenerate style: frame behaviour
-                    track_y0 = ay;
-                    track_h  = w.frame.h;
-                }
-                const f32 bw = K_SCROLL_BAR_W;
-                const f32 th = scroll_thumb_h(track_h, max_sc);
-                const f32 ty = track_y0 + (scroll_scroll[i] / max_sc) * (track_h - th);
-                const f32 bcx = track_x1 - bw * 0.5f;
-                batch.add(bcx, track_y0 + track_h * 0.5f, bw, track_h, 0.0f, theme.slider_track, 0);
-                // Hot when the pointer is over the bar OR over the content it
-                // scrolls - `hot` is usually a CHILD, so compare the scroll
-                // view's ancestor chain, not the id.
-                u32    thumb_col = theme.slider_thumb;
-                const bool  over      = (i == hot) || (scroll_ancestor_of(hot) == i) ||
-                                   (active != UINT16_MAX && scroll_ancestor_of(active) == i);
-                if (over) {
-                    thumb_col = theme.slider_thumb_hot;
-                }
-                batch.add(bcx, ty + th * 0.5f, bw, th, 0.0f, thumb_col, 0);
-            }
-        }
-
-        // ── TextField cursor ─────────────────────────────────────
-        if (w.type == (u8)widget_type::TEXT_FIELD && editing_id == i && cursor_blink > 0.0f) {
-            ui::textfield::render_cursor(*this, i, ax, ay, r, batch);
-        }
-
-        // ── Custom draw callbacks ────────────────────────────────
-        if (w.on_draw) {
-            if (batch.count > 0) {
-                r.flush_sprites(batch, r.white_tex, r.default_sampler);
-                batch.reset();
-            }
-            // Plan B: render is dt-free; callbacks must not rely on dt.
-            w.on_draw(i, r, batch, ax, ay, 0.0f, draw_user[i]);
-        }
-
-        // NO per-widget scissor restore here. This used to reset to the full
-        // frame after every clipped widget, which silently desynchronised the
-        // bookkeeping above: p2_clipped still said "clipped, rect X", so the
-        // NEXT widget with the same rect was treated as "no change" and its
-        // primitives went out under the full frame. A checkbox inside a section
-        // drew its box clipped (Pass 1.75 re-applies it) and its checkmark
-        // unclipped (Pass 2 did not) - the same widget, the same frame, two
-        // different answers. The focus indicator below was the other victim: it
-        // is drawn after the restore, so a focused widget in a ScrollView drew
-        // its ring outside the viewport.
-        //
-        // Leaving a clipped run is the top-of-loop's job, where the change is
-        // detected; the end of the pass restores the full frame below.
-
-        // ── Focus indicator ─────────────────────────────────────
-        if (focus_id == i && (w.flags & WF_FOCUSABLE)) {
-            f32    focus_w = w.frame.w > 0 ? w.frame.w : 100.0f;
-            f32    focus_h = w.frame.h > 0 ? w.frame.h : 30.0f;
-            f32    pulse   = 0.6f + 0.4f * __builtin_sinf(cursor_timer * 6.0f);
-            u32 fc      = (theme.focus_color & 0x00FFFFFF) | (static_cast<u32>(pulse * 255.0f) << 24);
-            f32    fw4     = focus_w + 4.0f;
-            batch.add(ax - 2.0f + fw4 * 0.5f, ay - 1.0f, fw4, 2.0f, 0.0f, fc, 0);
-            batch.add(ax - 2.0f + fw4 * 0.5f, ay + focus_h + 1.0f, fw4, 2.0f, 0.0f, fc, 0);
-            batch.add(ax - 1.0f, ay + focus_h * 0.5f, 2.0f, focus_h, 0.0f, fc, 0);
-            batch.add(ax + focus_w + 1.0f, ay + focus_h * 0.5f, 2.0f, focus_h, 0.0f, fc, 0);
-        }
-    }
-
-    // Pass 2 flushes through the ROUNDED SDF pipeline, not the plain sprite
-    // shader: the plain shader ignores the corner radius entirely, so every
-    // Pass-2 primitive (slider track + fill + thumb, progressbar track + fill +
-    // stripes, toggle thumb, checkmark strokes) drew square-cornered while its
-    // frame was rounded in Pass 1. A radius-0 quad is unaffected by the SDF, so
-    // the primitives that DO want sharp corners keep them.
-    if (batch.count > 0) {
-        r.flush_rounded_sprites(batch);
-    }
-
-    r.set_scissor(0, 0, fw, fh);
-    batch.reset();
-
-    // ── Pass 3: text ────────────────────────────────────────────
-    for (u16 i = 0; i < count; ++i) {
-        auto &w = pool[i];
-        if (!is_visible(i)) {
-            continue;
-        }
-        // A TabBar has no text of its own: its labels come from the app's
-        // tab array, so the empty-text guard must not skip it.
-        // A widget with no text of its own still draws text in these cases:
-        // LISTBOX / COMBOBOX / TABBAR get theirs from an app-supplied array,
-        // and SLIDER / PROGRESSBAR draw a VALUE label ("42%") beside the bar.
-        // They have to be listed here or the guard skips them and the value
-        // never appears at all.
-        if (text_of(i)[0] == '\0' && w.type != (u8)widget_type::LISTBOX && w.type != (u8)widget_type::COMBOBOX &&
-            w.type != (u8)widget_type::TABBAR && w.type != (u8)widget_type::SLIDER &&
-            w.type != (u8)widget_type::PROGRESSBAR) {
-            continue;
-        }
-
-        f32    ax    = abs_x(i);
-        f32    ay    = abs_y(i);
-
-        f32    pad_l = static_cast<f32>(w.pad[3]);
-        f32    pad_r = static_cast<f32>(w.pad[1]);
-        f32    pad_t = static_cast<f32>(w.pad[0]);
-        f32    pad_b = static_cast<f32>(w.pad[2]);
-
-        f32    a     = static_cast<f32>(content_ascent[i]);
-        f32    hc    = static_cast<f32>(content_h[i]);
-
-        i16  cx, cy;
-        u16 cw, ch;
-        bool     clipped = get_clip(i, cx, cy, cw, ch);
-        // An empty clip means draw NOTHING - the last pass that was missing this.
-        // A collapsed accordion (or anything else a container intersects down to
-        // zero) reports "clipped, h == 0", which is NOT "no clip": passing the
-        // zero rect through records an invalid scissor in the graph, and every
-        // text pass from here on inherits whatever the backend does with it.
-        // Every other pass that scissors per widget (1, 1.75, 1.9, 2) already
-        // asks clip_draws() first; this one had the comment and not the check.
-        if (!clip_draws(clipped, cw, ch)) {
-            continue;
-        }
-        if (clipped) {
-            r.set_scissor(cx, cy, cw, ch, ui::text_key(r));
-        }
-
-        f32 txt_x = 0, txt_y = 0;
-        f32 txt_sc = 1.0f;
-
-        if (w.type == (u8)widget_type::BUTTON) {
-            ui::button::render_text(*this, i, ax, ay, pad_l, pad_r, pad_t, pad_b, a, hc, r);
-        } else if (w.type == (u8)widget_type::TOGGLE) {
-            // Label goes right of the track (same pattern as the slider % label).
-            // (Was missing: txt_x stayed 0.0 and every toggle label piled at the window edge.)
-            txt_x  = ax + w.frame.w + pad_r + 8.0f;
-            txt_y  = ay + pad_t + (w.frame.h - pad_t - pad_b + 2.0f * a - hc) * 0.5f;
-            txt_sc = w.scale;
-            r.draw_text(r.default_font, w.text, txt_x, txt_y, w.text_color, txt_sc);
-        } else if (w.type == (u8)widget_type::CHECKBOX || w.type == (u8)widget_type::RADIOBOX) {
-            txt_x  = ax + pad_l + w.frame.w + 6.0f;
-            txt_y  = ay + pad_t + (w.frame.h - pad_t - pad_b + 2.0f * a - hc) * 0.5f;
-            txt_sc = w.scale;
-            // Multi-line: the ink box (content_h) already includes one
-            // line_height per extra line, so centring that box and stacking
-            // lines from its top handles 1..N lines with the same maths.
-            draw_text_lines(r, text_of(i), txt_x, txt_y - a, txt_sc, w.text_color, text_align_of(*this, i),
-                             text_box_w(*this, i, static_cast<f32>(content_w[i])), text_box_limit(*this, i));
-        } else if (w.type == (u8)widget_type::TEXT_FIELD) {
-            txt_x  = ax + pad_l + 8.0f;
-            txt_y  = ay + pad_t + (w.frame.h - pad_t - pad_b + 2.0f * a - hc) * 0.5f;
-            txt_sc = w.scale;
-            // A text field is a fixed-width box and its value can be longer, so
-            // it clips its OWN text - it had no scissor at all and the string
-            // drew straight over whatever sat next to it. No ellipsis: the
-            // caret tracks the real advance, so cutting the string would put
-            // "..." and a caret that disagree about where the text ends.
-            //
-            // set_scissor REPLACES, and an ancestor clip (WF_CLIP panel) is
-            // already active, so intersect the two by hand rather than
-            // widening.
-            const f32 fl = ax + static_cast<f32>(pad_l);
-            const f32 ft = ay + static_cast<f32>(pad_t);
-            const f32 fr = ax + w.frame.w - static_cast<f32>(pad_r);
-            const f32 fb = ay + w.frame.h - static_cast<f32>(pad_b);
-            const f32 cl0 = clipped ? cx : 0.0f;
-            const f32 ct0 = clipped ? cy : 0.0f;
-            const f32 cr0 = clipped ? (cx + cw) : static_cast<f32>(fw);
-            const f32 cb0 = clipped ? (cy + ch) : static_cast<f32>(fh);
-            const f32 il  = fmaxf(fl, cl0);
-            const f32 it  = fmaxf(ft, ct0);
-            const f32 ir  = fminf(fr, cr0);
-            const f32 ib  = fminf(fb, cb0);
-            const bool  ok  = ir > il && ib > it;
-            if (ok) {
-                r.set_scissor(il, it, ir - il, ib - it, ui::text_key(r));
-            }
-            r.draw_text(r.default_font, text_of(i), txt_x, txt_y, w.text_color, txt_sc);
-            if (ok) {
-                // Back to whatever the ancestor clip (or the full frame) was.
-                r.set_scissor(clipped ? cx : 0.0f, clipped ? cy : 0.0f, clipped ? cw : static_cast<f32>(fw),
-                              clipped ? ch : static_cast<f32>(fh), ui::text_key(r));
-            }
-        } else if (w.type == (u8)widget_type::SLIDER) {
-            ui::slider::render_text(*this, i, ax, ay, pad_r, pad_t, pad_b, a, hc, r);
-        } else if (w.type == (u8)widget_type::PROGRESSBAR) {
-            ui::progressbar::render_text(*this, i, ax, ay, pad_r, pad_t, pad_b, a, hc, r);
-        } else if (w.type == (u8)widget_type::LISTBOX) {
-            // Header titles first, so a title is never overdrawn by a row that
-            // scrolled under it (both land at the text key; submission order
-            // decides).
-            grid_header_text(*this, i, r, ax, ay);
-            ui::listbox::render_rows(*this, i, ax, ay, batch, r, clipped, cx, cy, cw, ch, fw, fh);
-        } else if (w.type == (u8)widget_type::COMBOBOX) {
-            // Closed field: current label (or filter text) + chevron.
-            // Row-sized text (same scale as the popup rows), vertically
-            // centered with button-identical math at the draw scale.
-            const ListboxMetrics &lm  = combobox_metrics[i];
-            f32                 csc = (lm.row_h > 0.0f) ? lm.text_scale : 0.45f;
-            f32                 sa  = a * csc; // content measured at wg.scale; rescale
-            f32                 sh  = hc * csc;
-            txt_x                     = ax + pad_l + 8.0f;
-            txt_y                     = ay + pad_t + (w.frame.h - pad_t - pad_b + 2.0f * sa - sh) * 0.5f;
-            txt_sc                    = csc;
-            const char *label         = (w.text[0] != '\0') ? w.text : "--";
-            u32    tc            = (w.text[0] != '\0') ? w.text_color : theme.text_secondary;
-            // Long labels must not run into the chevron: clip the label to
-            // the field minus the chevron zone, then draw the chevron.
-            f32       lbl_w         = w.frame.w - 24.0f; // chevron lives in the last ~22px
-            if (lbl_w < 8.0f) {
-                lbl_w = 8.0f;
-            }
-            r.set_scissor(static_cast<i16>(ax), static_cast<i16>(ay), static_cast<u16>(lbl_w), static_cast<u16>(w.frame.h), ui::text_key(r));
-            r.draw_text(r.default_font, label, txt_x, txt_y, tc, txt_sc);
-            if (clipped) {
-                r.set_scissor(cx, cy, cw, ch, ui::text_key(r));
-            } else {
-                r.set_scissor(0, 0, fw, fh, ui::text_key(r));
-            }
-            const char *chev = combobox_open[i] ? "^" : "v";
-            r.draw_text(r.default_font, chev, ax + w.frame.w - pad_r - 16.0f, txt_y, tc, txt_sc);
-        } else if (w.type == (u8)widget_type::TABBAR) {
-            // Cell labels are positioned from the cell grid, so they cannot go
-            // through the shared one-string chain.
-            tabbar::render_text(*this, i, r);
-        } else {
-            // Label (Panel/Image carry no text): top-align the GLYPH top at
-            // ay + pad_t. draw_text places glyphs by signed bearings (top
-            // lands ~ascent above the origin), so the origin needs the
-            // +ascent term — without it labels stick out above their y
-            // (clipped under WF_CLIP parents, misaligned in grids).
-            // Label / Panel: top-align the ink box, honouring text_of().
-            // Multi-line: content_h already spans every line, so stacking from
-            // its top handles 1..N with the same maths as one line.
-            const char *ltxt = text_of(i);
-            txt_x            = ax + pad_l;
-            txt_y            = ay + pad_t;
-            // Same scale measure() used, so the box and the glyphs agree.
-            txt_sc           = widget_text_scale(*this, i);
-            draw_text_lines(r, ltxt, txt_x, txt_y, txt_sc, w.text_color, text_align_of(*this, i), text_box_w(*this, i, static_cast<f32>(content_w[i])),
-                             text_box_limit(*this, i));
-        }
-        if (clipped) {
-            r.set_scissor(0, 0, fw, fh, ui::text_key(r));
-        }
-    }
-
-    if (batch.count > 0) {
-        r.flush_sprites(batch, r.white_tex, r.default_sampler);
-    }
-    batch.reset();
-
-    // ── Pass 3.5: modal backdrop ─────────────────────────────────
-    // Four quads AROUND the modal root, flushed at the TEXT key - the whole
-    // frame is one pass, so a key-0 quad could never dim key-1 text (scene
-    // labels would punch straight through it). Carving the dialog's own rect
-    // out of the dim also means the dialog background - drawn back in Pass 1 -
-    // is never covered, so no pass reordering is needed.
-    if (modal_id != UINT16_MAX && theme.modal_backdrop != 0) {
-        const f32 mx = abs_x(modal_id);
-        const f32 my = abs_y(modal_id);
-        const f32 mw = pool[modal_id].frame.w;
-        const f32 mh = pool[modal_id].frame.h;
-        const f32 W  = static_cast<f32>(fw);
-        const f32 H  = static_cast<f32>(fh);
-        const u32 dc = theme.modal_backdrop;
-        if (my > 0.0f) { // above
-            batch.add(W * 0.5f, my * 0.5f, W, my, 0.0f, dc, 0);
-        }
-        if (my + mh < H) { // below
-            const f32 bh = H - (my + mh);
-            batch.add(W * 0.5f, my + mh + bh * 0.5f, W, bh, 0.0f, dc, 0);
-        }
-        if (mx > 0.0f) { // left
-            batch.add(mx * 0.5f, my + mh * 0.5f, mx, mh, 0.0f, dc, 0);
-        }
-        if (mx + mw < W) { // right
-            const f32 rw2 = W - (mx + mw);
-            batch.add(mx + mw + rw2 * 0.5f, my + mh * 0.5f, rw2, mh, 0.0f, dc, 0);
-        }
-        r.flush_sprites(batch, r.white_tex, r.default_sampler, ui::text_key(r));
-        batch.reset();
+    if (modal_id != UINT16_MAX) {
+        render_scope = modal_id; // ONLY the modal subtree
+        render_passes(r, batch, fw, fh);
+        render_scope = UINT16_MAX;
+        render_modal_backdrop(r, batch, fw, fh);
     }
 
     // ── Pass 3.6: tooltip (overlay, not a widget) ──────────────────
@@ -2851,6 +2214,87 @@ void Manager::render(Renderer &r, SpriteBatch &batch) noexcept {
         draw_text_lines(r, str, px2 + pad, py2 + pad, sc, 0xFFFFFFFF, text_align::LEFT, tw, 0.0f);
     }
 
+    // ── Pass 3.7: toast ──────────────────────────────────────────
+    // Last overlay drawn, and at sort key text_layer + 1 - one above the modal
+    // backdrop (which is at text_layer) and above any host overlay that raised
+    // text_layer. See the note on the toast state for why "the same key as the
+    // backdrop" is not good enough.
+    //
+    // Geometry first, then the slide. The panel travels from OUTSIDE the edge by
+    // its own height (bottom) or width (the sides), so it is fully off-screen at
+    // anim 0 rather than peeking, and the travel distance is the object's own
+    // size - a fixed pixel offset would over- or under-shoot for a one-word
+    // message and a long one.
+    if (toast_str != nullptr && toast_anim > 0.0f) {
+        const char *str = toast_str;
+        const f32   sc  = 0.36f;
+        const f32   pad = 10.0f;
+        const f32   lh  = r.default_font.line_height * sc;
+        f32         tw  = 0.0f;
+        u32         nl  = 1;
+        for (const char *q = str; *q != '\0'; ++q) {
+            if (*q == '\n') {
+                ++nl;
+                continue;
+            }
+            const auto *g = r.default_font.get_glyph(static_cast<u32>(static_cast<u8>(*q)));
+            if (g) {
+                tw += static_cast<f32>(g->advance) * sc;
+            }
+        }
+        const f32 th = lh * static_cast<f32>(nl);
+        const f32 bw = tw + pad * 2.0f;
+        const f32 bh = th + pad * 2.0f;
+        const f32 mx = static_cast<f32>(fw) * 0.5f;
+        // Docked position per edge, then the slide interpolates from off-screen.
+        f32 dx = mx;                       // horizontal centre for TOP / BOTTOM
+        f32 dy = static_cast<f32>(fh) - bh - 16.0f;
+        f32 ox = mx - bw * 0.5f;            // off-screen start per edge
+        f32 oy = dy;
+        switch (toast_from) {
+            case toast_edge::TOP:    oy = -bh - 16.0f; break;
+            case toast_edge::LEFT:   ox = -bw - 16.0f; dy = static_cast<f32>(fh) * 0.5f - bh * 0.5f; break;
+            case toast_edge::RIGHT:  ox = static_cast<f32>(fw) + 16.0f; dy = static_cast<f32>(fh) * 0.5f - bh * 0.5f; break;
+            case toast_edge::BOTTOM:
+            default: break;
+        }
+        // Clamp the docked position so a long message stays on screen, but clamp
+        // the START position to the same rules - a message wider than the window
+        // would otherwise slide in from further off than it needs to and arrive
+        // from a direction the geometry never implied.
+        const f32 ax = fmaxf(0.0f, fminf(ox, static_cast<f32>(fw) - bw));
+        const f32 ay = fmaxf(0.0f, fminf(oy, static_cast<f32>(fh) - bh));
+        const f32 px2 = fmaxf(0.0f, fminf(dx + (ax - dx) * toast_anim, static_cast<f32>(fw) - bw));
+        const f32 py2 = fmaxf(0.0f, fminf(dy + (ay - dy) * toast_anim, static_cast<f32>(fh) - bh));
+
+        // Both halves go out at text_layer + 1, and BOTH need it said out loud:
+        //
+        //  * the TEXT reads r.text_layer, so it has to be raised;
+        //  * the PANEL is flushed with an explicit key, because flush_rounded_sprites
+        //    defaults to key 0. With text_layer at 0 that happens to be the SAME
+        //    key as the backdrop and stable submission order puts the toast on top -
+        //    so the missing key is invisible until a host raises text_layer, at
+        //    which point the backdrop is at 1, the panel is still at 0, and the
+        //    message appears as TEXT FLOATING WITH NO PANEL UNDER IT.
+        //
+        // That is the 6c4da6b shape exactly: correct at rest, wrong the moment
+        // something else moves. Both are set explicitly so the toast's z-order is
+        // arithmetic rather than a coincidence about what the host happens to do.
+        // text_layer is a u8 and SortKey's layer field is 8 bits wide, so +1 has to
+        // be asserted rather than masked: wrapping to 0 would put the toast UNDER
+        // everything instead of over it - the same rule SortKey::pack follows for
+        // pipeline and material. No host is near 255 today.
+        assert(r.text_layer < 255 && "toast: text_layer + 1 would overflow SortKey's 8-bit layer");
+        const u8       saved_layer = r.text_layer;
+        const SortKey toast_key = overlay_key(r, 1);
+        r.text_layer = static_cast<u8>(saved_layer + 1);
+        batch.add(px2 + bw * 0.5f, py2 + bh * 0.5f, bw, bh, 0.0f, 0xF02A2A2A, 0, 0, 0.16f, 0.0f, 0);
+        r.flush_rounded_sprites(batch, toast_key);
+        batch.reset();
+        draw_text_lines(r, str, px2 + pad, py2 + pad, sc, 0xFFFFFFFF, text_align::LEFT, tw, 0.0f);
+        r.text_layer = saved_layer;
+    }
+
     // ── Pass 4: ComboBox overlay popups (see mm_ui_wlist.hpp) ──
     ui::combobox::render_overlay(*this, batch, r, fw, fh);
 }
@@ -2859,6 +2303,12 @@ void Manager::render(Renderer &r, SpriteBatch &batch) noexcept {
 Theme Theme::load(const char *path) noexcept {
     Theme   t    = Theme::dark();
 
+#if !MM_ENGINE_THEME_JSON
+    // No JSON parser linked: every path returns the default theme. Not a stub
+    // that pretends to work — the same answer a missing file already gives.
+    (void)path;
+    return t;
+#else
     VfsBlob blob = g_vfs.read_bundle(path);
     if (!blob.valid()) {
         return t;
@@ -3022,6 +2472,810 @@ Theme Theme::load(const char *path) noexcept {
     set_float("font_scale", t.font_scale);
 
     return t;
+#endif  // MM_ENGINE_THEME_JSON
 }
+
+// The drawing passes (Pass 1 .. Pass 3), as one function so render() can run
+// them twice: once for the screen and once for the modal subtree. Every pass
+// is unchanged apart from the render_scope() guard - the pass bodies move
+// verbatim, because a render pass that "also" does something else is how the
+// per-widget-state/one-flush bugs got in.
+void Manager::render_passes(Renderer &r, SpriteBatch &batch, u16 fw, u16 fh) noexcept {
+        // ── Pass 1: background rectangles ───────────────────────────
+        // Flush per material-group for widgets with custom shader overrides
+        bool            has_batch   = false;
+        const Material *current_mat = nullptr;   // nullptr = no per-widget material override
+        // Style-level background texture (WidgetStyle::bg_tex). Grouped like the
+        // material so a run of same-texture widgets still batches into one flush.
+        TextureHandle   current_tex = TextureHandle{};
+        current_tex.handle.id = 0; // "no texture" (see the stex comment)
+
+        // The clip rect is part of the batch identity, exactly like the material and
+        // the style texture. It has to be: scissors are recorded into the graph and
+        // EXECUTED at submit(), so a run of same-material widgets that all queued a
+        // scissor before one flush means only the LAST scissor in the run applies to
+        // the whole run - every earlier clipped widget drew unclipped. Invisible
+        // until now because labels are text (drawn in Pass 3, where draw_text pairs
+        // its own scissor) and panels rarely overlap; ScrollView is the first
+        // container whose CHILDREN are ordinary widgets, so it is the first thing
+        // that made a Pass 1 clip rect matter.
+        i16  cur_cx = 0, cur_cy = 0;
+        u16 cur_cw = 0, cur_ch = 0;
+        bool     cur_clipped = false;
+
+        for (u16 i = 0; i < count; ++i) {
+            auto &w = pool[i];
+            // AND the render scope: with a modal open this pass runs for EITHER
+            // the screen OR the modal subtree, never both (see render_scope).
+            if (!is_visible(i) || !in_render_scope(i)) {
+                continue;
+            }
+            if (w.bg_color == 0 && w.type != (u8)widget_type::IMAGE) {
+                continue;
+            }
+            if (w.type == (u8)widget_type::LABEL) {
+                continue;
+            }
+            if (w.type == (u8)widget_type::CHECKBOX || w.type == (u8)widget_type::RADIOBOX) {
+                continue; // drawn in pass 1.75 (rounded shader)
+            }
+            if (w.type == (u8)widget_type::TABBAR) {
+                continue; // drawn in pass 1.9 (bar + active cell)
+            }
+
+            f32           ax  = abs_x(i);
+            f32           ay  = abs_y(i);
+
+            // Resolve per-widget material override, else the style's bg_tex. A
+            // per-widget material wins: it can also swap the pipeline, which
+            // bg_tex deliberately does not (it keeps the rounded SDF path).
+            const Material *mat = widget_material[i].pipeline.is_valid() ? &widget_material[i] : nullptr;
+            // is_valid(), NOT handle.id != 0: TextureHandle::invalid() is
+            // 0xFFFFFFFF, so an `!= 0` test routes every style that has NO texture
+            // (every zero-init one, which is most of them) through the TEXTURED
+            // flush with a dead handle - it sampled whatever happened to be bound
+            // last, which is how a RECT button rendered as nothing at all. Same
+            // trap as WidgetStyle::fill_tex.
+            // "No texture" is a ZERO-id handle, not TextureHandle::invalid():
+            // flush_sprites_impl resolves `tid != 0` and the group test below is
+            // `handle.id != 0`, so invalid() (0xFFFFFFFF) reads as "has a texture"
+            // and binds a dead handle. That sampled whatever was bound last - which
+            // is how a RECT widget could vanish entirely.
+            TextureHandle stex;
+            stex.handle.id = 0;
+            if (mat == nullptr && styles[w.style_id].bg_tex.is_valid()) {
+                stex = styles[w.style_id].bg_tex;
+            }
+
+            // Resolve this widget's clip BEFORE the flush decision: a clip change is
+            // a batch boundary for the same reason a material change is.
+            i16  ncx, ncy;
+            u16 ncw, nch;
+            const bool nclipped = get_clip(i, ncx, ncy, ncw, nch);
+            // Needed below: after the flush decision cur_clipped has been overwritten
+            // with THIS widget's value, so the "were we clipped before" test has to
+            // be captured first.
+            const bool was_clipped = cur_clipped;
+
+            // An empty clip means draw NOTHING (see clip_draws). Skip before the
+            // flush decision so the previous widget's scissor stays in force.
+            if (!clip_draws(nclipped, ncw, nch)) {
+                continue;
+            }
+
+            // Flush previous batch if material, style texture, or CLIP changed
+            if (mat != current_mat || stex != current_tex || nclipped != cur_clipped ||
+                (nclipped && (ncx != cur_cx || ncy != cur_cy || ncw != cur_cw || nch != cur_ch))) {
+                if (has_batch) {
+                    if (current_mat) {
+                        r.flush_sprites(batch, *current_mat, scope_key(r));
+                    } else if (current_tex.handle.id != 0) {
+                        // Textured, but still through the rounded SDF pipeline so
+                        // style corner radius + per-side/ring borders take effect
+                        // (the plain sprite shader ignores them).
+                        r.flush_rounded_sprites(batch, current_tex, r.default_sampler, scope_key(r));
+                    } else {
+                        // Default widgets go through the rounded SDF pipeline so
+                        // style corner radius + per-side/ring borders take effect
+                        // (the plain sprite shader ignores them).
+                        r.flush_rounded_sprites(batch, scope_key(r));
+                    }
+                    batch.reset();
+                    has_batch = false;
+                }
+                current_mat  = mat;
+                current_tex  = stex;
+                cur_clipped  = nclipped;
+                cur_cx       = ncx;
+                cur_cy       = ncy;
+                cur_cw       = ncw;
+                cur_ch       = nch;
+            }
+
+            // Applied after the flush decision above, so the scissor command lands
+            // immediately before this widget's own draw. Leaving a clipped run has
+            // to RESTORE the full frame: the previous widget's scissor is still the
+            // active one and would otherwise keep clipping everything after it.
+            if (nclipped) {
+                r.set_scissor(ncx, ncy, ncw, nch);
+            } else if (was_clipped) {
+                r.set_scissor(0, 0, fw, fh);
+            }
+
+            u32 color   = w.bg_color;
+            bool     has_mat = mat != nullptr;
+            if (has_mat) {
+                // With custom material: draw at full brightness, overlay state later
+                color = 0xFFFFFFFF;
+            } else if (w.type == (u8)widget_type::BUTTON) {
+                // EFFECTIVE enabled, like every other test in this file: a button
+                // inside a disabled panel is unclickable, so it must not look
+                // clickable either. The own flag answered about THIS widget only.
+                if (!is_enabled(i)) {
+                    color = ui_darken(color, 80);
+                } else if (w.state == (u8)btn_state::PRESSED) {
+                    color = ui_darken(color, 50);
+                } else {
+                    color = ui_lerp_color(color, ui_lighten(color, 30), w.hover_factor);
+                }
+            }
+
+            // Panel fade-in: modulate alpha by anim_t
+            if (w.type == (u8)widget_type::PANEL && w.anim_t < 1.0f) {
+                mm_math::color pc = mm_math::color::from_u32_argb(color); // 0xAARRGGBB
+                color             = pc.with_alpha(pc.a * w.anim_t).to_u32_argb();
+            }
+
+            // Look up style for shape/radius/border
+            const WidgetStyle &sty       = styles[w.style_id];
+            shape_type         eff_shape = static_cast<shape_type>(w.shape);
+            if (eff_shape == shape_type::DEFAULT) {
+                eff_shape = sty.shape;
+            }
+            if (eff_shape == shape_type::CUSTOM) {
+                if (has_batch) {
+                    if (current_mat) {
+                        r.flush_sprites(batch, *current_mat, scope_key(r));
+                    } else if (current_tex.handle.id != 0) {
+                        r.flush_rounded_sprites(batch, current_tex, r.default_sampler, scope_key(r));
+                    } else {
+                        // Default widgets go through the rounded SDF pipeline so
+                        // style corner radius + per-side/ring borders take effect
+                        // (the plain sprite shader ignores them).
+                        r.flush_rounded_sprites(batch, scope_key(r));
+                    }
+                    batch.reset();
+                    has_batch   = false;
+                    current_mat = nullptr;
+                    current_tex = TextureHandle{};
+                    current_tex.handle.id = 0;
+                }
+                continue;
+            }
+
+            f32 ps = w.press_scale;
+            // Base rect: the frame scaled ABOUT ITS CENTRE, except Toggle which draws
+            // a half-height track. The centring is not cosmetic: anchored top-left
+            // (bx = ax, by = ay) the press animation walked the top-left corner
+            // across the widget, which on the ScrollView page read as "the row
+            // shrank and slid", and it disagreed with the checkbox/radio box in
+            // Pass 1.75, which has always scaled about its centre.
+            f32 bx = ax + w.frame.w * (1.0f - ps) * 0.5f;
+            f32 by = ay + w.frame.h * (1.0f - ps) * 0.5f;
+            f32 bw2 = w.frame.w * ps, bh2 = w.frame.h * ps;
+            if (w.type == (u8)widget_type::TOGGLE) {
+                f32 track_h = w.frame.h * 0.5f;
+                by            = ay + (w.frame.h - track_h) * 0.5f + w.frame.h * (1.0f - ps) * 0.5f;
+                bh2           = track_h * ps;
+            }
+            f32 ccx = bx + bw2 * 0.5f, ccy = by + bh2 * 0.5f;
+
+            // Hard drop shadow: one quad in the SAME batch (same rounded shader),
+            // emitted BEFORE the fill so the fill covers the overlap. Skipped for
+            // textured fills - a shadow quad would sample the fill's texture.
+            if (sty.shadow_color != 0 && stex.handle.id == 0 && mat == nullptr) {
+                const f32 sg = sty.shadow_grow;
+                f32       sr = 0.0f; // shadow keeps the widget's own silhouette
+                if (eff_shape == shape_type::CIRCLE || eff_shape == shape_type::ELLIPSE) {
+                    sr = 0.5f;
+                } else if (eff_shape != shape_type::RECT) {
+                    sr = fminf(fmaxf(sty.corner_r, 0.0f), 0.5f);
+                }
+                batch.add(ccx + sty.shadow_dx, ccy + sty.shadow_dy, bw2 + sg * 2.0f, bh2 + sg * 2.0f, 0.0f, sty.shadow_color, 0, 0, sr,
+                         0.0f, 0);
+            }
+
+            // Shape switch: Rect draws sharp fill + per-side geometry borders
+            // (true per-side width/color, no shader work); RoundedRect keeps
+            // corner_r with a uniform SDF border (uniform sides pass through,
+            // mixed sides degrade to max-width + first-nonzero color);
+            // Circle/Ellipse force radius 0.5 with the ring border only.
+            switch (eff_shape) {
+            case shape_type::RECT: {
+                batch.add(ccx, ccy, bw2, bh2, 0.0f, color, 0, 0, 0.0f, 0.0f, 0);
+                f32    sw[4];
+                u32 sc[4];
+                resolve_border_sides(sty, sw, sc);
+                f32 m    = (bw2 < bh2) ? bw2 : bh2; // px per normalized unit
+                f32 tT   = (sw[BORDER_T] > 0.0f && sc[BORDER_T]) ? sw[BORDER_T] * m : 0.0f;
+                f32 tB   = (sw[BORDER_B] > 0.0f && sc[BORDER_B]) ? sw[BORDER_B] * m : 0.0f;
+                f32 tL   = (sw[BORDER_L] > 0.0f && sc[BORDER_L]) ? sw[BORDER_L] * m : 0.0f;
+                f32 tR   = (sw[BORDER_R] > 0.0f && sc[BORDER_R]) ? sw[BORDER_R] * m : 0.0f;
+                f32 half = m * 0.5f;
+                if (tT > half) {
+                    tT = half;
+                }
+                if (tB > half) {
+                    tB = half;
+                }
+                if (tL > half) {
+                    tL = half;
+                }
+                if (tR > half) {
+                    tR = half;
+                }
+                // Butt joints: top/bottom span full width, left/right fit between.
+                if (tT > 0.0f) {
+                    batch.add(ccx, by + tT * 0.5f, bw2, tT, 0.0f, sc[BORDER_T], 0);
+                }
+                if (tB > 0.0f) {
+                    batch.add(ccx, by + bh2 - tB * 0.5f, bw2, tB, 0.0f, sc[BORDER_B], 0);
+                }
+                f32 side_h = bh2 - tT - tB;
+                if (side_h > 0.0f) {
+                    f32 side_y = by + tT + side_h * 0.5f;
+                    if (tL > 0.0f) {
+                        batch.add(bx + tL * 0.5f, side_y, tL, side_h, 0.0f, sc[BORDER_L], 0);
+                    }
+                    if (tR > 0.0f) {
+                        batch.add(bx + bw2 - tR * 0.5f, side_y, tR, side_h, 0.0f, sc[BORDER_R], 0);
+                    }
+                }
+                break;
+            }
+            case shape_type::CIRCLE:
+            case shape_type::ELLIPSE: {
+                f32    rw;
+                u32 rc;
+                resolve_ring(sty, rw, rc);
+                batch.add(ccx, ccy, bw2, bh2, 0.0f, color, 0, 0, 0.5f, rw, rc);
+                break;
+            }
+            default: {
+                // RoundedRect (and Default, already resolved): uniform SDF border.
+                f32    sw[4];
+                u32 sc[4];
+                resolve_border_sides(sty, sw, sc);
+                f32    uw = sw[0];
+                u32 uc = sc[0];
+                for (int k = 1; k < 4; ++k) {
+                    if (sw[k] > uw) {
+                        uw = sw[k];
+                    }
+                    if (!uc && sc[k]) {
+                        uc = sc[k];
+                    }
+                }
+                batch.add(ccx, ccy, bw2, bh2, 0.0f, color, 0, 0, sty.corner_r, uw, uc);
+                break;
+            }
+            }
+
+            has_batch = true;
+        }
+
+        if (has_batch) {
+            if (current_mat) {
+                r.flush_sprites(batch, *current_mat, scope_key(r));
+            } else {
+                r.flush_rounded_sprites(batch, scope_key(r)); // styled shapes (see above) // styled shapes (see above)
+            }
+        }
+
+        r.set_scissor(0, 0, fw, fh);
+        batch.reset();
+
+        // ── Pass 1.5: state overlays for material-backed buttons ─────
+        // The clip is part of the batch identity here, exactly as in Pass 1 / 1.8 /
+        // 2. This pass used to scissor per widget and flush ONCE at the end, so N
+        // material buttons in N different clipped containers all took the LAST
+        // rect - and a zero-area clip was handed to the backend, which is invalid
+        // (see clip_draws).
+        // (current_mat is not reset here: this pass always flushes through the plain
+        // sprite pipeline with white_tex, and Pass 1 already nulled it.)
+        has_batch = false;
+        i16  o5_cx = 0, o5_cy = 0;
+        u16 o5_cw = 0, o5_ch = 0;
+        bool     o5_clipped = false;
+        for (u16 i = 0; i < count; ++i) {
+            auto &w = pool[i];
+            if (!is_visible(i) || !in_render_scope(i)) {
+                continue;
+            }
+            if (!widget_material[i].pipeline.is_valid()) {
+                continue;
+            }
+            if (w.type != (u8)widget_type::BUTTON) {
+                continue;
+            }
+
+            u32 overlay = 0;
+            if (!is_enabled(i)) {
+                overlay = 0x50000000;
+            } else if (w.state == (u8)btn_state::PRESSED) {
+                overlay = 0x80000000;
+            } else if (w.state == (u8)btn_state::HOVER) {
+                overlay = 0x30FFFFFF;
+            }
+            if (overlay == 0) {
+                continue;
+            }
+
+            i16  ncx, ncy;
+            u16 ncw, nch;
+            const bool nclipped = get_clip(i, ncx, ncy, ncw, nch);
+            if (!clip_draws(nclipped, ncw, nch)) {
+                continue;
+            }
+            if (nclipped != o5_clipped || (nclipped && (ncx != o5_cx || ncy != o5_cy || ncw != o5_cw || nch != o5_ch))) {
+                if (has_batch) {
+                    r.flush_sprites(batch, r.white_tex, r.default_sampler, scope_key(r));
+                    batch.reset();
+                    has_batch = false;
+                }
+                if (nclipped) {
+                    r.set_scissor(ncx, ncy, ncw, nch);
+                } else if (o5_clipped) {
+                    r.set_scissor(0, 0, fw, fh);
+                }
+                o5_clipped = nclipped;
+                o5_cx      = ncx;
+                o5_cy      = ncy;
+                o5_cw      = ncw;
+                o5_ch      = nch;
+            }
+
+            f32 ax = abs_x(i);
+            f32 ay = abs_y(i);
+            batch.add(ax + w.frame.w * 0.5f, ay + w.frame.h * 0.5f, w.frame.w, w.frame.h, 0.0f, overlay, 0);
+            has_batch = true;
+        }
+        if (has_batch) {
+            r.flush_sprites(batch, r.white_tex, r.default_sampler, scope_key(r));
+        }
+
+        r.set_scissor(0, 0, fw, fh);
+        batch.reset();
+
+    // ── Pass 1.75: checkbox/radio (see mm_ui_wtoggle.hpp) ──
+        // The pass restores a full-frame scissor when it LEAVES a clipped run, but
+        // the last widget can end inside one - same reason Pass 1.8 gets its own
+        // reset on the next line.
+        ui::togglebox::render_pass(*this, batch, r);
+        r.set_scissor(0, 0, fw, fh);
+
+        // ── Pass 1.8: listbox selection+scrollbar (see mm_ui_wlist.hpp) ──
+        ui::listbox::render_pass(*this, batch, r);
+        r.set_scissor(0, 0, fw, fh);
+
+        // ── Pass 1.9: tab strips ────────────────────────────────────
+        // Placed after Pass 1.8 on purpose: it owns its own flush, so every
+        // earlier pass must already have drained the shared batch (the
+        // drain-first rule - a reset() here would eat their pending quads).
+        for (u16 i = 0; i < count; ++i) {
+            if (pool[i].type == (u8)widget_type::TABBAR && is_visible(i) && in_render_scope(i)) {
+                tabbar::render_bg(*this, i, r, batch);
+            }
+        }
+        // The strip scissors itself, so the last one can leave a clip in force.
+        r.set_scissor(0, 0, fw, fh);
+
+        // ── Pass 2: toggles, sliders, checkmarks, cursor, callbacks ──
+        f32 cursor_blink  = std::fmod(cursor_timer, 0.5f) < 0.25f ? 1.0f : 0.0f;
+
+        // Clip state is part of the batch identity here too. Every primitive below
+        // (slider track/fill/thumb, toggle thumb, checkmark, progressbar, the
+        // ScrollView scrollbar, the textfield caret) queues a per-widget clip and the
+        // pass flushes once at the end, so a clipped widget followed by an unclipped
+        // one had the FIRST widget's clip applied to both. Same shape as the Pass 1
+        // and Pass 1.8 bugs.
+        bool     p2_clipped = false;
+        i16  p2_cx = 0, p2_cy = 0;
+        u16 p2_cw = 0, p2_ch = 0;
+
+        for (u16 i = 0; i < count; ++i) {
+            auto &w = pool[i];
+            if (!is_visible(i) || !in_render_scope(i)) {
+                continue;
+            }
+
+            i16  cx, cy;
+            u16 cw, ch;
+            bool     clipped = get_clip(i, cx, cy, cw, ch);
+            // An empty clip means draw NOTHING - not "no clip", and not a zero-size
+            // scissor either (that is invalid at the backend; see clip_draws). The
+            // checkbox of a collapsed section was the live case: its box vanished in
+            // Pass 1.75 while its checkmark survived here, from the same frame.
+            if (!clip_draws(clipped, cw, ch)) {
+                continue;
+            }
+            if (clipped != p2_clipped || (clipped && (cx != p2_cx || cy != p2_cy || cw != p2_cw || ch != p2_ch))) {
+                if (batch.count > 0) {
+                    r.flush_rounded_sprites(batch, scope_key(r));
+                    batch.reset();
+                }
+                if (clipped) {
+                    r.set_scissor(cx, cy, cw, ch);
+                } else if (p2_clipped) {
+                    r.set_scissor(0, 0, fw, fh); // leaving a clipped run
+                }
+                p2_clipped = clipped;
+                p2_cx      = cx;
+                p2_cy      = cy;
+                p2_cw      = cw;
+                p2_ch      = ch;
+            }
+
+            f32 ax = abs_x(i);
+            f32 ay = abs_y(i);
+
+            // ── Toggle switch thumb ──────────────────────────────────
+            if (w.type == (u8)widget_type::TOGGLE) {
+                f32    track_h      = w.frame.h * 0.5f;
+                f32    ps           = w.press_scale;
+                // Pass 1 draws the track about the frame's CENTRE while pressed (bx
+                // there carries the (1-ps)/2 term), so the thumb needs the same
+                // offset - otherwise it slides off the shrinking track. The TRAVEL
+                // is unchanged: same left/right margins at rest, only the whole span
+                // shifts inward by half the shrink.
+                f32    press_dx     = w.frame.w * (1.0f - ps) * 0.5f;
+                f32    track_y      = ay + (w.frame.h - track_h) * 0.5f + w.frame.h * (1.0f - ps) * 0.5f;
+                f32    base_thumb   = track_h * 0.75f;
+                f32    thumb_size   = base_thumb * ps;
+                f32    track_margin = (track_h - base_thumb) * 0.5f;
+                f32    thumb_lx     = ax + press_dx + track_margin + (w.frame.w - thumb_size - 2.0f * track_margin) * w.thumb_pos;
+                f32    thumb_ly     = track_y + track_margin;
+                u32 thumb_color  = (i == focus_id || i == hot) ? theme.toggle_thumb_hot : theme.toggle_thumb;
+                if (!is_enabled(i)) {
+                    thumb_color = ui_darken(thumb_color, 80);
+                }
+                // Corner radius from the style, like the frame in Pass 1: a square
+                // knob sliding in a pill track is the "radius does not round" look.
+                const f32 thumb_r = style_corner_radius(styles[w.style_id], w.shape);
+                batch.add(thumb_lx + thumb_size * 0.5f, thumb_ly + thumb_size * 0.5f, thumb_size, thumb_size, 0.0f, thumb_color, 0, 0, thumb_r);
+                // Textured thumb: flush it on its own rather than splitting the
+                // whole Pass-2 batch by texture (one primitive per widget, so the
+                // cost is bounded). Plain sprite shader - an SDF corner radius on
+                // a bitmap thumb would clip the art.
+                TextureHandle ttex = styles[w.style_id].thumb_tex;
+                if (ttex.handle.id != 0) {
+                    // Rounded pipeline, not the plain sprite shader: the SDF mask is
+                    // a no-op for a radius-0 quad, so the bitmap thumb is untouched
+                    // while the tracks already in this batch keep their corners.
+                    r.flush_rounded_sprites(batch, ttex, r.default_sampler, scope_key(r));
+                    batch.reset();
+                }
+            }
+
+            ui::slider::render_parts(*this, i, ax, ay, batch, r);
+
+            ui::progressbar::render_parts(*this, i, ax, ay, batch, r);
+
+            ui::togglebox::render_check(*this, i, ax, ay, batch);
+
+            // ── ScrollView scrollbar ─────────────────────────────────
+            // Drawn in Pass 2 (rounded pipeline, like every other primitive here -
+            // the plain sprite shader ignores the radius). Only when there is
+            // something to scroll: a bar that cannot move is noise.
+            if (w.type == (u8)widget_type::SCROLLVIEW) {
+                const f32 max_sc = scroll_max(i);
+                if (max_sc > 0.0f && w.frame.h > 1.0f) {
+                    f32 il = 0.0f, it = 0.0f, ir = 0.0f, ib = 0.0f;
+                    ui::content_insets(styles[w.style_id], w.frame.w, w.frame.h, il, it, ir, ib);
+                    f32 track_x1 = ax + w.frame.w - ir;
+                    f32 track_y0 = ay + it;
+                    f32 track_h  = w.frame.h - it - ib;
+                    if (track_h <= 0.0f) { // degenerate style: frame behaviour
+                        track_y0 = ay;
+                        track_h  = w.frame.h;
+                    }
+                    const f32 bw = K_SCROLL_BAR_W;
+                    const f32 th = scroll_thumb_h(track_h, max_sc);
+                    const f32 ty = track_y0 + (scroll_scroll[i] / max_sc) * (track_h - th);
+                    const f32 bcx = track_x1 - bw * 0.5f;
+                    batch.add(bcx, track_y0 + track_h * 0.5f, bw, track_h, 0.0f, theme.slider_track, 0);
+                    // Hot when the pointer is over the bar OR over the content it
+                    // scrolls - `hot` is usually a CHILD, so compare the scroll
+                    // view's ancestor chain, not the id.
+                    u32    thumb_col = theme.slider_thumb;
+                    const bool  over      = (i == hot) || (scroll_ancestor_of(hot) == i) ||
+                                       (active != UINT16_MAX && scroll_ancestor_of(active) == i);
+                    if (over) {
+                        thumb_col = theme.slider_thumb_hot;
+                    }
+                    batch.add(bcx, ty + th * 0.5f, bw, th, 0.0f, thumb_col, 0);
+                }
+            }
+
+            // ── TextField cursor ─────────────────────────────────────
+            if (w.type == (u8)widget_type::TEXT_FIELD && editing_id == i && cursor_blink > 0.0f) {
+                ui::textfield::render_cursor(*this, i, ax, ay, r, batch);
+            }
+
+            // ── TextField clear X ────────────────────────────────────
+            // Same pass as the cursor so it shares the batch and needs no flush of
+            // its own - a separate flush in the middle of a pass is exactly the
+            // drain-order hazard the render_arc and render_burst notes record.
+            if (w.type == (u8)widget_type::TEXT_FIELD) {
+                ui::textfield::render_clear(*this, i, ax, ay, batch);
+            }
+
+            // ── Custom draw callbacks ────────────────────────────────
+            if (w.on_draw) {
+                if (batch.count > 0) {
+                    r.flush_sprites(batch, r.white_tex, r.default_sampler, scope_key(r));
+                    batch.reset();
+                }
+                // Plan B: render is dt-free; callbacks must not rely on dt.
+                w.on_draw(i, r, batch, ax, ay, 0.0f, draw_user[i]);
+            }
+
+            // NO per-widget scissor restore here. This used to reset to the full
+            // frame after every clipped widget, which silently desynchronised the
+            // bookkeeping above: p2_clipped still said "clipped, rect X", so the
+            // NEXT widget with the same rect was treated as "no change" and its
+            // primitives went out under the full frame. A checkbox inside a section
+            // drew its box clipped (Pass 1.75 re-applies it) and its checkmark
+            // unclipped (Pass 2 did not) - the same widget, the same frame, two
+            // different answers. The focus indicator below was the other victim: it
+            // is drawn after the restore, so a focused widget in a ScrollView drew
+            // its ring outside the viewport.
+            //
+            // Leaving a clipped run is the top-of-loop's job, where the change is
+            // detected; the end of the pass restores the full frame below.
+
+            // ── Focus indicator ─────────────────────────────────────
+            if (focus_id == i && (w.flags & WF_FOCUSABLE)) {
+                f32    focus_w = w.frame.w > 0 ? w.frame.w : 100.0f;
+                f32    focus_h = w.frame.h > 0 ? w.frame.h : 30.0f;
+                f32    pulse   = 0.6f + 0.4f * __builtin_sinf(cursor_timer * 6.0f);
+                u32 fc      = (theme.focus_color & 0x00FFFFFF) | (static_cast<u32>(pulse * 255.0f) << 24);
+                f32    fw4     = focus_w + 4.0f;
+                batch.add(ax - 2.0f + fw4 * 0.5f, ay - 1.0f, fw4, 2.0f, 0.0f, fc, 0);
+                batch.add(ax - 2.0f + fw4 * 0.5f, ay + focus_h + 1.0f, fw4, 2.0f, 0.0f, fc, 0);
+                batch.add(ax - 1.0f, ay + focus_h * 0.5f, 2.0f, focus_h, 0.0f, fc, 0);
+                batch.add(ax + focus_w + 1.0f, ay + focus_h * 0.5f, 2.0f, focus_h, 0.0f, fc, 0);
+            }
+        }
+
+        // Pass 2 flushes through the ROUNDED SDF pipeline, not the plain sprite
+        // shader: the plain shader ignores the corner radius entirely, so every
+        // Pass-2 primitive (slider track + fill + thumb, progressbar track + fill +
+        // stripes, toggle thumb, checkmark strokes) drew square-cornered while its
+        // frame was rounded in Pass 1. A radius-0 quad is unaffected by the SDF, so
+        // the primitives that DO want sharp corners keep them.
+        if (batch.count > 0) {
+            r.flush_rounded_sprites(batch, scope_key(r));
+        }
+
+        r.set_scissor(0, 0, fw, fh);
+        batch.reset();
+
+        // ── Pass 3: text ────────────────────────────────────────────
+        for (u16 i = 0; i < count; ++i) {
+            auto &w = pool[i];
+            if (!is_visible(i) || !in_render_scope(i)) {
+                continue;
+            }
+            // A TabBar has no text of its own: its labels come from the app's
+            // tab array, so the empty-text guard must not skip it.
+            // A widget with no text of its own still draws text in these cases:
+            // LISTBOX / COMBOBOX / TABBAR get theirs from an app-supplied array,
+            // and SLIDER / PROGRESSBAR draw a VALUE label ("42%") beside the bar.
+            // They have to be listed here or the guard skips them and the value
+            // never appears at all.
+            if (text_of(i)[0] == '\0' && w.type != (u8)widget_type::LISTBOX && w.type != (u8)widget_type::COMBOBOX &&
+                w.type != (u8)widget_type::TABBAR && w.type != (u8)widget_type::SLIDER &&
+                w.type != (u8)widget_type::PROGRESSBAR) {
+                continue;
+            }
+
+            f32    ax    = abs_x(i);
+            f32    ay    = abs_y(i);
+
+            f32    pad_l = static_cast<f32>(w.pad[3]);
+            f32    pad_r = static_cast<f32>(w.pad[1]);
+            f32    pad_t = static_cast<f32>(w.pad[0]);
+            f32    pad_b = static_cast<f32>(w.pad[2]);
+
+            f32    a     = static_cast<f32>(content_ascent[i]);
+            f32    hc    = static_cast<f32>(content_h[i]);
+
+            i16  cx, cy;
+            u16 cw, ch;
+            bool     clipped = get_clip(i, cx, cy, cw, ch);
+            // An empty clip means draw NOTHING - the last pass that was missing this.
+            // A collapsed accordion (or anything else a container intersects down to
+            // zero) reports "clipped, h == 0", which is NOT "no clip": passing the
+            // zero rect through records an invalid scissor in the graph, and every
+            // text pass from here on inherits whatever the backend does with it.
+            // Every other pass that scissors per widget (1, 1.75, 1.9, 2) already
+            // asks clip_draws() first; this one had the comment and not the check.
+            if (!clip_draws(clipped, cw, ch)) {
+                continue;
+            }
+            if (clipped) {
+                r.set_scissor(cx, cy, cw, ch, ui::text_key(r));
+            }
+
+            f32 txt_x = 0, txt_y = 0;
+            f32 txt_sc = 1.0f;
+
+            if (w.type == (u8)widget_type::BUTTON) {
+                ui::button::render_text(*this, i, ax, ay, pad_l, pad_r, pad_t, pad_b, a, hc, r);
+            } else if (w.type == (u8)widget_type::TOGGLE) {
+                // Label goes right of the track (same pattern as the slider % label).
+                // (Was missing: txt_x stayed 0.0 and every toggle label piled at the window edge.)
+                txt_x  = ax + w.frame.w + pad_r + 8.0f;
+                txt_y  = ay + pad_t + (w.frame.h - pad_t - pad_b + 2.0f * a - hc) * 0.5f;
+                txt_sc = w.scale;
+                r.draw_text(r.default_font, w.text, txt_x, txt_y, w.text_color, txt_sc);
+            } else if (w.type == (u8)widget_type::CHECKBOX || w.type == (u8)widget_type::RADIOBOX) {
+                txt_x  = ax + pad_l + w.frame.w + 6.0f;
+                txt_y  = ay + pad_t + (w.frame.h - pad_t - pad_b + 2.0f * a - hc) * 0.5f;
+                txt_sc = w.scale;
+                // Multi-line: the ink box (content_h) already includes one
+                // line_height per extra line, so centring that box and stacking
+                // lines from its top handles 1..N lines with the same maths.
+                draw_text_lines(r, text_of(i), txt_x, txt_y - a, txt_sc, w.text_color, text_align_of(*this, i),
+                                 text_box_w(*this, i, static_cast<f32>(content_w[i])), text_box_limit(*this, i));
+            } else if (w.type == (u8)widget_type::TEXT_FIELD) {
+                txt_x  = ax + pad_l + 8.0f;
+                txt_y  = ay + pad_t + (w.frame.h - pad_t - pad_b + 2.0f * a - hc) * 0.5f;
+                txt_sc = w.scale;
+                // A text field is a fixed-width box and its value can be longer, so
+                // it clips its OWN text - it had no scissor at all and the string
+                // drew straight over whatever sat next to it. No ellipsis: the
+                // caret tracks the real advance, so cutting the string would put
+                // "..." and a caret that disagree about where the text ends.
+                //
+                // set_scissor REPLACES, and an ancestor clip (WF_CLIP panel) is
+                // already active, so intersect the two by hand rather than
+                // widening.
+                const f32 fl = ax + static_cast<f32>(pad_l);
+                const f32 ft = ay + static_cast<f32>(pad_t);
+                const f32 fr = ax + w.frame.w - static_cast<f32>(pad_r);
+                const f32 fb = ay + w.frame.h - static_cast<f32>(pad_b);
+                const f32 cl0 = clipped ? cx : 0.0f;
+                const f32 ct0 = clipped ? cy : 0.0f;
+                const f32 cr0 = clipped ? (cx + cw) : static_cast<f32>(fw);
+                const f32 cb0 = clipped ? (cy + ch) : static_cast<f32>(fh);
+                const f32 il  = fmaxf(fl, cl0);
+                const f32 it  = fmaxf(ft, ct0);
+                const f32 ir  = fminf(fr, cr0);
+                const f32 ib  = fminf(fb, cb0);
+                const bool  ok  = ir > il && ib > it;
+                if (ok) {
+                    r.set_scissor(il, it, ir - il, ib - it, ui::text_key(r));
+                }
+                r.draw_text(r.default_font, text_of(i), txt_x, txt_y, w.text_color, txt_sc);
+                if (ok) {
+                    // Back to whatever the ancestor clip (or the full frame) was.
+                    r.set_scissor(clipped ? cx : 0.0f, clipped ? cy : 0.0f, clipped ? cw : static_cast<f32>(fw),
+                                  clipped ? ch : static_cast<f32>(fh), ui::text_key(r));
+                }
+            } else if (w.type == (u8)widget_type::SLIDER) {
+                ui::slider::render_text(*this, i, ax, ay, pad_r, pad_t, pad_b, a, hc, r);
+            } else if (w.type == (u8)widget_type::PROGRESSBAR) {
+                ui::progressbar::render_text(*this, i, ax, ay, pad_r, pad_t, pad_b, a, hc, r);
+            } else if (w.type == (u8)widget_type::LISTBOX) {
+                // Header titles first, so a title is never overdrawn by a row that
+                // scrolled under it (both land at the text key; submission order
+                // decides).
+                grid_header_text(*this, i, r, ax, ay);
+                ui::listbox::render_rows(*this, i, ax, ay, batch, r, clipped, cx, cy, cw, ch, fw, fh);
+            } else if (w.type == (u8)widget_type::COMBOBOX) {
+                // Closed field: current label (or filter text) + chevron.
+                // Row-sized text (same scale as the popup rows), vertically
+                // centered with button-identical math at the draw scale.
+                const ListboxMetrics &lm  = combobox_metrics[i];
+                f32                 csc = (lm.row_h > 0.0f) ? lm.text_scale : 0.45f;
+                f32                 sa  = a * csc; // content measured at wg.scale; rescale
+                f32                 sh  = hc * csc;
+                txt_x                     = ax + pad_l + 8.0f;
+                txt_y                     = ay + pad_t + (w.frame.h - pad_t - pad_b + 2.0f * sa - sh) * 0.5f;
+                txt_sc                    = csc;
+                const char *label         = (w.text[0] != '\0') ? w.text : "--";
+                u32    tc            = (w.text[0] != '\0') ? w.text_color : theme.text_secondary;
+                // Long labels must not run into the chevron: clip the label to
+                // the field minus the chevron zone, then draw the chevron.
+                f32       lbl_w         = w.frame.w - 24.0f; // chevron lives in the last ~22px
+                if (lbl_w < 8.0f) {
+                    lbl_w = 8.0f;
+                }
+                r.set_scissor(static_cast<i16>(ax), static_cast<i16>(ay), static_cast<u16>(lbl_w), static_cast<u16>(w.frame.h), ui::text_key(r));
+                r.draw_text(r.default_font, label, txt_x, txt_y, tc, txt_sc);
+                if (clipped) {
+                    r.set_scissor(cx, cy, cw, ch, ui::text_key(r));
+                } else {
+                    r.set_scissor(0, 0, fw, fh, ui::text_key(r));
+                }
+                const char *chev = combobox_open[i] ? "^" : "v";
+                r.draw_text(r.default_font, chev, ax + w.frame.w - pad_r - 16.0f, txt_y, tc, txt_sc);
+            } else if (w.type == (u8)widget_type::TABBAR) {
+                // Cell labels are positioned from the cell grid, so they cannot go
+                // through the shared one-string chain.
+                tabbar::render_text(*this, i, r);
+            } else {
+                // Label (Panel/Image carry no text): top-align the GLYPH top at
+                // ay + pad_t. draw_text places glyphs by signed bearings (top
+                // lands ~ascent above the origin), so the origin needs the
+                // +ascent term — without it labels stick out above their y
+                // (clipped under WF_CLIP parents, misaligned in grids).
+                // Label / Panel: top-align the ink box, honouring text_of().
+                // Multi-line: content_h already spans every line, so stacking from
+                // its top handles 1..N with the same maths as one line.
+                const char *ltxt = text_of(i);
+                txt_x            = ax + pad_l;
+                txt_y            = ay + pad_t;
+                // Same scale measure() used, so the box and the glyphs agree.
+                txt_sc           = widget_text_scale(*this, i);
+                draw_text_lines(r, ltxt, txt_x, txt_y, txt_sc, w.text_color, text_align_of(*this, i), text_box_w(*this, i, static_cast<f32>(content_w[i])),
+                                 text_box_limit(*this, i));
+            }
+            if (clipped) {
+                r.set_scissor(0, 0, fw, fh, ui::text_key(r));
+            }
+        }
+
+        if (batch.count > 0) {
+            r.flush_sprites(batch, r.white_tex, r.default_sampler, scope_key(r));
+        }
+        batch.reset();
+}
+
+// Four quads AROUND the modal root, flushed at the TEXT key (Pass 3.5, hoisted
+// out of render()). render() calls it AFTER the modal subtree: it never overlaps
+// the modal rect by construction, so the order is geometrically irrelevant, and
+// last is what keeps it right for any text_layer.
+//
+// The carve-out is what makes the dialog's own background safe, and that is the
+// WHOLE reason it is four quads rather than one full-screen dim: the dialog is
+// drawn by render_passes() at the text key, and a full-screen dim at the same key
+// would cover it (same key -> submission order decides).
+void Manager::render_modal_backdrop(Renderer &r, SpriteBatch &batch, u16 fw, u16 fh) noexcept {
+        // ── Pass 3.5: modal backdrop ─────────────────────────────────
+        // Four quads AROUND the modal root, flushed at the TEXT key - the whole
+        // frame is one pass, so a key-0 quad could never dim key-1 text (scene
+        // labels would punch straight through it). Carving the dialog's own rect
+        // out of the dim also means the dialog background - drawn back in Pass 1 -
+        // is never covered, so no pass reordering is needed.
+        if (modal_id != UINT16_MAX && theme.modal_backdrop != 0) {
+            const f32 mx = abs_x(modal_id);
+            const f32 my = abs_y(modal_id);
+            const f32 mw = pool[modal_id].frame.w;
+            const f32 mh = pool[modal_id].frame.h;
+            const f32 W  = static_cast<f32>(fw);
+            const f32 H  = static_cast<f32>(fh);
+            const u32 dc = theme.modal_backdrop;
+            if (my > 0.0f) { // above
+                batch.add(W * 0.5f, my * 0.5f, W, my, 0.0f, dc, 0);
+            }
+            if (my + mh < H) { // below
+                const f32 bh = H - (my + mh);
+                batch.add(W * 0.5f, my + mh + bh * 0.5f, W, bh, 0.0f, dc, 0);
+            }
+            if (mx > 0.0f) { // left
+                batch.add(mx * 0.5f, my + mh * 0.5f, mx, mh, 0.0f, dc, 0);
+            }
+            if (mx + mw < W) { // right
+                const f32 rw2 = W - (mx + mw);
+                batch.add(mx + mw + rw2 * 0.5f, my + mh * 0.5f, rw2, mh, 0.0f, dc, 0);
+            }
+            r.flush_sprites(batch, r.white_tex, r.default_sampler, ui::text_key(r));
+            batch.reset();
+        }
+}
+
 
 } // namespace ui

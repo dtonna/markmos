@@ -11,9 +11,15 @@
 #include "../math/mm_math.h"
 #include "../math/mm_mat4.h"
 #include "../rhi/mm_rhi_concept.hpp"
+#include "mm_bind_cache.hpp"
 #include "mm_font_atlas.hpp"
 #include "mm_font_data.hpp"
+#if MM_ENGINE_FONT_SYM1
+#include "mm_glyph_undo_data.hpp"
+#endif
+#if MM_ENGINE_FONT_SYM
 #include "mm_font_sym_data.hpp"
+#endif
 #include "mm_material.hpp"
 #include "mm_render_graph.hpp"
 #include "mm_shader_registry.hpp"
@@ -47,6 +53,56 @@ using ActiveBackend = VulkanBackend;
 
 static_assert(RHI_Backend<ActiveBackend>, "ActiveBackend must satisfy RHI_Backend concept");
 
+// ── Descriptor binding numbers ────────────────────────────────────────────
+//
+// READ THIS BEFORE TOUCHING ANY binding NUMBER — there are two different
+// numberings and they do NOT offset from each other.
+//
+// (1) PHYSICAL — what the shader declares, what a descriptor SET LAYOUT holds.
+//     Every GLSL shader declares layout(binding = N) and every Metal twin
+//     declares [[buffer(N)]] / [[texture(N)]]. This is the `bind::` namespace
+//     below, and it is legal in `descriptor_bindings[]` ONLY.
+//
+// (2) LOGICAL — the slot a caller passes to bind_uniform_buffer. Both backends
+//     add 1 on the way in, because physical binding 0 is always the texture:
+//       MetalBackend   u32 physical_idx = index + 1;  -> setVertexBuffer /
+//                      setFragmentBuffer
+//       VulkanBackend  u32 physical_binding = binding + 1; -> current_ubos[]
+//     So logical 0 -> binding 1, logical 1 -> binding 2. Passing a `bind::`
+//     constant to bind_uniform_buffer double-shifts it: the camera lands on
+//     the params binding, the params land on a binding the layout never
+//     declared, and the camera descriptor is left UNWRITTEN — which on Vulkan
+//     means the vertex shader reads a descriptor the driver never saw written.
+//
+//   tex     0  fragment: the sampled texture + sampler        (logical: n/a)
+//   camera  1  vertex:   the CameraUBO (sdf.vert, sprite.vert) (logical: 0)
+//   params  2  fragment: an effect's uniform block            (logical: 1)
+//   atlas   3  vertex:   particle atlas (particle_vertex_msl) (logical: 2)
+//
+// One pipeline does not follow the 0/1/2 default, because it has no vertex
+// buffer at slot 0 and no CameraUBO at all:
+//   particle_pipeline — logical 1/2 -> bindings 2/3 (camera, atlas)
+// It is called out at its call site and its layout entry.
+//
+// A pipeline's descriptor_bindings entries AND the logical slots must agree
+// after that shift, because a UBO written onto a binding the layout declared
+// as a sampler is a type-mismatched descriptor write — not a soft failure.
+// lavapipe (the emulator's Vulkan) aborts the whole guest on it, taking the
+// emulator down with the app.
+//
+// camera is ALSO the second texture slot for the normal-map shaders
+// (normal_map.frag / plastic.frag declare a sampler at binding 1). That is a
+// stage split — UBO in the vertex stage, sampler in the fragment stage — which
+// Vulkan allows but only as ONE layout entry with merged stage flags. The
+// backend passes descriptor_bindings[] to vkCreateDescriptorSetLayout verbatim,
+// so those shaders are not expressible yet; see the note at their entries.
+namespace bind {
+inline constexpr u32 tex    = 0;
+inline constexpr u32 camera = 1;
+inline constexpr u32 params = 2;
+inline constexpr u32 atlas  = 3;
+} // namespace bind
+
 struct Renderer {
     ActiveBackend *backend = nullptr;
 
@@ -57,19 +113,10 @@ struct Renderer {
 
     PipelineHandle            sprite_pipeline{};
     PipelineHandle            sprite_additive_pipeline{};
-    PipelineHandle            sprite_multiply_pipeline{};
-    PipelineHandle            sprite_opaque_pipeline{};
     PipelineHandle            sdf_pipeline{};
     PipelineHandle            particle_pipeline{};
     PipelineHandle            rounded_sprite_pipeline{};
     PipelineHandle            rounded_sprite_glow_pipeline{};
-    PipelineHandle            rounded_sprite_border_pipeline{};
-    PipelineHandle            sprite_outline_pipeline{};
-    PipelineHandle            clip_rect_pipeline{};
-    PipelineHandle            dissolve_pipeline{};
-    PipelineHandle            grayscale_pipeline{};
-    PipelineHandle            blur_pipeline{};
-    PipelineHandle            color_grade_pipeline{};
     PipelineHandle            normal_derive_pipeline{};
     PipelineHandle            normal_map_pipeline{};
     PipelineHandle            cartoon_pipeline{};
@@ -81,8 +128,6 @@ struct Renderer {
 
     BufferHandle              rounded_params_ubo{};
     BufferHandle              rounded_params_glow_ubo{};
-    BufferHandle              blur_params_ubo{};
-    BufferHandle              color_grade_ubo{};
     // Lab-port UBOs: one buffer PER FLUSH FUNCTION, not per struct.
     // update_buffer() memcpys immediately while draws execute later at
     // submit(), so sharing one buffer across flushes would let the last
@@ -153,23 +198,7 @@ struct Renderer {
     };
     static_assert(sizeof(RingParams) == sizeof(f32) * 4, "RingParams must be one float4");
 
-    struct BlurParams {
-        f32 direction_x;   // 1.0 = horizontal, 0.0 = vertical
-        f32 direction_y;   // 0.0 = horizontal, 1.0 = vertical
-        f32 radius;        // blur strength in pixels
-        f32 weights[7];    // Gaussian weights (7 taps = 15 samples with center)
-        f32 _pad[2];       // pad to 48 bytes (3 float4)
-    };
-    static_assert(sizeof(BlurParams) == sizeof(f32) * 12, "BlurParams must be three float4");
 
-    struct ColorGrade {
-        f32 brightness;   // 0..2, default 1.0
-        f32 contrast;     // 0..2, default 1.0
-        f32 saturation;   // 0..2, default 1.0
-        f32 hue_matrix[9]; // 3x3 column-major hue rotation matrix
-        f32 _pad[4];      // pad to 64 bytes (4 float4)
-    };
-    static_assert(sizeof(ColorGrade) == sizeof(f32) * 16, "ColorGrade must be four float4");
 
     // ─── Lab-port param blocks (all float4 members: Metal 16-byte packing) ──
     struct NormalParams {
@@ -251,19 +280,10 @@ struct Renderer {
         }
         destroy_safe(sprite_pipeline, [&](auto &h) { backend->destroy_pipeline(h); });
         destroy_safe(sprite_additive_pipeline, [&](auto &h) { backend->destroy_pipeline(h); });
-        destroy_safe(sprite_multiply_pipeline, [&](auto &h) { backend->destroy_pipeline(h); });
-        destroy_safe(sprite_opaque_pipeline, [&](auto &h) { backend->destroy_pipeline(h); });
         destroy_safe(sdf_pipeline, [&](auto &h) { backend->destroy_pipeline(h); });
         destroy_safe(particle_pipeline, [&](auto &h) { backend->destroy_pipeline(h); });
         destroy_safe(rounded_sprite_pipeline, [&](auto &h) { backend->destroy_pipeline(h); });
         destroy_safe(rounded_sprite_glow_pipeline, [&](auto &h) { backend->destroy_pipeline(h); });
-        destroy_safe(rounded_sprite_border_pipeline, [&](auto &h) { backend->destroy_pipeline(h); });
-        destroy_safe(sprite_outline_pipeline, [&](auto &h) { backend->destroy_pipeline(h); });
-        destroy_safe(clip_rect_pipeline, [&](auto &h) { backend->destroy_pipeline(h); });
-        destroy_safe(dissolve_pipeline, [&](auto &h) { backend->destroy_pipeline(h); });
-        destroy_safe(grayscale_pipeline, [&](auto &h) { backend->destroy_pipeline(h); });
-        destroy_safe(blur_pipeline, [&](auto &h) { backend->destroy_pipeline(h); });
-        destroy_safe(color_grade_pipeline, [&](auto &h) { backend->destroy_pipeline(h); });
         destroy_safe(normal_derive_pipeline, [&](auto &h) { backend->destroy_pipeline(h); });
         destroy_safe(normal_map_pipeline, [&](auto &h) { backend->destroy_pipeline(h); });
         destroy_safe(cartoon_pipeline, [&](auto &h) { backend->destroy_pipeline(h); });
@@ -285,8 +305,6 @@ struct Renderer {
         destroy_safe(default_sampler, [&](auto &h) { backend->destroy_sampler(h); });
         destroy_safe(rounded_params_ubo, [&](auto &h) { backend->destroy_buffer(h); });
         destroy_safe(rounded_params_glow_ubo, [&](auto &h) { backend->destroy_buffer(h); });
-        destroy_safe(blur_params_ubo, [&](auto &h) { backend->destroy_buffer(h); });
-        destroy_safe(color_grade_ubo, [&](auto &h) { backend->destroy_buffer(h); });
         destroy_safe(normal_derive_ubo, [&](auto &h) { backend->destroy_buffer(h); });
         destroy_safe(normal_map_ubo, [&](auto &h) { backend->destroy_buffer(h); });
         destroy_safe(cartoon_ubo, [&](auto &h) { backend->destroy_buffer(h); });
@@ -310,6 +328,14 @@ struct Renderer {
         inv_width         = screen_w ? 1.0f / static_cast<f32>(screen_w) : 1.0f;
         inv_height        = screen_h ? 1.0f / static_cast<f32>(screen_h) : 1.0f;
 
+        // init() is called a second time by device recovery — Android's
+        // recover_device() shuts the renderer down and then re-inits rather than
+        // rebuilding the app. Re-allocating without releasing the first pair leaks
+        // both buffers (COMMAND_STORAGE_BYTES each) on every recovery, and the
+        // old pointers are only freed by the destructor, which recovery does not
+        // reach.
+        delete[] command_storage_0;
+        delete[] command_storage_1;
         command_storage_0 = new Command[MAX_COMMANDS];
         command_storage_1 = new Command[MAX_COMMANDS];
 
@@ -356,42 +382,6 @@ struct Renderer {
         }
         rounded_params_glow_ubo = *glow_params;
         (void)backend->update_buffer(rounded_params_glow_ubo, &rounded_params_data, 0, sizeof(rounded_params_data));
-
-        // Blur UBO
-        BufferDesc blur_params_desc{};
-        blur_params_desc.type        = BufferType::Uniform;
-        blur_params_desc.size        = sizeof(BlurParams);
-        blur_params_desc.cpu_visible = true;
-        auto blur_params             = backend->create_buffer(blur_params_desc);
-        if (!blur_params) {
-            MM_ERROR("Renderer::init() - Failed to create BlurParams UBO");
-            destroy_resources();
-            return make_unexpected(blur_params.error());
-        }
-        blur_params_ubo = *blur_params;
-        // 15-tap Gaussian weights (sigma=2.5, normalized)
-        BlurParams blur_params_data = {1.0f, 0.0f, 4.0f,
-            {0.132981f, 0.114226f, 0.087775f, 0.059634f, 0.035841f, 0.018954f, 0.008829f},
-            {0.0f, 0.0f}};
-        (void)backend->update_buffer(blur_params_ubo, &blur_params_data, 0, sizeof(blur_params_data));
-
-        // Color Grade UBO
-        BufferDesc cg_params_desc{};
-        cg_params_desc.type        = BufferType::Uniform;
-        cg_params_desc.size        = sizeof(ColorGrade);
-        cg_params_desc.cpu_visible = true;
-        auto cg_params             = backend->create_buffer(cg_params_desc);
-        if (!cg_params) {
-            MM_ERROR("Renderer::init() - Failed to create ColorGrade UBO");
-            destroy_resources();
-            return make_unexpected(cg_params.error());
-        }
-        color_grade_ubo = *cg_params;
-        // Identity matrix for no hue shift
-        ColorGrade cg_params_data = {1.0f, 1.0f, 1.0f,
-            {1.0f, 0.0f, 0.0f,  0.0f, 1.0f, 0.0f,  0.0f, 0.0f, 1.0f},
-            {0.0f, 0.0f, 0.0f, 0.0f}};
-        (void)backend->update_buffer(color_grade_ubo, &cg_params_data, 0, sizeof(cg_params_data));
 
         // Lab-port UBOs: one buffer per flush function (see member comment).
         auto create_param_ubo = [&](size_t size, const char *name, BufferHandle &out, const void *init_data) noexcept -> bool {
@@ -518,54 +508,79 @@ struct Renderer {
         }
         default_sampler = *samp;
 
-        // Font atlas init — bake Latin + Thai into one R8 texture
+        // Font atlas init — every ENABLED font set is appended below into ONE
+        // R8 texture. `next_y` is the append cursor: bake_range returns the row
+        // after what it wrote, and each set must hand that on to the next.
+        // The three optional sets are gated on MM_ENGINE_FONT_* (the
+        // ENGINE_FONT_* options in engine/CMakeLists.txt).
         FontAtlas fa;
         fa.bake(g_karla_ttf, static_cast<int>(g_karla_ttf_size), 48.0f);
         // fa.bake() clears pixels, bakes ASCII range 32..127, and stores next-y
         // We derive next_y from the last ASCII char's pixel bottom
-        int ascii_next_y = 0;
+        int next_y = 0;
         for (int i = 0; i < FONT_NUM_CHARS; ++i) {
             f32 y1      = fa.baked_chars[i * 4 + 3] + 1.0f;
             int   row_end = static_cast<int>(y1);
-            if (row_end > ascii_next_y) {
-                ascii_next_y = row_end;
-            }
-        }
-        stbtt_bakedchar th_cd[MAX_GLYPHS_TH];
-        memset(th_cd, 0, sizeof(th_cd));
-        int th_start = 0x0E01;
-        int th_end   = 0x0E5B;
-        if (fa.bake_range(g_sarabun_ttf, 48.0f, 0x0E01, MAX_GLYPHS_TH, ascii_next_y, th_cd) < 0) {
-            // Fallback: try to bake each character individually
-            for (int cp = th_start; cp <= th_end; ++cp) {
-                (void)fa.bake_range(g_sarabun_ttf, 48.0f, cp, 1, ascii_next_y, &th_cd[cp - th_start]);
+            if (row_end > next_y) {
+                next_y = row_end;
             }
         }
 
-        // ── Suit symbols (♠ U+2660, ♥ U+2665, ♦ U+2666, ♣ U+2663) ──────────
-        // Bake BEFORE texture upload so pixel data reaches GPU
+        // Glyph slots 0..7 are the suit symbols, slot 8 holds ⎌ (U+238C).
+        // Both are declared regardless so the slot indices stay fixed.
         stbtt_bakedchar sym_cd[MAX_GLYPHS_SYM];
         memset(sym_cd, 0, sizeof(sym_cd));
-        int sym_next_y = ascii_next_y;
-        if (g_noto_symbols_ttf_len > 0) {
-            constexpr int K_SUIT_START = 0x2660;
-            constexpr int K_SUIT_COUNT = 8;
-            int           ret          = fa.bake_range(g_noto_symbols_ttf, 48.0f, K_SUIT_START, K_SUIT_COUNT, sym_next_y, sym_cd);
-            if (ret < 0) {
-                for (int cp = K_SUIT_START; cp < K_SUIT_START + K_SUIT_COUNT; ++cp) {
-                    int r = fa.bake_range(g_noto_symbols_ttf, 48.0f, cp, 1, sym_next_y, &sym_cd[cp - K_SUIT_START]);
-                    if (r > 0) {
-                        sym_next_y = r;
-                    }
-                }
-            } else {
-                sym_next_y = ret;
-            }
-            // Bake ⎌ (U+238C, undo symbol) at slot 8 from Noto Sans Symbols (v1)
-            if (g_noto_symbols1_ttf_len > 0) {
-                (void)fa.bake_range(g_noto_symbols1_ttf, 48.0f, 0x238C, 1, sym_next_y, &sym_cd[8]);
-            }
+
+#if MM_ENGINE_FONT_TH
+        // ── Thai (Sarabun) ────────────────────────────────────────────────
+        stbtt_bakedchar th_cd[MAX_GLYPHS_TH];
+        memset(th_cd, 0, sizeof(th_cd));
+        int th_start = 0x0E01;
+        int th_count = MAX_GLYPHS_TH;
+        int th_next  = AppendFontRange(fa, g_sarabun_ttf, 48.0f, th_start, th_count, next_y, th_cd);
+        if (th_next == next_y) {
+            // Bulk bake placed nothing (the requested range spans codepoints
+            // Sarabun does not have) — bake one at a time instead.
+            th_next = AppendFontRangeEach(fa, g_sarabun_ttf, 48.0f, th_start, th_count, next_y, th_cd);
         }
+        if (th_next > next_y) {
+            next_y = th_next;
+        }
+#endif  // MM_ENGINE_FONT_TH
+
+#if MM_ENGINE_FONT_SYM
+        // ── Suit symbols (♠ U+2660, ♥ U+2665, ♦ U+2666, ♣ U+2663) ──────────
+        // Bake BEFORE texture upload so pixel data reaches GPU
+        constexpr int K_SUIT_START = 0x2660;
+        constexpr int K_SUIT_COUNT = 8;
+        int           sym_next     = AppendFontRange(fa, g_noto_symbols_ttf, 48.0f, K_SUIT_START, K_SUIT_COUNT, next_y, sym_cd);
+        if (sym_next == next_y) {
+            sym_next = AppendFontRangeEach(fa, g_noto_symbols_ttf, 48.0f, K_SUIT_START, K_SUIT_COUNT, next_y, sym_cd);
+        }
+        if (sym_next > next_y) {
+            next_y = sym_next;
+        }
+#endif  // MM_ENGINE_FONT_SYM
+
+#if MM_ENGINE_FONT_SYM1
+        // ── ⎌ (U+238C, undo symbol) ────────────────────────────────────────
+        // Deliberately NOT nested inside the suit block: it is a different
+        // glyph, and an app can enable it without the 1.2 MB suit set.
+        //
+        // Pre-baked, not a TTF: NotoSansSymbols1 is 185 KB for this one
+        // glyph. tools/build_undo_glyph.cpp emits the 19x14 bitmap and
+        // proves it matches baking the TTF before writing it.
+        int undo_next = AppendBakedGlyph(fa, mm_glyph_undo_bitmap,
+                                        mm_glyph_undo_x1 - mm_glyph_undo_x0,
+                                        mm_glyph_undo_y1 - mm_glyph_undo_y0,
+                                        mm_glyph_undo_x0, mm_glyph_undo_y0,
+                                        mm_glyph_undo_x1, mm_glyph_undo_y1,
+                                        mm_glyph_undo_xoff, mm_glyph_undo_yoff,
+                                        mm_glyph_undo_advance, next_y, &sym_cd[8]);
+        if (undo_next > next_y) {
+            next_y = undo_next;
+        }
+#endif  // MM_ENGINE_FONT_SYM1
 
         // ── Create GPU texture (contains ASCII + Thai + suits) ──────────────
         TextureDesc font_tex_desc{};
@@ -614,6 +629,7 @@ struct Renderer {
             g.bearing_y = static_cast<i8>(by);
             g.advance   = static_cast<u8>(fa.xadvance[i]);
         }
+        #if MM_ENGINE_FONT_TH
         for (int i = 0; i < MAX_GLYPHS_TH; ++i) {
             auto &g     = default_font.glyphs_th[i];
             auto &bc    = th_cd[i];
@@ -625,6 +641,7 @@ struct Renderer {
             g.bearing_y = static_cast<i8>(bc.yoff);
             g.advance   = static_cast<u8>(bc.xadvance);
         }
+#endif  // MM_ENGINE_FONT_TH
         for (int i = 0; i < MAX_GLYPHS_SYM; ++i) {
             auto &g     = default_font.glyphs_sym[i];
             auto &bc    = sym_cd[i];
@@ -776,16 +793,21 @@ struct Renderer {
 #endif
 
         // State tracking for redundant-bind suppression (Metal validation)
-        PipelineHandle last_pipeline{};
+        //
+        // Descriptor bindings (pipeline + texture/sampler/UBO slots) live in
+        // DescriptorBindCache: on Vulkan they are PER-PIPELINE state, so a
+        // pipeline change has to invalidate the whole set. See that header for
+        // the failure it prevents.
+        DescriptorBindCache desc_cache;
+        // Vertex/index buffers and the scissor stay raw locals: they are global
+        // dynamic state on Vulkan and encoder state on Metal, so they DO survive a
+        // pipeline change and suppressing across one is correct.
         BufferHandle   last_vb{};
         u32       last_vb_off = UINT32_MAX;
         u32       last_vb_str = UINT32_MAX;
         BufferHandle   last_ib{};
         IndexType      last_ib_type = static_cast<IndexType>(0xFF);
         u32       last_ib_off  = UINT32_MAX;
-        TextureHandle  last_tex[4]  = {};
-        SamplerHandle  last_sam[4]  = {};
-        BufferHandle   last_ubo[4]  = {};
         i16        last_sx = -1, last_sy = -1;
         u16       last_sw = 0, last_sh = 0;
 
@@ -795,10 +817,13 @@ struct Renderer {
             case CmdType::BindPipeline: {
                 auto h = cmd.data.bind_pipeline.pipeline;
                 // MM_LOG("SUBMIT: BindPipeline handle.id=%u gen=%u", h.handle.id, h.handle.gen);
-                if (h.handle.id == last_pipeline.handle.id && h.handle.gen == last_pipeline.handle.gen) {
+                // pipeline_changed() records the handle AND drops the cached
+                // descriptor bindings it owned. The identical-pipeline case
+                // returns false first, so suppression WITHIN one pipeline — the
+                // case that actually saves work — still works.
+                if (!desc_cache.pipeline_changed(h)) {
                     break;
                 }
-                last_pipeline = h;
 #if defined(ENGINE_ENABLE_ASSERT)
                 auto *pl = backend->pipelines.get(h.handle);
                 if (!pl) {
@@ -837,33 +862,24 @@ struct Renderer {
             }
             case CmdType::BindFragmentTexture: {
                 auto &ft = cmd.data.bind_frag_tex;
-                if (ft.index < 4 && ft.texture.handle.id == last_tex[ft.index].handle.id && ft.texture.handle.gen == last_tex[ft.index].handle.gen) {
+                if (!desc_cache.texture_changed(ft.index, ft.texture)) {
                     break;
-                }
-                if (ft.index < 4) {
-                    last_tex[ft.index] = ft.texture;
                 }
                 (void)backend->bind_fragment_texture(ft.texture, ft.index);
                 break;
             }
             case CmdType::BindFragmentSampler: {
                 auto &fs = cmd.data.bind_frag_samp;
-                if (fs.index < 4 && fs.sampler.handle.id == last_sam[fs.index].handle.id && fs.sampler.handle.gen == last_sam[fs.index].handle.gen) {
+                if (!desc_cache.sampler_changed(fs.index, fs.sampler)) {
                     break;
-                }
-                if (fs.index < 4) {
-                    last_sam[fs.index] = fs.sampler;
                 }
                 (void)backend->bind_fragment_sampler(fs.sampler, fs.index);
                 break;
             }
             case CmdType::BindUniformBuffer: {
                 auto &ubo = cmd.data.bind_ubo;
-                if (ubo.binding < 4 && ubo.buffer.handle.id == last_ubo[ubo.binding].handle.id && ubo.buffer.handle.gen == last_ubo[ubo.binding].handle.gen) {
+                if (!desc_cache.uniform_changed(ubo.binding, ubo.buffer)) {
                     break;
-                }
-                if (ubo.binding < 4) {
-                    last_ubo[ubo.binding] = ubo.buffer;
                 }
                 (void)backend->bind_uniform_buffer(ubo.buffer, ubo.binding);
                 break;
@@ -880,26 +896,17 @@ struct Renderer {
             }
             case CmdType::BeginPass: {
                 // Reset redundant-bind tracking at pass boundary
-                last_pipeline = {};
-                last_vb       = {};
-                last_vb_off   = UINT32_MAX;
-                last_vb_str   = UINT32_MAX;
-                last_ib       = {};
-                last_ib_type  = static_cast<IndexType>(0xFF);
-                last_ib_off   = UINT32_MAX;
-                for (auto &t : last_tex) {
-                    t = {};
-                }
-                for (auto &s : last_sam) {
-                    s = {};
-                }
-                for (auto &u : last_ubo) {
-                    u = {};
-                }
-                last_sx = -1;
-                last_sy = -1;
-                last_sw = 0;
-                last_sh = 0;
+                desc_cache.reset();
+                last_vb      = {};
+                last_vb_off  = UINT32_MAX;
+                last_vb_str  = UINT32_MAX;
+                last_ib      = {};
+                last_ib_type = static_cast<IndexType>(0xFF);
+                last_ib_off  = UINT32_MAX;
+                last_sx      = -1;
+                last_sy      = -1;
+                last_sw      = 0;
+                last_sh      = 0;
                 (void)backend->begin_pass(cmd.data.begin_pass.pass);
                 break;
             }
@@ -1006,8 +1013,9 @@ struct Renderer {
             if (tid != 0) {
                 TextureHandle rt = batch.lookup_texture(tid);
                 if (rt.handle.id != 0) {
-                    tex = rt;
-                }
+tex = rt;
+            }
+
             }
 
             auto group_marker = temp_arena.marker();
@@ -1098,6 +1106,14 @@ struct Renderer {
             // Invariant state: bind once at offset 0, use draw params for per-group offset
             graph.bind_pipeline(pipeline, key);
             graph.bind_vertex_buffer(sprite_vb, 0, 0, sizeof(SpriteVertex), key);
+            // LOGICAL UBO slot, not the shader's binding number. Both backends
+            // add 1 on the way in (Metal: `index + 1` into setVertexBuffer /
+            // setFragmentBuffer; Vulkan: `binding + 1` into current_ubos[]),
+            // because physical binding 0 is the texture. So slot 0 → binding 1
+            // (Camera, what sprite.vert/sdf.vert declare) and slot 1 →
+            // binding 2 (the effect's params block). Passing bind::camera (1)
+            // here instead double-shifts onto binding 2 and leaves the camera
+            // descriptor unwritten.
             graph.bind_uniform_buffer(camera_ubo, 0, key);
             graph.bind_index_buffer(sprite_ib, IndexType::Uint16, 0, key);
             graph.bind_fragment_sampler(sampler, 0, key);
@@ -1133,12 +1149,12 @@ struct Renderer {
     void flush_sprites(SpriteBatch &batch) noexcept { flush_sprites_impl(batch, sprite_pipeline, white_tex, default_sampler); }
 
     // Flush with rounded sprite pipeline
-    void flush_rounded_sprites(SpriteBatch &batch) noexcept {
+    void flush_rounded_sprites(SpriteBatch &batch, SortKey key = SortKey{0, 0, 0, 1.0f}) noexcept {
         if (rounded_params_ubo) {
             RoundedParams p = {render_time, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, {0.0f, 0.0f, 0.0f, 0.0f}};
             (void)backend->update_buffer(rounded_params_ubo, &p, 0, sizeof(p));
         }
-        flush_sprites_impl(batch, rounded_sprite_pipeline, white_tex, default_sampler, rounded_params_ubo);
+        flush_sprites_impl(batch, rounded_sprite_pipeline, white_tex, default_sampler, rounded_params_ubo, key);
     }
 
     // Rounded (SDF) flush with an explicit texture: keeps the style corner
@@ -1249,12 +1265,12 @@ struct Renderer {
         return tex;
     }
 
-    void flush_rounded_sprites(SpriteBatch &batch, TextureHandle tex, SamplerHandle samp) noexcept {
+    void flush_rounded_sprites(SpriteBatch &batch, TextureHandle tex, SamplerHandle samp, SortKey key = SortKey{0, 0, 0, 1.0f}) noexcept {
         if (rounded_params_ubo) {
             RoundedParams p = {render_time, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, {0.0f, 0.0f, 0.0f, 0.0f}};
             (void)backend->update_buffer(rounded_params_ubo, &p, 0, sizeof(p));
         }
-        flush_sprites_impl(batch, rounded_sprite_pipeline, tex, samp, rounded_params_ubo);
+        flush_sprites_impl(batch, rounded_sprite_pipeline, tex, samp, rounded_params_ubo, key);
     }
 
     void flush_rounded_sprites_glow(SpriteBatch &batch, f32 intensity, f32 glow_w, f32 pulse_speed_hz, u32 glow_color) noexcept {
@@ -1372,16 +1388,30 @@ struct Renderer {
     }
 
     // Expanding + fading ring (lab G). Host draws quads k× larger than the
-    // card so the ring has margin to travel in; time comes from render_time.
+    // card so the ring has margin to travel in.
+    //
+    // `phase` chooses the time source:
+    //   phase >= 0  the ring is AT that phase (0 = tight on the card edge,
+    //               1 = fully expanded and gone). For one-shot effects that have
+    //               to start on an EVENT - a card landing on a foundation.
+    //   phase <  0  the original perpetual loop off render_time, which is what
+    //               the lab demos draw.
+    //
+    // The default is -1 so every existing call site keeps its loop, and the value
+    // this UBO used to be written with (0.0f) was NOT the loop — it would have
+    // pinned the ring to the card edge forever.
+    //
     // LIMITATION: params go through ONE shared UBO per shader, written at flush time
     // but read at submit() - so two calls with DIFFERENT params in one frame
     // collapse to the LAST params (the ring fix at flush_ring is the template
     // if that ever needs to be two instances - today the cap is one per family).
+    // This is ALSO why one `phase` serves every quad in the batch: two glows that
+    // must start at different times cannot both be flushed in one frame.
     void flush_glow_pulse(SpriteBatch &batch, TextureHandle texture, SamplerHandle sampler, f32 duration, f32 expand, f32 ring_w,
-                          u32 glow_color, f32 aspect, f32 intensity, f32 quad_k) noexcept {
+                          u32 glow_color, f32 aspect, f32 intensity, f32 quad_k, f32 phase = -1.0f) noexcept {
         if (glow_pulse_ubo) {
             mm_math::color gc = mm_math::color::from_u32_argb(glow_color);
-            GlowParams p = {{render_time, duration, expand, ring_w}, {gc.r, gc.g, gc.b, gc.a}, {aspect, intensity, quad_k, 0.0f}};
+            GlowParams p = {{render_time, duration, expand, ring_w}, {gc.r, gc.g, gc.b, gc.a}, {aspect, intensity, quad_k, phase}};
             (void)backend->update_buffer(glow_pulse_ubo, &p, 0, sizeof(p));
         }
         flush_sprites_impl(batch, glow_pulse_pipeline, texture, sampler, glow_pulse_ubo);
@@ -1424,46 +1454,12 @@ struct Renderer {
     }
 
     // Flush with a Material (pipeline + texture + sampler)
-    void flush_sprites(SpriteBatch &batch, const Material &mat) noexcept { flush_sprites_impl(batch, mat.pipeline, mat.texture, mat.sampler); }
+    void flush_sprites(SpriteBatch &batch, const Material &mat, SortKey key = SortKey{0, 0, 0, 1.0f}) noexcept {
+        flush_sprites_impl(batch, mat.pipeline, mat.texture, mat.sampler, {}, key);
+    }
 
     // Flush with a Technique (uses the first pass)
     void flush_sprites(SpriteBatch &batch, const Technique &tech) noexcept { flush_sprites(batch, tech.current_pass()); }
-
-    // Flush blur (single-pass 15-tap Gaussian; for two-pass use flush_blur_horizontal + flush_blur_vertical)
-    // LIMITATION: params go through ONE shared UBO per shader, written at flush time
-    // but read at submit() - so two calls with DIFFERENT params in one frame
-    // collapse to the LAST params (the ring fix at flush_ring is the template
-    // if that ever needs to be two instances - today the cap is one per family).
-    void flush_blur(SpriteBatch &batch, TextureHandle texture, SamplerHandle sampler, bool horizontal = true, f32 radius = 4.0f) noexcept {
-        if (blur_params_ubo) {
-            BlurParams p = {horizontal ? 1.0f : 0.0f, horizontal ? 0.0f : 1.0f, radius,
-                {0.132981f, 0.114226f, 0.087775f, 0.059634f, 0.035841f, 0.018954f, 0.008829f},
-                {0.0f, 0.0f}};
-            (void)backend->update_buffer(blur_params_ubo, &p, 0, sizeof(p));
-        }
-        flush_sprites_impl(batch, blur_pipeline, texture, sampler, blur_params_ubo);
-    }
-
-    // Flush color grade (brightness, contrast, saturation, hue shift)
-    // LIMITATION: params go through ONE shared UBO per shader, written at flush time
-    // but read at submit() - so two calls with DIFFERENT params in one frame
-    // collapse to the LAST params (the ring fix at flush_ring is the template
-    // if that ever needs to be two instances - today the cap is one per family).
-    void flush_color_grade(SpriteBatch &batch, TextureHandle texture, SamplerHandle sampler,
-                           f32 brightness = 1.0f, f32 contrast = 1.0f, f32 saturation = 1.0f, f32 hue_shift = 0.0f) noexcept {
-        if (color_grade_ubo) {
-            // Compute hue rotation matrix (column-major)
-            f32 c = __builtin_cosf(hue_shift);
-            f32 s = __builtin_sinf(hue_shift);
-            ColorGrade p = {brightness, contrast, saturation,
-                {0.299f + 0.701f*c - 0.168f*s,  0.587f - 0.587f*c - 0.330f*s,  0.114f - 0.114f*c + 0.497f*s,
-                 0.299f - 0.299f*c + 0.328f*s,  0.587f + 0.413f*c + 0.035f*s,  0.114f - 0.114f*c - 0.328f*s,
-                 0.299f - 0.299f*c - 0.328f*s,  0.587f - 0.587f*c + 0.035f*s,  0.114f + 0.886f*c + 0.203f*s},
-                {0.0f, 0.0f, 0.0f, 0.0f}};
-            (void)backend->update_buffer(color_grade_ubo, &p, 0, sizeof(p));
-        }
-        flush_sprites_impl(batch, color_grade_pipeline, texture, sampler, color_grade_ubo);
-    }
 
     // Flush particles — instanced draw from ParticlePool SoA data
     // Shader expects: [[buffer(1)]] instance data, [[buffer(2)]] camera, [[buffer(3)]] atlas
@@ -1482,7 +1478,16 @@ struct Renderer {
         };
         static_assert(sizeof(ParticleInstance) == 64, "ParticleInstance must be 64 bytes");
 
-        auto *instances = temp_arena.alloc_array<ParticleInstance>(count);
+        // Scoped staging: the update_buffer below copies it to the GPU buffer, so the
+        // arena copy is dead immediately after (same contract as
+        // flush_sprites_impl / draw_text). A 10k-particle pool is 640KB per frame
+        // — mm_06 draws that every frame, and without the rewind it walked the
+        // 2MB arena to exhaustion within a few frames.
+        //
+        // Marker BEFORE the alloc, never derived from used(): alloc_array rounds
+        // the offset up for alignment, so used() - bytes is not the mark.
+        const FrameArena::Marker arena_mark = temp_arena.marker();
+        auto                      *instances = temp_arena.alloc_array<ParticleInstance>(count);
         if (!instances) {
             return;
         }
@@ -1517,12 +1522,19 @@ struct Renderer {
         u32 byte_offset = particle_instance_count * sizeof(ParticleInstance);
         // MM_LOG("FLUSH_PARTICLES: count=%u byte_offset=%u size=%lu", count, byte_offset, sizeof(ParticleInstance));
         (void)backend->update_buffer(particle_ib, instances, byte_offset, count * sizeof(ParticleInstance));
+        temp_arena.rewind(arena_mark);
 
         auto &mat = materials[static_cast<u8>(e_material_type::PARTICLE)];
         graph.bind_pipeline(mat.pipeline, key);
         graph.bind_vertex_buffer(particle_ib, 1, byte_offset, sizeof(ParticleInstance), key);
-        graph.bind_uniform_buffer(camera_ubo, 1, key);         // Camera -> [[buffer(2)]] / Binding 1
-        graph.bind_uniform_buffer(particle_atlas_ubo, 2, key); // Atlas -> [[buffer(3)]] / Binding 2
+        // particle_vertex_msl declares instances [[buffer(1)]], camera
+        // [[buffer(2)]], atlas [[buffer(3)]]. Note this pipeline has NO vertex
+        // buffer at slot 0, so its logical UBO slots are 1 and 2 (slot n + 1 =
+        // binding n + 1 lands on camera at 2 and atlas at 3). It is NOT
+        // bind::camera / bind::atlas — those are binding numbers, and this
+        // pipeline's camera binding is 2, not 1.
+        graph.bind_uniform_buffer(camera_ubo, 1, key);         // -> [[buffer(2)]]
+        graph.bind_uniform_buffer(particle_atlas_ubo, 2, key); // -> [[buffer(3)]]
         graph.bind_fragment_texture(mat.texture, 1, key);      // Texture -> [[texture(0)]] / Binding 0
         graph.bind_fragment_sampler(mat.sampler, 1, key);      // Sampler -> [[sampler(0)]] / Binding 0
         graph.draw(key, 4, count, 0, 0);
@@ -1617,8 +1629,8 @@ struct Renderer {
         desc.vertex_attrs[2]        = {2, PixelFormat::R8G8B8A8_UNORM, 8, sizeof(SpriteVertex)};
 
         desc.descriptor_count       = 2;
-        desc.descriptor_bindings[0] = {1, DescriptorType::UniformBuffer, 1, 1};        // Slot 1: Camera
-        desc.descriptor_bindings[1] = {0, DescriptorType::CombinedImageSampler, 2, 1}; // Slot 0: Tex/Samp
+        desc.descriptor_bindings[0] = {bind::camera, DescriptorType::UniformBuffer, 1, 1};        // Slot 1: Camera
+        desc.descriptor_bindings[1] = {bind::tex, DescriptorType::CombinedImageSampler, 2, 1}; // Slot 0: Tex/Samp
 
         // Sprite pipeline
         desc.vertex_shader   = shader::sprite_vertex();
@@ -1632,22 +1644,6 @@ struct Renderer {
         add_desc.src_blend    = BlendFactor::SrcAlpha;
         add_desc.dst_blend    = BlendFactor::One;
         if (auto e = create_default_pipeline(add_desc, "sprite_additive_pipeline", sprite_additive_pipeline); !e) {
-            return e;
-        }
-
-        // Multiply blend sprite pipeline
-        PipelineDesc mul_desc    = desc;
-        mul_desc.src_blend       = BlendFactor::Zero;
-        mul_desc.dst_blend       = BlendFactor::SrcColor;
-        if (auto e = create_default_pipeline(mul_desc, "sprite_multiply_pipeline", sprite_multiply_pipeline); !e) {
-            return e;
-        }
-
-        // Opaque sprite pipeline
-        PipelineDesc opq_desc    = desc;
-        opq_desc.src_blend       = BlendFactor::One;
-        opq_desc.dst_blend       = BlendFactor::Zero;
-        if (auto e = create_default_pipeline(opq_desc, "sprite_opaque_pipeline", sprite_opaque_pipeline); !e) {
             return e;
         }
 
@@ -1669,9 +1665,9 @@ struct Renderer {
         particle_desc.vertex_shader          = shader::particle_vertex();
         particle_desc.fragment_shader        = shader::particle_fragment();
         particle_desc.descriptor_count       = 3;
-        particle_desc.descriptor_bindings[0] = {0, DescriptorType::CombinedImageSampler, 2, 1}; // Texture/sampler
-        particle_desc.descriptor_bindings[1] = {2, DescriptorType::UniformBuffer, 1, 1};        // Camera
-        particle_desc.descriptor_bindings[2] = {3, DescriptorType::UniformBuffer, 1, 1};        // Atlas
+        particle_desc.descriptor_bindings[0] = {0, DescriptorType::CombinedImageSampler, 2, 1}; // Binding 0: Texture/sampler
+        particle_desc.descriptor_bindings[1] = {2, DescriptorType::UniformBuffer, 1, 1};        // Binding 2: Camera
+        particle_desc.descriptor_bindings[2] = {3, DescriptorType::UniformBuffer, 1, 1};        // Binding 3: Atlas
         particle_desc.vertex_attr_count      = 3;
         particle_desc.vertex_attrs[0]        = {0, PixelFormat::R32G32B32A32_FLOAT, 0, 64};
         particle_desc.vertex_attrs[1]        = {1, PixelFormat::R32G32B32A32_FLOAT, 16, 64};
@@ -1685,7 +1681,7 @@ struct Renderer {
         rounded_desc.vertex_shader          = shader::rounded_sprite_vertex();
         rounded_desc.fragment_shader        = shader::rounded_sprite_fragment();
         rounded_desc.descriptor_count       = 3;
-        rounded_desc.descriptor_bindings[2] = {2, DescriptorType::UniformBuffer, 2, 1};
+        rounded_desc.descriptor_bindings[2] = {bind::params, DescriptorType::UniformBuffer, 2, 1};
         rounded_desc.vertex_attr_count      = 6;
         rounded_desc.vertex_attrs[0]        = {0, PixelFormat::R16G16_FLOAT, 0, sizeof(SpriteVertex)};
         rounded_desc.vertex_attrs[1]        = {1, PixelFormat::R16G16_FLOAT, 4, sizeof(SpriteVertex)};
@@ -1711,65 +1707,6 @@ struct Renderer {
             }
         }
 
-        // Border variant pipeline (HAS_GLOW=0, HAS_BORDER=1)
-        {
-            PipelineDesc border_desc = rounded_desc;
-            border_desc.function_constants[0] = {0, false}; // HAS_GLOW
-            border_desc.function_constants[1] = {1, true};  // HAS_BORDER
-            if (auto e = create_default_pipeline(border_desc, "rounded_sprite_border_pipeline", rounded_sprite_border_pipeline); !e) {
-                return e;
-            }
-        }
-
-        // ─── Sprite-based variant pipelines (same vertex format, custom fragment)
-        // Sprite outline pipeline
-        {
-            PipelineDesc pd           = desc;
-            pd.vertex_shader          = shader::sprite_vertex();
-            pd.fragment_shader        = shader::sprite_outline_fragment();
-            pd.descriptor_count       = 3;
-            pd.descriptor_bindings[2] = {2, DescriptorType::UniformBuffer, 2, 1};
-            if (auto e = create_default_pipeline(pd, "sprite_outline_pipeline", sprite_outline_pipeline); !e) {
-                return e;
-            }
-        }
-
-        // Clip rect pipeline
-        {
-            PipelineDesc pd           = desc;
-            pd.vertex_shader          = shader::sprite_vertex();
-            pd.fragment_shader        = shader::clip_rect_fragment();
-            pd.descriptor_count       = 3;
-            pd.descriptor_bindings[2] = {2, DescriptorType::UniformBuffer, 2, 1};
-            if (auto e = create_default_pipeline(pd, "clip_rect_pipeline", clip_rect_pipeline); !e) {
-                return e;
-            }
-        }
-
-        // Dissolve pipeline
-        {
-            PipelineDesc pd           = desc;
-            pd.vertex_shader          = shader::sprite_vertex();
-            pd.fragment_shader        = shader::dissolve_fragment();
-            pd.descriptor_count       = 3;
-            pd.descriptor_bindings[2] = {2, DescriptorType::UniformBuffer, 2, 1};
-            if (auto e = create_default_pipeline(pd, "dissolve_pipeline", dissolve_pipeline); !e) {
-                return e;
-            }
-        }
-
-        // Grayscale pipeline
-        {
-            PipelineDesc pd           = desc;
-            pd.vertex_shader          = shader::sprite_vertex();
-            pd.fragment_shader        = shader::grayscale_fragment();
-            pd.descriptor_count       = 3;
-            pd.descriptor_bindings[2] = {2, DescriptorType::UniformBuffer, 2, 1};
-            if (auto e = create_default_pipeline(pd, "grayscale_pipeline", grayscale_pipeline); !e) {
-                return e;
-            }
-        }
-
         // ─── Lab-port pipelines (sprite vertex + custom fragment) ────
         // Second texture (normal map) uses descriptor binding 1, bound by
         // the host at logical slot 2 (Metal quirk: index 1 aliases slot 0).
@@ -1781,7 +1718,7 @@ struct Renderer {
             pd.vertex_shader          = shader::sprite_vertex();
             pd.fragment_shader        = shader::normal_derive_fragment();
             pd.descriptor_count       = 3;
-            pd.descriptor_bindings[2] = {2, DescriptorType::UniformBuffer, 2, 1};
+            pd.descriptor_bindings[2] = {bind::params, DescriptorType::UniformBuffer, 2, 1};
             if (auto e = create_default_pipeline(pd, "normal_derive_pipeline", normal_derive_pipeline); !e) {
                 return e;
             }
@@ -1791,7 +1728,19 @@ struct Renderer {
             pd.vertex_shader          = shader::sprite_vertex();
             pd.fragment_shader        = shader::normal_map_fragment();
             pd.descriptor_count       = 4;
-            pd.descriptor_bindings[2] = {2, DescriptorType::UniformBuffer, 2, 1};
+            pd.descriptor_bindings[2] = {bind::params, DescriptorType::UniformBuffer, 2, 1};
+            // NOT bind::camera: this declares binding 1 a SECOND time, as a
+            // fragment sampler, on the assumption that binding 1 is the camera
+            // for the vertex stage and the normal map for the fragment stage.
+            // Vulkan allows that split only as one entry with merged stage
+            // flags; the backend hands this array to
+            // vkCreateDescriptorSetLayout verbatim, so what actually reaches
+            // the driver is binding 1 declared twice with different types.
+            // flush_descriptors keeps the first (the UBO) and drops the sampler
+            // write, so on Vulkan this shader samples an unwritten descriptor.
+            // Metal has no descriptor sets and is unaffected. Fixing it means
+            // moving the normal map to its own binding number in the shader
+            // (GLSL + MSL) — a shader change, not a layout one.
             pd.descriptor_bindings[3] = {1, DescriptorType::CombinedImageSampler, 2, 1};
             if (auto e = create_default_pipeline(pd, "normal_map_pipeline", normal_map_pipeline); !e) {
                 return e;
@@ -1802,7 +1751,7 @@ struct Renderer {
             pd.vertex_shader          = shader::sprite_vertex();
             pd.fragment_shader        = shader::cartoon_fragment();
             pd.descriptor_count       = 3;
-            pd.descriptor_bindings[2] = {2, DescriptorType::UniformBuffer, 2, 1};
+            pd.descriptor_bindings[2] = {bind::params, DescriptorType::UniformBuffer, 2, 1};
             if (auto e = create_default_pipeline(pd, "cartoon_pipeline", cartoon_pipeline); !e) {
                 return e;
             }
@@ -1812,7 +1761,19 @@ struct Renderer {
             pd.vertex_shader          = shader::sprite_vertex();
             pd.fragment_shader        = shader::plastic_fragment();
             pd.descriptor_count       = 4;
-            pd.descriptor_bindings[2] = {2, DescriptorType::UniformBuffer, 2, 1};
+            pd.descriptor_bindings[2] = {bind::params, DescriptorType::UniformBuffer, 2, 1};
+            // NOT bind::camera: this declares binding 1 a SECOND time, as a
+            // fragment sampler, on the assumption that binding 1 is the camera
+            // for the vertex stage and the normal map for the fragment stage.
+            // Vulkan allows that split only as one entry with merged stage
+            // flags; the backend hands this array to
+            // vkCreateDescriptorSetLayout verbatim, so what actually reaches
+            // the driver is binding 1 declared twice with different types.
+            // flush_descriptors keeps the first (the UBO) and drops the sampler
+            // write, so on Vulkan this shader samples an unwritten descriptor.
+            // Metal has no descriptor sets and is unaffected. Fixing it means
+            // moving the normal map to its own binding number in the shader
+            // (GLSL + MSL) — a shader change, not a layout one.
             pd.descriptor_bindings[3] = {1, DescriptorType::CombinedImageSampler, 2, 1};
             if (auto e = create_default_pipeline(pd, "plastic_pipeline", plastic_pipeline); !e) {
                 return e;
@@ -1823,7 +1784,7 @@ struct Renderer {
             pd.vertex_shader          = shader::sprite_vertex();
             pd.fragment_shader        = shader::glow_pulse_fragment();
             pd.descriptor_count       = 3;
-            pd.descriptor_bindings[2] = {2, DescriptorType::UniformBuffer, 2, 1};
+            pd.descriptor_bindings[2] = {bind::params, DescriptorType::UniformBuffer, 2, 1};
             if (auto e = create_default_pipeline(pd, "glow_pulse_pipeline", glow_pulse_pipeline); !e) {
                 return e;
             }
@@ -1833,7 +1794,7 @@ struct Renderer {
             pd.vertex_shader          = shader::sprite_vertex();
             pd.fragment_shader        = shader::gold_border_fragment();
             pd.descriptor_count       = 3;
-            pd.descriptor_bindings[2] = {2, DescriptorType::UniformBuffer, 2, 1};
+            pd.descriptor_bindings[2] = {bind::params, DescriptorType::UniformBuffer, 2, 1};
             if (auto e = create_default_pipeline(pd, "gold_border_pipeline", gold_border_pipeline); !e) {
                 return e;
             }
@@ -1843,7 +1804,7 @@ struct Renderer {
             pd.vertex_shader          = shader::sprite_vertex();
             pd.fragment_shader        = shader::gold_stay_fragment();
             pd.descriptor_count       = 3;
-            pd.descriptor_bindings[2] = {2, DescriptorType::UniformBuffer, 2, 1};
+            pd.descriptor_bindings[2] = {bind::params, DescriptorType::UniformBuffer, 2, 1};
             if (auto e = create_default_pipeline(pd, "gold_stay_pipeline", gold_stay_pipeline); !e) {
                 return e;
             }
@@ -1860,48 +1821,12 @@ struct Renderer {
             }
         }
 
-        // ─── Post-process pipelines (screen_quad vertex, no vertex attributes)
-        {
-            PipelineDesc ppd{};
-            ppd.prim_type              = PrimitiveType::Triangle;
-            ppd.cull_mode              = CullMode::None;
-            ppd.src_blend              = BlendFactor::One;
-            ppd.dst_blend              = BlendFactor::Zero;
-            ppd.blend_op               = BlendOp::Add;
-            ppd.color_count            = 1;
-            ppd.color_formats[0]       = PixelFormat::B8G8R8A8_SRGB;
-            ppd.depth_format           = static_cast<PixelFormat>(0);
-            ppd.depth_test             = false;
-            ppd.depth_write            = false;
-            ppd.vertex_attr_count      = 0;
-            ppd.descriptor_count       = 2;
-            ppd.descriptor_bindings[0] = {0, DescriptorType::CombinedImageSampler, 2, 1};
-            ppd.descriptor_bindings[1] = {2, DescriptorType::UniformBuffer, 2, 1};
-
-            ppd.vertex_shader          = shader::screen_quad_vertex();
-            ppd.fragment_shader        = shader::blur_fragment();
-            if (auto e = create_default_pipeline(ppd, "blur_pipeline", blur_pipeline); !e) {
-                return e;
-            }
-
-            ppd.fragment_shader = shader::color_grade_fragment();
-            if (auto e = create_default_pipeline(ppd, "color_grade_pipeline", color_grade_pipeline); !e) {
-                return e;
-            }
-        }
-
         // Build built-in materials
         materials[static_cast<u8>(e_material_type::SPRITEALPHA)]    = {sprite_pipeline, white_tex, default_sampler};
         materials[static_cast<u8>(e_material_type::SPRITEADDITIVE)] = {sprite_additive_pipeline, white_tex, default_sampler};
-        materials[static_cast<u8>(e_material_type::SPRITEMULTIPLY)] = {sprite_multiply_pipeline, white_tex, default_sampler};
-        materials[static_cast<u8>(e_material_type::SPRITEOPAQUE)]   = {sprite_opaque_pipeline, white_tex, default_sampler};
         materials[static_cast<u8>(e_material_type::SDF)]            = {sdf_pipeline, font_tex, font_sampler};
         materials[static_cast<u8>(e_material_type::PARTICLE)]       = {particle_pipeline, white_tex, default_sampler};
         materials[static_cast<u8>(e_material_type::ROUNDEDSPRITE)]  = {rounded_sprite_pipeline, white_tex, default_sampler};
-        materials[static_cast<u8>(e_material_type::SPRITEOUTLINE)]  = {sprite_outline_pipeline, white_tex, default_sampler};
-        materials[static_cast<u8>(e_material_type::CLIPRECT)]       = {clip_rect_pipeline, white_tex, default_sampler};
-        materials[static_cast<u8>(e_material_type::DISSOLVE)]       = {dissolve_pipeline, white_tex, default_sampler};
-        materials[static_cast<u8>(e_material_type::GRAYSCALE)]      = {grayscale_pipeline, white_tex, default_sampler};
         materials[static_cast<u8>(e_material_type::NORMALDERIVE)]   = {normal_derive_pipeline, white_tex, default_sampler};
         materials[static_cast<u8>(e_material_type::NORMALMAP)]      = {normal_map_pipeline, white_tex, default_sampler};
         materials[static_cast<u8>(e_material_type::CARTOON)]        = {cartoon_pipeline, white_tex, default_sampler};
@@ -2003,6 +1928,13 @@ struct Renderer {
         }
 
         u32 max_glyphs = len > TEXT_MAX_GLYPH ? TEXT_MAX_GLYPH : len;
+        // Scoped staging, same contract as flush_sprites_impl: both update_buffer
+        // calls below copy out of the arena, so the arena copy is dead the moment
+        // the draw is recorded. Without this the arena only ever grew within a
+        // frame (~108 bytes per glyph per draw_text), and a text-heavy page could
+        // exhaust temp_storage and start silently dropping strings — including
+        // the ones that would report the overflow.
+        auto arena_mark = temp_arena.marker();
         auto    *verts      = temp_arena.alloc_array<SpriteVertex>(max_glyphs * 4);
         if (!verts) {
             MM_LOG("problem at allocate verts");
@@ -2010,6 +1942,7 @@ struct Renderer {
         }
         auto *indices = temp_arena.alloc_array<u16>(max_glyphs * 6);
         if (!indices) {
+            temp_arena.rewind(arena_mark);
             MM_LOG("problem at allocate indices");
             return;
         }
@@ -2169,6 +2102,7 @@ struct Renderer {
         }
 
         if (vert_count == 0) {
+            temp_arena.rewind(arena_mark);
             return;
         }
 
@@ -2179,6 +2113,7 @@ struct Renderer {
             // not the longest string, and not deterministically the same ones.
             // text_dropped_calls is how a host finds out (see its declaration).
             text_dropped_calls++;
+            temp_arena.rewind(arena_mark);
             return;
         }
 
@@ -2189,11 +2124,12 @@ struct Renderer {
 
         (void)backend->update_buffer(text_vb, verts, vb_byte_offset, vert_count * sizeof(SpriteVertex));
         (void)backend->update_buffer(text_ib, indices, ib_byte_offset, idx_count * sizeof(u16));
+        temp_arena.rewind(arena_mark);
 
         SortKey key{text_layer, 0, 0, 1.0f};
         graph.bind_pipeline(sdf_pipeline, key);
         graph.bind_vertex_buffer(text_vb, 0, 0, sizeof(SpriteVertex), key);
-        graph.bind_uniform_buffer(camera_ubo, 0, key); // Logical Slot 0: UBO
+        graph.bind_uniform_buffer(camera_ubo, 0, key); // Logical slot 0 -> binding 1 ([[buffer(1)]])
         graph.bind_index_buffer(text_ib, IndexType::Uint16, 0, key);
         graph.bind_fragment_texture(font_tex, 0, key);     // Logical Slot 0: Texture
         graph.bind_fragment_sampler(font_sampler, 0, key); // Logical Slot 0: Sampler

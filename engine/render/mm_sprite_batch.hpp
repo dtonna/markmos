@@ -21,8 +21,11 @@
 // Design:
 //   - MAX_SPRITES = 16384 (matches 10k target with headroom)
 //   - Sprites grouped by texture (atlas) and shader
-//   - Vertex format: position(2×f16) + uv(2×f16) + color(4×u8) = 12 bytes/vert
-//   - Auto-flush on texture change or batch full
+//   - Vertex format: SpriteVertex, 24 bytes (see the static_assert below — this
+//     line used to claim "position(2x f16) + uv(2x f16) + color(4x u8) = 12
+//     bytes/vert", which was never true and which docs/07 then repeated)
+//   - NO auto-flush. The host decides when to flush; overflow past
+//     MAX_SPRITES bumps `dropped` rather than flushing implicitly.
 
 static constexpr u16 MAX_SPRITES    = 16384;
 static constexpr u16 VERTS_PER_QUAD = 6; // two triangles

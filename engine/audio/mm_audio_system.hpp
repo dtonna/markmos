@@ -59,12 +59,23 @@ struct SfxPool {
     // Stop all sounds
     void        stop_all() noexcept;
 
+    // ─── Suspended (app in the background) ────────────────────────────
+    // A backgrounded app that keeps making noise is a bug the player hears
+    // with the phone in a pocket. pause() cuts what is playing right now;
+    // while suspended every play() is refused rather than queued, so a sound
+    // queued behind the pause does not arrive seconds late on resume.
+    void pause() noexcept;
+    void resume() noexcept;
+    bool is_paused() const noexcept { return paused; }
+
     // Set master volume [0, 1]
     void        set_master_volume(f32 vol) noexcept;
 
   private:
     // Find lowest-priority active voice for replacement
     u8 find_lowest_priority() noexcept;
+
+    bool paused = false;
 };
 
 struct MusicLayer {
@@ -77,6 +88,7 @@ struct MusicLayer {
     u8    active_track; // 0 or 1
     u8    crossfading;
     bool       track_loaded[2];
+    bool       paused = false;
 
     ma_engine *engine;
 
@@ -87,6 +99,18 @@ struct MusicLayer {
     void       stop(f32 fade_duration = 0.5f) noexcept;
     void       update(f32 dt) noexcept;
     void       set_volume(f32 vol) noexcept;
+
+    // resume() restarts the track pause() stopped. It does not need the path:
+    // pause() only stops the sound, so the decoded buffer is still resident and
+    // the restart is ma_sound_start rather than a decode. What it will NOT do is
+    // restart a track that had been stopped on purpose — stop() leaves
+    // active_track on the empty slot, and resume() reads that as "nothing to
+    // play". An app that wants music after a resume still has to call play();
+    // what it no longer has to do is un-stick a layer that was interrupted.
+    void       pause() noexcept;
+    void       resume() noexcept;
+    bool       is_paused() const noexcept { return paused; }
+
     bool       is_playing() const noexcept;
 };
 
@@ -95,12 +119,34 @@ struct AudioSystem {
     SfxPool    sfx;
     MusicLayer music;
 
+    // Idempotent: a second call while already initialised returns true and
+    // allocates nothing (a second ma_engine_init would leak the first engine).
     bool       init() noexcept;
     void       shutdown() noexcept;
     void       update(f32 dt) noexcept;
+
+    bool       is_initialized() const noexcept { return engine != nullptr; }
+
+    // Suspends both layers. The host calls this on the platform's background
+    // event; nothing below has to know whether a pause is a lifecycle pause or
+    // a settings mute.
+    void       pause() noexcept;
+    void       resume() noexcept;
+    bool       is_paused() const noexcept { return sfx.is_paused(); }
 
   private:
     ma_engine *engine = nullptr;
 };
 
 extern AudioSystem g_audio_system;
+
+// ── ENGINE_AUDIO=OFF ─────────────────────────────────────────────
+// Compiled against mm_audio_system_stub.cpp instead of the real backend, so the
+// 1.1 MB miniaudio translation unit is not linked in. The API above is
+// unchanged and every call becomes a no-op that returns false / 0.
+//
+// Callers compile either way, which is deliberate: a game that plays sound must
+// be able to say so in one CMake line, not in every call site. The cost is that
+// forgetting the flag is invisible until someone listens for a sound that is not
+// there — so the flag belongs next to the other app's engine features in the
+// ROOT CMakeLists, and a game that registers sfx should say why it is off.

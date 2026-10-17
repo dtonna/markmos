@@ -558,6 +558,14 @@ struct MetalBackend {
             return make_unexpected(RHIError::InvalidHandle);
         }
 
+        // `index` is the caller's LOGICAL UBO slot, not the shader's physical
+        // buffer index. Physical 0 is always the texture, so both backends
+        // shift by +1 on the way in (VulkanBackend::bind_uniform_buffer does
+        // the same into current_ubos[]). Logical 0 -> [[buffer(1)]] (CameraUBO),
+        // logical 1 -> [[buffer(2)]] (effect params). Handing it a `bind::`
+        // constant from mm_renderer.hpp double-shifts and leaves [[buffer(1)]]
+        // unwritten — the vertex shader then reads a zeroed view_proj and
+        // every vertex collapses to the origin.
         u32 physical_idx = index + 1;
         if (physical_idx >= 8) {
             return make_unexpected(RHIError::InvalidHandle);

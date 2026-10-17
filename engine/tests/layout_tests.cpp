@@ -22,7 +22,7 @@ int main() {
     // value-initialises (pool and count included), which is what a fresh object
     // gave, so each group still starts from a clean Manager.
     ui::Manager m;
-    // ...and ONE Renderer, which matters far more: sizeof(Renderer) is 1.03 MB
+    // ...and ONE Renderer, which matters far more: sizeof(Renderer) is ~2.01 MB
     // (the render graph uses fixed-size arrays, not the heap), so seven
     // per-group locals gave main() a 7.4 MB frame on top of the Managers.
     Renderer r;
@@ -651,6 +651,136 @@ int main() {
         m.measure_dirty = false;
         m.layout(r);
         assert(Near(m.pool[kid].frame.x, 0.0f) && Near(m.pool[kid].frame.y, 0.0f));
+    }
+
+    // ─── style pool: register_style never overruns the array ───────
+    // The pool has 64 fixed slots and clear() is the only thing that frees them,
+    // so a host that registers on every rebuild reaches the end silently - the
+    // old `assert` is compiled out by default here, and styles[64] is a write
+    // into whatever Manager member follows. Registering must therefore stop at
+    // the last slot and say so, not wrap.
+    {
+        m = ui::Manager{};
+        m.init();
+        const u16 after_init = m.style_count; // the default style is slot 0
+
+        // Every registration gets its OWN slot even for an identical value.
+        // This is not an implementation detail: mm_07 registers a style and then
+        // patches it through the returned id, so sharing a slot between two
+        // registrations hands the patch to every other widget using that value.
+        ui::WidgetStyle rounded{};
+        rounded.corner_r = 0.25f;
+        rounded.shape    = ui::shape_type::ROUNDED_RECT;
+        const u8 a       = m.register_style(rounded);
+        assert(a == after_init);
+        assert(m.register_style(rounded) == a + 1); // distinct slot, same value
+        assert(m.style_count == after_init + 2);
+
+        ui::WidgetStyle other = rounded;
+        other.corner_r        = 0.30f;
+        assert(m.register_style(other) == a + 2);
+        assert(m.style_count == after_init + 3);
+
+        // Fill the rest with genuinely distinct styles, then one more. It must
+        // NOT increment past MAX_STYLES.
+        while (m.style_count < ui::Manager::MAX_STYLES) {
+            ui::WidgetStyle fill{};
+            fill.corner_r = 0.001f * static_cast<f32>(m.style_count);
+            m.register_style(fill);
+        }
+        assert(m.style_count == ui::Manager::MAX_STYLES);
+        const u8 overflow = m.register_style(ui::WidgetStyle{});
+        assert(overflow == ui::Manager::MAX_STYLES - 1); // degrade, don't wrap
+        assert(m.style_count == ui::Manager::MAX_STYLES); // and do not grow
+
+        // clear() resets the pool with the widget pool.
+        m.clear();
+        assert(m.style_count == 1);
+    }
+
+    // ─── render scope: the modal subtree is drawn LAST ──────────────
+    // A single pass cannot put a dialog over the screen it covers: every fill is
+    // submitted in Pass 1 and every string in Pass 3, both at the same sort key,
+    // and submit() stable-sorts by key alone - so all text lands after all fills
+    // and a panel can never cover a label from the same Manager. freecell's
+    // settings dialog and mm_07's D2 modal both showed it: the scene's labels
+    // drew straight through the dialog, at full brightness, over an OPAQUE panel.
+    //
+    // So render() runs the passes twice. What is unit-testable here is the
+    // DECISION (which widget belongs to which scope, and at which key); the draw
+    // ORDER itself needs a backend and is covered by screenshot on both apps.
+    {
+        m = ui::Manager{};
+        m.init();
+        const u16 scene_btn = m.button(10.0f, 10.0f, 100.0f, 30.0f, "scene", 0xFF3A3A3A, 0xFFFFFFFF, NoopBtn);
+        const u16 dlg = m.panel(200.0f, 100.0f, 300.0f, 200.0f, 0xFF222222);
+        const u16 dlg_btn = m.button(16.0f, 16.0f, 120.0f, 30.0f, "ok", 0xFF3A3A3A, 0xFFFFFFFF, NoopBtn, dlg);
+        (void)scene_btn;
+
+        // No modal: the whole pool is in scope, at the default key. This is what
+        // makes every frame without a modal byte-identical to before.
+        assert(!m.is_modal());
+        assert(m.in_render_scope(scene_btn) && m.in_render_scope(dlg) && m.in_render_scope(dlg_btn));
+        assert(m.scope_key(r).layer() == 0);
+
+        m.begin_modal(dlg, nullptr, nullptr);
+        assert(m.is_modal() && m.modal_id == dlg);
+
+        // Normal scope = everything EXCEPT the dialog subtree.
+        m.render_scope = UINT16_MAX;
+        assert(m.in_render_scope(scene_btn));
+        assert(!m.in_render_scope(dlg) && !m.in_render_scope(dlg_btn));
+        assert(m.scope_key(r).layer() == 0);
+
+        // Subtree scope = ONLY the dialog, keyed at the text key so it sorts at or
+        // above the scene's strings whatever text_layer the host chose.
+        //
+        // text_layer is RAISED first, and that is load-bearing rather than
+        // incidental: at the default 0 the text key IS the sprite key, so the
+        // assertion passed against a scope_key() that returned the default - the
+        // whole point of this is the case where they differ. (Found by a revert
+        // check: neutering scope_key() left the test green.)
+        m.render_scope = dlg;
+        assert(!m.in_render_scope(scene_btn));
+        assert(m.in_render_scope(dlg) && m.in_render_scope(dlg_btn));
+        const u8 saved_layer = r.text_layer;
+        r.text_layer        = 1;
+        assert(m.scope_key(r).layer() == 1);
+        assert(m.scope_key(r).key == ui::text_key(r).key);
+        // ...and the scene scope is UNAFFECTED by text_layer, or a host that
+        // raises it would move every background fill in the frame.
+        m.render_scope = UINT16_MAX;
+        assert(m.scope_key(r).layer() == 0);
+        r.text_layer = saved_layer;
+        m.render_scope = dlg;
+
+        // is_in_subtree is plain ancestry and answers for any root - unlike
+        // in_modal(), which says "everything is inside" when no modal is active.
+        assert(m.is_in_subtree(dlg_btn, dlg));
+        assert(m.is_in_subtree(dlg, dlg));
+        assert(!m.is_in_subtree(scene_btn, dlg));
+        assert(m.is_in_subtree(scene_btn, UINT16_MAX)); // sentinel = no filter
+
+        m.render_scope = UINT16_MAX;
+    }
+
+    // ─── clear() ends the modal scope ───────────────────────────────
+    // The widgets a modal points at are exactly what clear() throws away, and ids
+    // restart at 0 - so a stale modal_id would scope input to, and defer the
+    // rendering of, an unrelated widget that inherited the slot.
+    {
+        m = ui::Manager{};
+        m.init();
+        const u16 dlg = m.panel(200.0f, 100.0f, 300.0f, 200.0f, 0xFF222222);
+        m.begin_modal(dlg, nullptr, nullptr);
+        assert(m.is_modal());
+        m.clear();
+        assert(!m.is_modal());
+        assert(m.modal_id == UINT16_MAX && m.modal_dismiss == nullptr && m.modal_user == nullptr);
+        assert(m.render_scope == UINT16_MAX);
+        // With no modal, every live widget is back in the normal scope.
+        const u16 b = m.button(0.0f, 0.0f, 10.0f, 10.0f, "x", 0xFF3A3A3A, 0xFFFFFFFF, NoopBtn);
+        assert(b != UINT16_MAX && m.in_render_scope(b));
     }
 
     return 0;

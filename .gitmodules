@@ -1,0 +1,15 @@
+[submodule "engine/thirdparty/miniaudio"]
+	path = engine/thirdparty/miniaudio
+	url = https://github.com/mackron/miniaudio
+[submodule "engine/thirdparty/rpmalloc"]
+	path = engine/thirdparty/rpmalloc
+	url = https://github.com/mjansson/rpmalloc
+[submodule "engine/thirdparty/simdjson"]
+	path = engine/thirdparty/simdjson
+	url = https://github.com/simdjson/simdjson
+[submodule "engine/thirdparty/VMA"]
+	path = engine/thirdparty/VMA
+	url = https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator
+[submodule "engine/thirdparty/unordered_dense"]
+	path = engine/thirdparty/unordered_dense
+	url = https://github.com/martinus/unordered_dense

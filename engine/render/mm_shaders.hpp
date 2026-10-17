@@ -487,64 +487,10 @@ fragment float4 ring_fragment_main(
 static constexpr size_t ring_fragment_msl_size = sizeof(ring_fragment_msl);
 
 // ─── Screen Quad Vertex (shared base for all post-process) ────────
-static constexpr char   screen_quad_vertex_msl[]         = R"msl(
-#include <metal_stdlib>
-using namespace metal;
 
-struct VSOutput {
-    float4 position [[position]];
-    float2 uv;
-};
-
-// Fullscreen triangle — no VBO needed, call draw(3, 1, 0, 0)
-vertex VSOutput screen_quad_vertex_main(uint vid [[vertex_id]]) {
-    VSOutput out;
-    float2 uv = float2((vid << 1) & 2, vid & 2);
-    out.position = float4(uv * 2.0 - 1.0, 0.0, 1.0);
-    out.uv       = float2(uv.x, 1.0 - uv.y);  // flip Y for Metal NDC
-    return out;
-}
-)msl";
-
-static constexpr size_t screen_quad_vertex_msl_size      = sizeof(screen_quad_vertex_msl);
 
 // ─── Blur Fragment (Gaussian two-pass) ───────────────────────────
-static constexpr char   blur_fragment_msl[]              = R"msl(
-#include <metal_stdlib>
-using namespace metal;
 
-struct VSOutput {
-    float4 position [[position]];
-    float2 uv;
-};
-
-struct BlurParams {
-    float direction_x;   // 1.0 = horizontal, 0.0 = vertical
-    float direction_y;   // 0.0 = horizontal, 1.0 = vertical
-    float radius;        // blur strength in pixels
-    float weights[7];    // Gaussian weights (7 taps = 15 samples with center)
-    float _pad[2];
-};
-
-fragment float4 blur_fragment_main(
-    VSOutput          input  [[stage_in]],
-    texture2d<float>  tex    [[texture(0)]],
-    sampler           samp   [[sampler(0)]],
-    constant BlurParams& p   [[buffer(2)]]
-) {
-    float2 texel  = float2(p.direction_x, p.direction_y) * p.radius / float2(tex.get_width(), tex.get_height());
-    float4 result = tex.sample(samp, input.uv) * p.weights[0];
-
-    for (int i = 1; i < 7; ++i) {
-        float2 offset = texel * float(i);
-        result += tex.sample(samp, input.uv + offset) * p.weights[i];
-        result += tex.sample(samp, input.uv - offset) * p.weights[i];
-    }
-    return result;
-}
-)msl";
-
-static constexpr size_t blur_fragment_msl_size           = sizeof(blur_fragment_msl);
 
 // ─── Color Grade Fragment ─────────────────────────────────────────
 static constexpr char   color_grade_fragment_msl[]       = R"msl(
@@ -634,37 +580,7 @@ fragment float4 sprite_outline_fragment_main(
 static constexpr size_t sprite_outline_fragment_msl_size = sizeof(sprite_outline_fragment_msl);
 
 // ─── Clip Rect Fragment ───────────────────────────────────────────
-static constexpr char   clip_rect_fragment_msl[]         = R"msl(
-#include <metal_stdlib>
-using namespace metal;
 
-struct VSOutput {
-    float4 position [[position]];
-    float2 uv;
-    float4 color;
-};
-
-struct ClipRect {
-    float2 origin;  // screen space x, y
-    float2 size;    // w, h
-};
-
-fragment float4 clip_rect_fragment_main(
-    VSOutput          input [[stage_in]],
-    texture2d<float>  tex   [[texture(0)]],
-    sampler           samp  [[sampler(0)]],
-    constant ClipRect& r    [[buffer(2)]]
-) {
-    float2 pos = input.position.xy;
-    if (pos.x < r.origin.x || pos.x > r.origin.x + r.size.x ||
-        pos.y < r.origin.y || pos.y > r.origin.y + r.size.y)
-        discard_fragment();
-
-    return tex.sample(samp, input.uv) * input.color;
-}
-)msl";
-
-static constexpr size_t clip_rect_fragment_msl_size      = sizeof(clip_rect_fragment_msl);
 
 // ─── Dissolve Fragment ────────────────────────────────────────────
 static constexpr char   dissolve_fragment_msl[]          = R"msl(
@@ -983,6 +899,10 @@ static constexpr size_t plastic_fragment_msl_size = sizeof(plastic_fragment_msl)
 // ─── Glow Pulse Fragment (expanding + fading ring) ───────────────────
 // Engine port of lab_glow. Host draws a quad k× larger than the card so
 // the ring has margin to travel in (see misc.z).
+//
+// Phase has TWO sources: misc.w < 0 is the original perpetual loop off
+// render_time (what the lab demos want); misc.w >= 0 is the phase 0..1 handed
+// over by the host. GLSL twin: engine/shaders/glsl/glow_pulse.frag
 static constexpr char   glow_pulse_fragment_msl[]    = R"msl(
 #include <metal_stdlib>
 using namespace metal;
@@ -996,7 +916,8 @@ struct VSOutput {
 struct GlowParams {
     float4 timing; // semantics per effect (see below)
     float4 glow;   // rgba glow color
-    float4 misc;   // x = card aspect (w/h), y = intensity, z = quad scale k, w = spare
+    float4 misc;   // x = card aspect (w/h), y = intensity, z = quad scale k,
+                   // w = phase override (>= 0) or "loop off time" (< 0)
 };
 
 float sd_round_box(float2 p, float2 b, float r) {
@@ -1026,13 +947,28 @@ fragment float4 glow_pulse_fragment_main(
     float body = 1.0 - smoothstep(-aa, aa, dist);
 
     float dur = max(p.timing.y, 1e-3);
-    float phase = fract(p.timing.x / dur);
+    // Host-driven phase when misc.w >= 0, else the perpetual clock loop.
+    //
+    // Why an OFFSET of render_time would not work: phase would be
+    // fract((render_time - since)/dur), which is 0 only when render_time ==
+    // since - but render_time counts from app start and `since` from the event,
+    // so those two never meet. The event has to hand over the phase.
+    float phase = (p.misc.w >= 0.0) ? clamp(p.misc.w, 0.0, 1.0) : fract(p.timing.x / dur);
     float center = phase * p.timing.z;
     float ring = 1.0 - smoothstep(0.0, max(p.timing.w, 1e-4), abs(dist - center));
     float outside = smoothstep(-aa, aa, dist); // free (outer) glow only
     float a = ring * outside * (1.0 - phase) * p.glow.a * p.misc.y;
 
-    float3 col = base.rgb * body + p.glow.rgb * a;
+    // The blend is SrcAlpha / OneMinusSrcAlpha — NOT premultiplied — so this
+    // fragment must return an unpremultiplied colour and let the blend apply `a`.
+    // Multiplying the glow colour by `a` here (the obvious line) made the blend
+    // multiply it a SECOND time: out.rgb * out.a = glow.rgb * a * a. A ring at
+    // half strength contributed a quarter of the glow and faded quadratically,
+    // which is why it was barely visible at every setting.
+    //
+    // (1.0 - body) keeps the glow OUT of the card interior, so the art under it
+    // blends normally instead of being tinted by the glow colour.
+    float3 col = base.rgb * body + p.glow.rgb * (1.0 - body);
     return float4(col, max(base.a * body, a));
 }
 )msl";

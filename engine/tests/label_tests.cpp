@@ -25,6 +25,22 @@ static void Tap(InputState &in, f32 x, f32 y) noexcept {
     in.action_y    = y;
 }
 
+// ONE Renderer for the whole file, at file scope.
+//
+// sizeof(Renderer) is ~2.01 MB. Two of these as per-group locals inside main()
+// is ~4 MB in one frame, and AGENTS.md records a sibling test — layout_tests,
+// with SEVEN of them — dying in ___chkstk_darwin's prologue before main's
+// first statement. That surfaced as a segfault, was diagnosed twice as "a test
+// bug", and was worked around as one twice. This file was named as the next
+// candidate to hoist, and it is hoisted.
+//
+// File scope rather than a function-local static so the storage is zeroed before
+// main() runs and never touches the stack at all. Shared rather than two copies
+// because every group below uses it for exactly one thing — m.measure(r), which
+// only READS the font. Nothing here writes to it, so there is no state to carry
+// between groups and reuse cannot make one group depend on another's leftovers.
+static Renderer s_renderer;
+
 int main() {
     // ─── Factory: AUTO_W/AUTO_H, no frame, no fill, no callbacks ───
     {
@@ -56,7 +72,7 @@ int main() {
     // ─── A label is skipped by pick(), so it can never steal a tap ───
     // Testing "a tap on a label does nothing" directly is IMPOSSIBLE headless:
     // a label's frame is 0x0 until measure() runs, and measure() needs a
-    // Renderer (1.03 MB, and no backend here). A test that taps a zero-sized
+    // Renderer (~2.01 MB, and no backend here). A test that taps a zero-sized
     // rect proves nothing - it would pass against a label that WAS pickable.
     //
     // So this asserts the rule that makes it true instead: stack a LABEL over a
@@ -187,7 +203,6 @@ int main() {
     {
         ui::Manager m;
         m.init();
-        Renderer    r; // no backend: measure() only reads the font
         const u16 panel = m.panel(0.0f, 0.0f, 200.0f, 200.0f, 0xFF222222);
         const u16 kid   = m.label(4.0f, 4.0f, "", 0xFFFFFFFF, 0.30f, panel);
         assert(kid != panel);
@@ -196,7 +211,7 @@ int main() {
         assert(m.pool[kid].flags & ui::WF_AUTO_W);
         assert(m.is_visible(kid));
 
-        m.measure(r);
+        m.measure(s_renderer);
         assert(!m.measure_dirty);          // the pass ran
         assert(m.pool[kid].frame.w > 0.0f); // visible -> sized: 0 + 40
 
@@ -206,20 +221,20 @@ int main() {
         assert(m.pool[kid].flags & ui::WF_VISIBLE); // own flag still set...
         assert(!m.is_visible(kid));                  // ...but effectively hidden
         m.pool[kid].frame.w = 0.0f;                 // a fresh AUTO size
-        m.measure(r);
+        m.measure(s_renderer);
         // EFFECTIVE visibility gates the frame, so the invisible child stays
         // unsized. Reading only the own flag would size it here.
         assert(m.pool[kid].frame.w == 0.0f);
 
         // Shown again: sized on the next pass, because set_visible re-dirties.
         m.set_visible(panel, true);
-        m.measure(r);
+        m.measure(s_renderer);
         assert(m.pool[kid].frame.w > 0.0f);
     }
 
     // ─── and the METRICS of a hidden widget are still refreshed ───────
     // NOT observable headless: content_w is the advance of a real string, and
-    // measuring one needs a font (measure() itself needs a Renderer - 1.03 MB and
+    // measuring one needs a font (measure() itself needs a Renderer - ~2.01 MB and
     // no backend here). The empty-string fallback covers content_ascent only,
     // and that is written before the visibility gate in BOTH versions, so it
     // cannot tell them apart. This half of the change rests on the reading in
@@ -227,11 +242,10 @@ int main() {
     {
         ui::Manager m;
         m.init();
-        Renderer    r;
         const u16 l = m.label(0.0f, 0.0f, "", 0xFFFFFFFF, 0.30f);
         assert(m.content_ascent[l] == 0);
         m.set_visible(l, false);
-        m.measure(r);
+        m.measure(s_renderer);
         // Documented fallback: an empty string still gets a usable ascent, so a
         // cleared label does not collapse its own box.
         assert(m.content_ascent[l] > 0);
@@ -246,7 +260,7 @@ int main() {
     // hidden across a rebuild comes back with the previous size.
     //
     // The metrics themselves are NOT testable headless (measure_string needs a
-    // font, and measure() needs a Renderer - 1.03 MB and no backend here). What
+    // font, and measure() needs a Renderer - ~2.01 MB and no backend here). What
     // IS testable, and is the whole crux of the fix, is the dirty flag: this is
     // the transition that has to re-arm it.
     {
